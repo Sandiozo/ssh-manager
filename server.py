@@ -12,6 +12,7 @@ app does this), and every request must carry the access token, which clients rea
 import hmac
 import json
 import logging
+import os
 import socket
 import sys
 
@@ -131,7 +132,7 @@ def who(request: Request) -> str:
 @app.get("/api/whoami")
 def whoami(request: Request):
     adapters = wol.own_macs()
-    return {"viewer": who(request), "host": monitor.host_name, "version": __version__,
+    return {"viewer": who(request), "host": monitor.host_name, "computer": os.environ.get("COMPUTERNAME", ""), "version": __version__,
             "mac": adapters[0]["mac"] if adapters else None, "ips": [ip for a in adapters for ip in a["ips"]]}
 
 

@@ -79,7 +79,7 @@ internal sealed partial class Link : IDisposable
             string reason;
             try
             {
-                reason = await (Pc.IsLocal ? RunLocalAsync(ct) : RunTunnelAsync(ct, () => attempt = 0));
+                reason = await (Pc.IsLocal ? RunLocalAsync(ct) : RunTunnelAsync(ct, () => attempt = 0, lookup: attempt % 2 == 0));
             }
             catch (OperationCanceledException) { break; }
             catch (Exception e) { reason = e.Message; }
@@ -126,11 +126,20 @@ internal sealed partial class Link : IDisposable
             var mac = root.TryGetProperty("mac", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : Pc.Mac;
             var ips = root.TryGetProperty("ips", out var i) && i.ValueKind == JsonValueKind.Array
                 ? i.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x != "").ToList() : Pc.Ips;
-            if ((name != "" && name != Pc.PcName) || mac != Pc.Mac || !ips.SequenceEqual(Pc.Ips))
+            // a PC added by its IP address: remember its computer name too, so it is still found when the
+            // router gives it another address, and keep the saved address up to date
+            var computer = root.TryGetProperty("computer", out var cn) && cn.ValueKind == JsonValueKind.String ? cn.GetString() ?? "" : "";
+            var byAddress = IPAddress.TryParse(Pc.Host, out _);
+            var lookupName = byAddress && computer != "" ? computer : Pc.LookupName;
+            var host = byAddress && ips.Count > 0 && !ips.Contains(Pc.Host)
+                ? (Ssh.Resolve(lookupName) is { } now && ips.Contains(now) ? now : ips[0]) : Pc.Host;
+            if ((name != "" && name != Pc.PcName) || mac != Pc.Mac || !ips.SequenceEqual(Pc.Ips) || lookupName != Pc.LookupName || host != Pc.Host)
             {
                 if (name != "") Pc.PcName = name;
                 Pc.Mac = mac;
                 Pc.Ips = ips;
+                Pc.LookupName = lookupName;
+                Pc.Host = host;
                 save();
             }
             return true;
@@ -202,10 +211,12 @@ internal sealed partial class Link : IDisposable
         Process.Start(psi);
     }
 
-    async Task<string> RunTunnelAsync(CancellationToken ct, Action connected)
+    /// <param name="lookup">Look the computer name up (Windows name resolution) instead of using the saved
+    /// address. Attempts alternate, so a stale address or a failed lookup never locks the PC out.</param>
+    async Task<string> RunTunnelAsync(CancellationToken ct, Action connected, bool lookup)
     {
         Port = Ssh.IsPortFree(preferredPort) ? preferredPort : Ssh.FreePort();
-        StartSsh();
+        StartSsh(lookup);
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (true)
         {
@@ -246,7 +257,7 @@ internal sealed partial class Link : IDisposable
         return why;
     }
 
-    void StartSsh()
+    void StartSsh(bool lookup = true)
     {
         KillSsh();
         lock (sshOutput) sshOutput.Clear();
@@ -257,7 +268,7 @@ internal sealed partial class Link : IDisposable
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
         };
-        foreach (var a in Ssh.Options(Pc)) psi.ArgumentList.Add(a);
+        foreach (var a in Ssh.Options(Pc, lookup: lookup)) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                                   "-L", $"{Port}:127.0.0.1:{Pc.RemotePort}", Pc.Target, Ssh.PowerShell(RemoteScript) })
             psi.ArgumentList.Add(a);

@@ -49,10 +49,20 @@ jobs:
             build/SSHManager-Setup.exe
             build/SSHManager-Setup.exe.sha256
 
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          "version=$('${{ github.ref_name }}'.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+          $hash = ((Get-Content build/SSHManager-Setup.exe.sha256 -Raw).Trim() -split '\s+')[0]
+          ./.github/release-notes.ps1 -Version "${{ github.ref_name }}" -Sha256 $hash | Set-Content build/release-notes.md -Encoding utf8
+
       - name: Attach to release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          name: SSH Manager ${{ steps.notes.outputs.version }}
+          body_path: build/release-notes.md
           files: |
             build/SSHManager-Setup.exe
             build/SSHManager-Setup.exe.sha256

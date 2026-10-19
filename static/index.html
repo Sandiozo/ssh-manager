@@ -221,6 +221,7 @@
         <button data-sec="computers">Computers</button>
         <button data-sec="keys">SSH keys</button>
         <button data-sec="actions">Quick actions</button>
+        <button data-sec="ai">AI agents</button>
         <button data-sec="logs">Logs</button>
         <button data-sec="shortcuts">File shortcuts</button>
         <button data-sec="updates">Updates</button>
@@ -288,6 +289,18 @@
           <div class="set-head"><h2>Quick actions</h2><p>Buttons on the Run page. Each one runs a PowerShell script on this PC with administrator rights.</p></div>
           <div id="set-actions"></div>
           <div class="row-actions"><button id="set-add-action">+ Add action</button></div>
+        </div>
+
+        <div class="set-sec" data-sec="ai">
+          <div class="set-head"><h2>AI agents</h2><p>What AI agents (for example Claude Code or Codex through <code>sshmgr mcp</code>) may do on this PC. Applies to agents on any computer, checked by this PC's server.</p></div>
+          <div class="set-group">
+            <div class="set-row"><div class="set-label">Access<small id="ai-access-help"></small></div>
+              <select id="set-ai-access"><option value="full">Full</option><option value="read">Read-only</option><option value="off">Off</option></select></div>
+            <div class="set-row"><div class="set-label">Actions that ask first<small>Quick actions marked "ask first" wait until someone clicks Allow in the SSH Manager app, on this PC or on the agent's computer. Nobody answers within two minutes: not run.</small></div></div>
+            <div class="set-row"><div class="set-label">Active now<small>Agents that used this PC in the last two minutes.</small></div>
+              <div id="ai-agents" class="muted small">none</div></div>
+          </div>
+          <p class="muted small">Agents never change settings, SSH keys or pairing, and the screen settings under General apply to them too. These limits keep a well-behaved agent in bounds; they don't stop a program that runs as you on a connected computer from working around them.</p>
         </div>
 
         <div class="set-sec" data-sec="logs" id="logs-settings">

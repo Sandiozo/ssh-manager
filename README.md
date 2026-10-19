@@ -20,6 +20,7 @@
   <a href="https://github.com/Sandiozo/ssh-manager/releases/latest/download/SSHManager-Setup.exe"><b>⬇ Download for Windows</b></a>
   &nbsp;·&nbsp; <a href="#quick-start">Quick start</a>
   &nbsp;·&nbsp; <a href="#features">Features</a>
+  &nbsp;·&nbsp; <a href="#use-with-ai-agents">AI agents</a>
   &nbsp;·&nbsp; <a href="#security">Security</a>
   &nbsp;·&nbsp; <a href="#faq">FAQ</a>
   &nbsp;·&nbsp; <a href="CHANGELOG.md">Changelog</a>
@@ -128,12 +129,15 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
   last known address), and notifies about lost connections, failed logins, unknown computers and finished
   transfers.
 - **Settings** (⚙ in the top bar): the computers that connect, the SSH keys allowed to log in, quick
-  actions, logs, file shortcuts, screen preview, updates and the app's own options.
+  actions, what AI agents may do, logs, file shortcuts, screen preview, updates and the app's own options.
 - **Automatic updates:** each PC updates itself when a new release is published; downloads are checked
   against their SHA-256.
 - **Plugins:** small Python files that add your own command decoders, activity details or API routes.
 - **Command line:** `sshmgr` lets scripts and AI agents run commands, move files, take screenshots and
   wait for things on your PCs through the app's connections (see [Command line](#command-line)).
+- **AI agents:** `sshmgr mcp` is an MCP server, so Claude Code, Codex and other agents can work on your PCs
+  as tools. Their work is labelled with their name, and each PC decides what they may do (see
+  [Use with AI agents](#use-with-ai-agents)).
 
 ## Command line
 
@@ -153,6 +157,7 @@ sshmgr get <pc> "C:\Logs\app.log" .\               download (a folder comes as a
 sshmgr put <pc> .\build.zip "C:\Deploy\" [--overwrite]
 sshmgr wait <pc> --file "C:\out\done.txt" [--changed-after now] [--timeout <s>]
 sshmgr wait <pc> --process setup [--exited] [--timeout <s>]
+sshmgr mcp                                          an MCP server for AI agents (see below)
 ```
 
 `<pc>` is a PC's name, the name or address it was added with, or its id. `run` and `action` stream the
@@ -162,19 +167,83 @@ output as it comes and exit with the script's exit code; Ctrl+C stops the run on
 it does is in that PC's activity log, like anything else done from the app. Run `sshmgr help` for all
 options.
 
+`--as <name>` (or the `SSHMGR_AGENT` environment variable) marks the calls as an AI agent's, so the PC labels
+them `<name> (<this computer>)` and applies its AI agent settings. Inside Claude Code, `sshmgr` does this by
+itself (`Claude`).
+
+## Use with AI agents
+
+`sshmgr mcp` is an [MCP](https://modelcontextprotocol.io) server: it gives an AI agent on this computer the
+PCs the app is connected to as tools. It needs nothing else (no SSH setup, keys or tokens), only the SSH
+Manager app running on the computer the agent works on.
+
+**Claude Code**
+
+```
+claude mcp add --scope user sshmgr -- sshmgr mcp
+```
+
+**Codex** (`%USERPROFILE%\.codex\config.toml`)
+
+```toml
+[mcp_servers.sshmgr]
+command = "sshmgr"
+args = ["mcp"]
+tool_timeout_sec = 900   # runs can take a while; Codex stops waiting after 60 s by default
+```
+
+**Other MCP clients** (Cursor, VS Code, Claude Desktop, …): add a stdio server with the command `sshmgr` and
+the argument `mcp`, for example `{ "mcpServers": { "sshmgr": { "command": "sshmgr", "args": ["mcp"] } } }`.
+If the client was started before SSH Manager was installed, restart it or use the full path
+`C:\Program Files\SSH Manager\Cli\sshmgr.exe`.
+
+| Tool | What it does |
+|---|---|
+| `list_pcs`, `pc_status` | The PCs, whether they are connected and what agents may do there; one PC's CPU, memory, disks, sessions and failed logins. |
+| `run`, `run_status` | Runs PowerShell (working directory, environment variables, timeout) and returns the output and exit code. Long output keeps its start and end and points to the complete output on the PC. `background: true` returns at once; `run_status` follows the run. |
+| `list_actions`, `run_action` | The PC's quick actions, and running one. |
+| `screenshot`, `list_windows` | A screenshot of an app window or a monitor, returned as an image (PNG). |
+| `list_files`, `download_file`, `upload_file` | Browse folders; get a file (small text and images come back directly, anything else is saved on this computer); put a file or a piece of text on the PC. |
+| `read_log` | The last lines of a configured log or any text file, optionally only the lines containing some text. |
+| `wait_for` | Waits until a file appears or changes, or a program starts or exits. |
+
+**Who did what.** The agent says who it is (from the MCP client's name, e.g. Claude or Codex;
+`sshmgr mcp --as <name>` sets another). The PC records it, so Activity, Live sessions and All PCs show for
+example `Claude (LAPTOP)` instead of only the computer.
+
+**What agents may do** is set on each PC under Settings → **AI agents** and checked by that PC's server:
+
+| Access | Agents can |
+|---|---|
+| **Full** (default) | do everything a person can do from the dashboard |
+| **Read-only** | only look: status, activity, logs, files and downloads, screenshots |
+| **Off** | do nothing |
+
+Whatever the setting, agents can't change settings, SSH keys or pairing, and the screen settings (whole
+screens, the list of apps that can be viewed) apply to them too. A quick action marked **ask first** that an
+agent starts waits until someone clicks **Allow** in an SSH Manager app, on that PC or on the computer the
+agent works from. If nobody answers within two minutes, or someone clicks **Deny**, it doesn't run.
+
+These limits keep an agent that uses SSH Manager as intended within bounds; they are not a security
+boundary. Anything that runs as you on a computer whose app is connected to a PC can use that connection
+without saying it is an agent. Run agents you don't trust under another Windows account, or turn AI access
+off on the PCs they shouldn't touch.
+
 ## Automation API
 
 Scripts and AI agents can use the same API as the dashboard (`sshmgr` above is the easy way to). It is
 only reachable on `127.0.0.1` of each PC, so open an SSH port forward first (`ssh -L 18765:127.0.0.1:8765 <pc>`). Read the access token
 once over SSH with `"C:\Program Files\SSH Manager\Server\SSHManagerServer.exe" --client-info` (the
 `SSHMGR-TOKEN:` line) and send it with every request as the `X-SSHMgr-Token` header; requests that
-change something also need `X-SSHMgr: 1`. Everything done through the API is in the activity log.
+change something also need `X-SSHMgr: 1`. Everything done through the API is in the activity log. An AI
+agent adds `X-SSHMgr-Agent: <name>`: its calls are then labelled with that name and limited by the PC's
+AI access setting (`GET /api/ai` tells the level).
 
 | Call | What it does |
 |---|---|
 | `POST /api/run` `{script, title?, cwd?, env?}` | Runs a PowerShell script (admin, in the signed-in user's session). `cwd` may use environment variables; `env` adds variables for this run; titles over 200 characters are shortened. |
 | `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines are kept here; `skipped` tells how many were left out. |
-| `GET /api/runs/{id}/output` | The complete output as a text file (for the last 50 runs). |
+| `GET /api/runs/{id}/output` | The complete output as a text file (for the last 50 runs); `output_file` in the run's status is where it is kept on the PC. |
 | `POST /api/runs/{id}/stop` | Stops a run. |
 | `GET /api/actions`, `POST /api/actions/{id}/run` | Lists and runs quick actions. |
 | `GET /api/screen/windows` | Open app windows (`id`, `app`, `title`), limited to the allowed apps. |
@@ -219,6 +288,9 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
 - Pairing requests only carry a public key, can only be filed by someone who can already use this PC's
   dashboard, reach only apps connected to this PC, expire after two minutes and change nothing until
   someone clicks **Allow**. Every request and answer is logged on both PCs.
+- AI agents that identify themselves are limited by each PC's AI access setting and can't change settings,
+  keys or pairing; quick actions marked "ask first" need a person's Allow when an agent starts them. See
+  [Use with AI agents](#use-with-ai-agents) for what this does and doesn't protect against.
 - Passwords typed when adding a PC are handed to `ssh` once and never stored.
 - Updates are downloaded from this repository's GitHub releases and checked against their SHA-256.
 
@@ -258,6 +330,7 @@ Most of `config.json` can be edited under **Settings** (⚙):
 | `screen_preview` | allow other PCs to view this PC's screen (default `true`) |
 | `screen_monitors` | allow whole-screen (monitor) previews; `false` allows single app windows only (default `true`) |
 | `screen_apps` | program names whose windows may be listed and viewed, e.g. `["notepad", "Code"]` (default: all) |
+| `ai_access` | what AI agents may do here: `full` (default), `read` (only look) or `off` |
 | `auto_update` | install new releases automatically (default `true`) |
 
 See [`config.example.json`](config.example.json) for a starting point.

@@ -51,5 +51,6 @@
       "path": "%WINDIR%\\Logs\\CBS\\CBS.log"
     }
   ],
-  "screen_preview": true
+  "screen_preview": true,
+  "ai_access": "full"
 }

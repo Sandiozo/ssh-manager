@@ -327,7 +327,8 @@ class Monitor:
             self._parts, self._parts_at = psutil.disk_partitions(), now
         return self._parts
 
-    def status(self) -> dict:
+    def status(self, tunnel_agents: dict[int, list[str]] | None = None) -> dict:
+        """`tunnel_agents`: sshd PID of a port forward -> AI agents that used it recently (see agents.py)."""
         now = datetime.now(timezone.utc)
         with self.lock:
             sockets = self._ssh_sockets()
@@ -353,6 +354,7 @@ class Monitor:
                     "key": self.label_key(conn.get("fp")), "key_type": conn.get("key_type"),
                     "start": conn.get("start"), "pid": conn_pid, "commands": sorted(cmds, key=lambda c: c["start"]),
                     "tunnel": bool(tunnel_pids & tree),
+                    "agents": sorted({a for pid in tree for a in (tunnel_agents or {}).get(pid, [])}),
                 })
             day_ago = now - timedelta(hours=24)
             recent = [c for c in self.conn_list if datetime.fromisoformat(c["start"]) >= day_ago]

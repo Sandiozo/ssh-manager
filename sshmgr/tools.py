@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from . import desktop, logs, wol
+from . import agents as agents_mod, desktop, logs, wol
 from .activity import ActivityLog
 from .runner import Runner
 
@@ -33,7 +33,7 @@ class WakeBody(BaseModel):
     ips: list[str] = []
 
 
-def make_router(config: dict, activity: ActivityLog, runner: Runner, who) -> APIRouter:
+def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents: "agents_mod.Agents") -> APIRouter:
     r = APIRouter(prefix="/api")
     clip = desktop.ClipboardWatch()
     last_screen_view: dict[str, float] = {}
@@ -50,10 +50,37 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who) -> API
         return {"actions": config.get("actions", []), "runs": runner.recent()}
 
     @r.post("/actions/{action_id}/run")
-    def run_action(request: Request, action_id: str):
+    async def run_action(request: Request, action_id: str):
         a = action(action_id)
-        run = runner.start(a.get("name", action_id), a.get("script", ""), who(request), action_id, float(a.get("timeout", 0) or 0))
+        client = await asyncio.to_thread(who, request)
+        agent = agents_mod.agent_of(request)
+        if agent and a.get("confirm"):
+            await approve(request, client, a)
+        run = runner.start(a.get("name", action_id), a.get("script", ""), client, action_id, float(a.get("timeout", 0) or 0),
+                           agent=agent)
         return run.view()
+
+    async def approve(request: Request, client: str, a: dict):
+        """An action that asks first, started by an AI agent: waits for Allow in an SSH Manager app on this PC
+        or on the agent's computer. Refused on Deny, or when nobody answers in time."""
+        here = os.environ.get("COMPUTERNAME", "")
+        machines = [here, request.headers.get(agents_mod.FROM_HEADER, "").strip()[:64]]
+        if not agents.can_ask(machines):
+            activity.add("setup", action="approval-unanswered", client=client, title=a.get("name", ""))
+            raise HTTPException(403, f"\"{a.get('name')}\" needs a person's approval, but no SSH Manager app that could ask "
+                                     "is open (on this PC or the computer the request came from). Ask the owner to run it.")
+        q = agents.create(client, machines, {"title": a.get("name", ""), "action_id": a.get("id", ""),
+                                             "script": a.get("script", "")[:2000], "pc": monitor_name()})
+        activity.add("setup", action="approval-requested", client=client, title=a.get("name", ""))
+        answer = await agents.wait(q)
+        if answer is None:
+            activity.add("setup", action="approval-unanswered", client=client, title=a.get("name", ""))
+            raise HTTPException(403, f"\"{a.get('name')}\" was not run: nobody approved it within {agents_mod.APPROVAL_TTL} seconds.")
+        if not answer["allowed"]:
+            raise HTTPException(403, f"\"{a.get('name')}\" was not run: it was denied on {answer['by']}.")
+
+    def monitor_name() -> str:
+        return config.get("name") or os.environ.get("COMPUTERNAME", "this PC")
 
     @r.post("/run")
     def run_script(request: Request, body: RunBody):
@@ -65,7 +92,8 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who) -> API
             raise HTTPException(400, f"The working directory doesn't exist: {cwd}")
         if len(body.env) > 100 or any(not k or "=" in k or "\0" in k + v for k, v in body.env.items()):
             raise HTTPException(400, "Invalid environment variables.")
-        return runner.start(title, body.script, who(request), cwd=cwd, env=body.env or None).view()
+        return runner.start(title, body.script, who(request), cwd=cwd, env=body.env or None,
+                            agent=agents_mod.agent_of(request)).view()
 
     @r.get("/runs")
     def get_runs():

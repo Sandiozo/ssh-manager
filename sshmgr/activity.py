@@ -5,6 +5,8 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from . import agents
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -27,6 +29,8 @@ class ActivityLog:
                     self.next_id = max(self.next_id, item.get("id", 0) + 1)
 
     def add(self, kind: str, ts: str | None = None, **fields) -> dict:
+        if "agent" not in fields and (agent := agents.current.get()):
+            fields["agent"] = agent   # done by an AI agent (see agents.py)
         with self.lock:
             item = {"id": self.next_id, "ts": ts or now_iso(), "kind": kind, **fields}
             self.next_id += 1

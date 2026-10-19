@@ -149,12 +149,11 @@ class DeleteBody(BaseModel):
     paths: list[str]
 
 
-def make_router(config: dict, activity: ActivityLog, monitor) -> APIRouter:
+def make_router(config: dict, activity: ActivityLog, who) -> APIRouter:
     r = APIRouter(prefix="/api/fs")
-    port = config.get("port", 8765)
 
     def record(request: Request, action: str, **fields):
-        activity.add("file", action=action, client=client_label(request, port, monitor), **fields)
+        activity.add("file", action=action, client=who(request), **fields)
 
     @r.get("/roots")
     def roots():

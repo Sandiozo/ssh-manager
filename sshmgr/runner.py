@@ -5,7 +5,9 @@ user's desktop session, so a script can also start programs with a window).
 The last MAX_LINES lines of each run are kept in memory for streaming; the complete output is also
 written to <data>/runs/<id>.log, which can be downloaded while the run is among the last KEEP_RUNS."""
 import base64
+import html
 import os
+import re
 import subprocess
 import threading
 import time
@@ -19,14 +21,31 @@ KEEP_RUNS = 50
 PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
 
 
+CLIXML_STRING = re.compile(r'<S S="(?:Error|Warning|Verbose|Debug|Information)">(.*?)</S>', re.S)
+CLIXML_ESCAPE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+
+
+def decode_clixml(line: str) -> list[str] | None:
+    """PowerShell started with -EncodedCommand writes its error stream as CLIXML when that stream isn't a
+    console: a "#< CLIXML" line, then <Objs ...> with the messages. Returns the readable lines (none for
+    the marker line), or None for an ordinary line."""
+    if line.strip() == "#< CLIXML":
+        return []
+    if not line.startswith("<Objs ") or "schemas.microsoft.com/powershell" not in line:
+        return None
+    text = "".join(CLIXML_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), html.unescape(s))
+                   for s in CLIXML_STRING.findall(line))
+    return text.replace("\r\n", "\n").rstrip("\n").split("\n") if text else []
+
+
 def _iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class Run:
-    def __init__(self, title: str, script: str, client: str, action_id: str | None, output: Path):
+    def __init__(self, title: str, script: str, client: str, action_id: str | None, output: Path, agent: str = ""):
         self.id = uuid.uuid4().hex[:12]
-        self.title, self.script, self.client, self.action_id = title, script, client, action_id
+        self.title, self.script, self.client, self.action_id, self.agent = title, script, client, action_id, agent
         self.output = output.with_name(f"{self.id}.log")
         self.lines: list[str] = []
         self.dropped = 0          # lines no longer in memory (still in the output file)
@@ -47,7 +66,7 @@ class Run:
                     "duration_s": round((time.time() if not self.ended else self.t1) - self.t0, 1),
                     "lines": self.lines[start:], "next": self.dropped + len(self.lines),
                     "skipped": max(0, self.dropped - after),   # lines between `after` and the first returned one
-                    "full_output": f"/api/runs/{self.id}/output"}
+                    "full_output": f"/api/runs/{self.id}/output", "output_file": str(self.output)}
 
 
 class Runner:
@@ -65,8 +84,8 @@ class Runner:
                 pass
 
     def start(self, title: str, script: str, client: str, action_id: str | None = None, timeout: float = 0,
-              cwd: str | None = None, env: dict[str, str] | None = None) -> Run:
-        run = Run(title, script, client, action_id, self.dir / "x.log")
+              cwd: str | None = None, env: dict[str, str] | None = None, agent: str = "") -> Run:
+        run = Run(title, script, client, action_id, self.dir / "x.log", agent)
         encoded = base64.b64encode((PREAMBLE + script).encode("utf-16-le")).decode()
         run.proc = subprocess.Popen(
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
@@ -91,14 +110,16 @@ class Runner:
         with open(run.output, "w", encoding="utf-8", newline="\n") as out:
             for raw in iter(run.proc.stdout.readline, b""):
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                out.write(line + "\n")
-                out.flush()
-                with run.lock:
-                    run.lines.append(line)
-                    if len(run.lines) > MAX_LINES:
-                        extra = len(run.lines) - MAX_LINES
-                        del run.lines[:extra]
-                        run.dropped += extra
+                decoded = decode_clixml(line)
+                for line in [line] if decoded is None else decoded:
+                    out.write(line + "\n")
+                    out.flush()
+                    with run.lock:
+                        run.lines.append(line)
+                        if len(run.lines) > MAX_LINES:
+                            extra = len(run.lines) - MAX_LINES
+                            del run.lines[:extra]
+                            run.dropped += extra
         code = run.proc.wait()
         with run.lock:
             run.exit_code = code
@@ -108,7 +129,8 @@ class Runner:
             run.t1 = time.time()
         tail = "\n".join(run.lines[-200:])
         self.activity.add("action", ts=run.started, client=run.client, title=run.title, script=run.script[:20000],
-                          output=tail, exit_code=code, status=run.status, duration_s=round(run.t1 - run.t0, 1))
+                          output=tail, exit_code=code, status=run.status, duration_s=round(run.t1 - run.t0, 1),
+                          **({"agent": run.agent} if run.agent else {}))
 
     def stop(self, run_id: str) -> bool:
         run = self.runs.get(run_id)

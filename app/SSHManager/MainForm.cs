@@ -41,6 +41,7 @@ internal sealed class MainForm : Form
     readonly SyncManager sync;
     readonly Pairing pairing;
     readonly CliPipe cliPipe;
+    readonly Approvals approvals;
     /// <summary>Recent activity of each PC (by PC id), for the combined timeline in All PCs.</summary>
     readonly Dictionary<string, (long last, List<JsonElement> items)> feeds = [];
     readonly HashSet<string> pairSeen = [];
@@ -74,6 +75,7 @@ internal sealed class MainForm : Form
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => links.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(() => Post(sync!.Snapshot())));
+        approvals = new Approvals(this, (title, text) => Balloon(title, text, ToolTipIcon.Warning, force: true));
         cliPipe = new CliPipe(() => (List<Link>)Invoke(new Func<List<Link>>(() => links.ToList())));
 
         var menu = new ContextMenuStrip();
@@ -472,6 +474,7 @@ internal sealed class MainForm : Form
                     link.Status = doc.RootElement.Clone();
                     CheckAlerts(link);
                     if (!link.Pc.IsLocal && !pairPrompting) await CheckPairRequestAsync(link);
+                    await approvals.CheckAsync(link);
                     if (current == All) await FetchActivityAsync(link);
                 }
                 catch (Exception) { }
@@ -549,6 +552,8 @@ internal sealed class MainForm : Form
                 {
                     pc = x.l.Pc.DisplayName, client = S(se, "client"), user = S(se, "user"), ip = S(se, "ip"), start = S(se, "start"),
                     tunnel = se.TryGetProperty("tunnel", out var t) && t.ValueKind == JsonValueKind.True,
+                    agents = se.TryGetProperty("agents", out var ag) && ag.ValueKind == JsonValueKind.Array
+                        ? ag.EnumerateArray().Select(a => a.GetString() ?? "").ToArray() : [],
                     app = se.TryGetProperty("commands", out var ac) && ac.ValueKind == JsonValueKind.Array
                           && ac.EnumerateArray().Any(c => S(c, "kind") == "dashboard"),
                     commands = se.TryGetProperty("commands", out var cs) && cs.ValueKind == JsonValueKind.Array

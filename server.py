@@ -51,7 +51,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
-from sshmgr import plugins  # noqa: E402
+from sshmgr import agents as agents_mod, plugins  # noqa: E402
 from sshmgr.activity import ActivityLog  # noqa: E402
 from sshmgr.files import client_label, make_router, tunnel_pid  # noqa: E402
 from sshmgr.monitor import Monitor  # noqa: E402
@@ -71,6 +71,7 @@ activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
 updater = Updater(config, DATA, activity)
 runner = Runner(activity, DATA)
+agents = agents_mod.Agents()
 app = FastAPI(title="SSH Manager", docs_url=None, redoc_url=None)
 
 NOT_LOGGED_IN = """<!doctype html><meta charset="utf-8"><title>SSH Manager</title>
@@ -98,6 +99,12 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "Not logged in"}, status_code=401)
     if request.method not in ("GET", "HEAD") and request.headers.get("x-sshmgr") != "1":
         return JSONResponse({"detail": "Missing X-SSHMgr header"}, status_code=403)
+    if agent := agents_mod.agent_of(request):
+        # an AI agent: this PC's AI access setting applies, and its work is labelled with its name
+        if reason := agents_mod.refusal(request, config):
+            return JSONResponse({"detail": reason}, status_code=403)
+        agents_mod.current.set(agent)
+        await note_agent(request, agent)
     response = await call_next(request)
     if request.url.path.startswith("/static/"):
         # the page files change with every update: always ask (cheap, ETag) instead of using a stale copy
@@ -122,12 +129,35 @@ def login(request: Request, token: str = ""):
 
 @app.get("/api/status")
 def status():
-    return {**monitor.status(), "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot(),
-            "activity_24h": activity.counts_24h()}
+    s = monitor.status(agents.tunnel_agents())
+    return {**s, "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot(),
+            "activity_24h": activity.counts_24h(), "agents": agents.recent(), "ai_access": agents_mod.level(config)}
 
 
 def who(request: Request) -> str:
-    return client_label(request, PORT, monitor)
+    """Who is calling: the computer, or "<agent> (<computer>)" for an AI agent."""
+    label = client_label(request, PORT, monitor)
+    agent = agents_mod.agent_of(request)
+    return f"{agent} ({label})" if agent else label
+
+
+_noted: dict[tuple[str, int], float] = {}
+
+
+async def note_agent(request: Request, agent: str):
+    """Remembers which agent works through which connection (for live sessions), every 15 s at most."""
+    import asyncio, time
+    key = (agent, request.client.port if request.client else 0)
+    if time.time() - _noted.get(key, 0) < 15:
+        return
+    if len(_noted) > 500:
+        _noted.clear()
+    _noted[key] = time.time()
+
+    def look():
+        pid = tunnel_pid(request, PORT)
+        agents.note(agent, client_label(request, PORT, monitor), pid)
+    await asyncio.to_thread(look)
 
 
 @app.get("/api/whoami")
@@ -184,9 +214,10 @@ def update_install(request: Request):
         raise HTTPException(400, str(e))
 
 
-app.include_router(make_router(config, activity, monitor))
+app.include_router(make_router(config, activity, who))
 app.include_router(make_settings_router(config, CONFIG_PATH, DATA, activity, monitor, who))
-app.include_router(make_tools_router(config, activity, runner, who))
+app.include_router(make_tools_router(config, activity, runner, who, agents))
+app.include_router(agents_mod.make_router(config, agents, activity, who))
 app.include_router(make_pairing_router(activity, lambda: monitor.host_name, who))
 loaded_plugins = plugins.load(plugins.PluginContext(config, HOME, monitor, activity, app))
 app.mount("/static", StaticFiles(directory=RES / "static"), name="static")

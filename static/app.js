@@ -170,6 +170,7 @@ function renderStatus(s) {
   // sessions
   $("#session-count").textContent = s.sessions.length ? `${s.sessions.length} open` : "";
   // one compact row per session; its running commands underneath
+  const localAgents = (s.agents || []).filter(a => !a.pid);
   $("#sessions").innerHTML = s.sessions.length ? s.sessions.map(x => {
     const cmds = x.commands.filter(c => c.kind !== "dashboard");
     const isApp = x.commands.some(c => c.kind === "dashboard");
@@ -180,12 +181,18 @@ function renderStatus(s) {
         <span class="what">${cmds.length ? "" : isApp ? "SSH Manager app" : x.tunnel ? "Port forward (script or tool)" : "idle"}</span>
         <span class="muted small">${x.start ? ago(x.start) : ""}</span>
       </div>
+      ${(x.agents || []).map(a => agentRow(`${a} (${x.client})`, s)).join("")}
       ${cmds.map(c => `<div class="cmd" data-running="${c.pid}">
           <span class="kind ${c.kind}">${esc(c.kind)}</span><code>${esc(c.summary)}</code>
           <span class="muted small">${fmtDur((Date.now() - new Date(c.start)) / 1000)}</span>
         </div>`).join("")}
     </div>`;
-  }).join("") : `<div class="none">No one is connected over SSH right now.</div>`;
+  }).join("") : (localAgents.length ? "" : `<div class="none">No one is connected over SSH right now.</div>`);
+  // agents working on this PC itself (no SSH connection)
+  $("#sessions").innerHTML += localAgents.map(a => `<div class="session"><div class="line">
+      ${dot("ok")}<span class="who">${esc(a.label)}</span><span class="tag ai">AI agent</span>
+      <span class="what">on this PC</span><span class="muted small">${ago(a.last)}</span></div></div>`).join("");
+  if (!$("#tab-settings").hidden) renderAgents(s);
 
   // hourly bars
   const max = Math.max(1, ...s.hours.map(h => h.count));
@@ -209,6 +216,16 @@ function renderStatus(s) {
 
   watchForAlerts(s);
   if (!$("#tab-settings").hidden) settingsUi.renderPeers();
+}
+
+function agentRow(label, s) {
+  const a = (s.agents || []).find(x => x.label === label);
+  return `<div class="cmd agent"><span class="tag ai">AI agent</span><code>${esc(label)}</code>
+    <span class="muted small">${a ? "last request " + ago(a.last) : ""}</span></div>`;
+}
+function renderAgents(s) {
+  const list = s?.agents || [];
+  $("#ai-agents").innerHTML = list.length ? list.map(a => `<div>${esc(a.label)} · ${ago(a.last)}</div>`).join("") : "none";
 }
 
 // tray notifications for things worth interrupting for (the app decides whether to show them)
@@ -252,7 +269,9 @@ function actLabel(a) {
   if (a.kind === "action") return { kind: "run", text: `${a.title}${a.status && a.status !== "done" ? ` (${a.status})` : ""}` };
   if (a.kind === "setup") {
     const t = { settings: `Changed settings (${(a.changed || []).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
-      "key-removed": `Removed SSH key ${a.label || a.fingerprint}` }[a.action] || a.action;
+      "key-removed": `Removed SSH key ${a.label || a.fingerprint}`, "approval-requested": `Asked for approval to run "${a.title}"`,
+      "approval-allowed": `Allowed ${a.requested_by || "an AI agent"} to run "${a.title}"`, "approval-denied": `Denied ${a.requested_by || "an AI agent"} running "${a.title}"`,
+      "approval-unanswered": `"${a.title}" not run: nobody approved it` }[a.action] || a.action;
     return { kind: "setup", text: t };
   }
   const p = a.path || (a.paths || []).join(", ");
@@ -262,7 +281,7 @@ function actLabel(a) {
 function actRow(a) {
   const l = actLabel(a);
   return `<div class="act" data-id="${a.id}"><span class="time">${fmtTime(a.ts)}</span>
-    <span class="kind ${l.kind}">${esc(l.kind)}</span><span class="client muted small">${esc(a.client || "")}</span>
+    <span class="kind ${l.kind}">${esc(l.kind)}</span><span class="client muted small" ${a.agent ? 'title="AI agent"' : ""}>${a.agent ? "✦ " : ""}${esc(a.client || "")}</span>
     <span class="what" title="${esc(l.text)}">${esc(l.text)}</span><span class="dur muted small">${a.duration_s != null ? fmtDur(a.duration_s) : ""}</span></div>`;
 }
 function renderActivity() {
@@ -633,7 +652,7 @@ const settingsUi = {
       name: body.name, peers: body.peers, keys: body.keys, bookmarks: body.bookmarks, default_upload: body.default_upload,
       auto_update: body.auto_update !== false, actions: body.actions || [], logs: body.logs || [],
       screen_preview: body.screen_preview !== false, screen_monitors: body.screen_monitors !== false,
-      screen_apps: body.screen_apps || [] } });
+      screen_apps: body.screen_apps || [], ai_access: body.ai_access || "full" } });
     if (!$("#tab-run").hidden) runUi.load();
     this.draft = structuredClone(this.saved);
     this.touch();
@@ -649,6 +668,9 @@ const settingsUi = {
     $("#set-screen-monitors").checked = d.screen_monitors !== false;
     $("#set-screen-apps").value = (d.screen_apps || []).join(", ");
     $("#set-screen-monitors").disabled = $("#set-screen-apps").disabled = d.screen_preview === false;
+    $("#set-ai-access").value = d.ai_access || "full";
+    $("#ai-access-help").textContent = AI_HELP[d.ai_access || "full"];
+    renderAgents(last);
     renderUpdate();
     renderActionEditor();
     renderLogEditor();
@@ -1150,6 +1172,16 @@ $("#set-add-log").onclick = () => {
 };
 $("#set-screen").onchange = e => { settingsUi.draft.screen_preview = e.target.checked; settingsUi.touch(); settingsUi.render(); };
 $("#set-screen-monitors").onchange = e => { settingsUi.draft.screen_monitors = e.target.checked; settingsUi.touch(); };
+const AI_HELP = {
+  full: "Full: agents can do what you can do here: run commands and quick actions, change files, take screenshots.",
+  read: "Read-only: agents can look (status, activity, logs, files and downloads, screenshots) but not run or change anything.",
+  off: "Off: agents can't use this PC at all.",
+};
+$("#set-ai-access").onchange = e => {
+  settingsUi.draft.ai_access = e.target.value;
+  $("#ai-access-help").textContent = AI_HELP[e.target.value];
+  settingsUi.touch();
+};
 $("#set-screen-apps").oninput = e => {
   settingsUi.draft.screen_apps = e.target.value.split(/[,;]/).map(s => s.trim().replace(/\.exe$/i, "")).filter(Boolean);
   settingsUi.touch();

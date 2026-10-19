@@ -3,6 +3,28 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.6.0] - 2026-10-19
+
+### Added
+- **AI agents:** `sshmgr mcp` is an MCP server, so Claude Code, Codex and other MCP clients can use the PCs
+  the app is connected to as tools: list PCs and their status, run PowerShell (with streamed progress,
+  timeouts, background runs and long output shortened to its start and end), run quick actions, take
+  screenshots (returned as images), list windows and folders, read logs, download and upload files and wait
+  for a file or program. Setup for Claude Code and Codex is in the README under **Use with AI agents**.
+- Agents are named: the MCP server (and `sshmgr --as <name>`, or `SSHMGR_AGENT`) tells each PC which agent
+  is calling, so Activity, Live sessions and All PCs show for example "Claude (LAPTOP)". Inside Claude
+  Code, `sshmgr` names itself Claude.
+- Settings → **AI agents** on each PC: full access (default), read-only (status, logs, files, downloads,
+  screenshots) or off, checked by that PC's server. Agents can never change settings, SSH keys or pairing.
+- Quick actions marked "ask first" that an agent starts wait until someone clicks **Allow** in an SSH
+  Manager app (on that PC or on the agent's computer); they don't run on **Deny** or after two minutes
+  without an answer. Requests and answers are in the activity log.
+- A run's status tells where its complete output is kept on the PC (`output_file`).
+
+### Fixed
+- PowerShell errors in runs (command panel, quick actions, `sshmgr run`) showed as unreadable `#< CLIXML`
+  blocks. They are now shown as plain text.
+
 ## [1.5.1] - 2026-10-19
 
 ### Fixed
@@ -208,6 +230,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.6.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.6.0
 [1.5.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.1
 [1.5.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.0
 [1.4.2]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.2

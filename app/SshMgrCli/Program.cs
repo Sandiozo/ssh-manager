@@ -21,7 +21,7 @@ sealed class Failure(string message, int code = 1, HttpStatusCode? status = null
     public HttpStatusCode? Status { get; } = status;
 }
 
-static class Program
+static partial class Program
 {
     const int Usage = 2, Unreachable = 3;
 
@@ -29,6 +29,7 @@ static class Program
         sshmgr - use the PCs the SSH Manager app is connected to (through the app's own connections)
 
         Usage:
+          sshmgr mcp [--as <name>]                            an MCP server (stdio) for AI agents: see the README
           sshmgr pcs [--json]                                 the PCs in the app and whether they are connected
           sshmgr run <pc> <script> [options]                  run PowerShell on the PC and stream its output;
           sshmgr run <pc> -f <file.ps1|-> [options]             exits with the script's exit code
@@ -53,13 +54,16 @@ static class Program
                                                               (default timeout 60 s)
 
         <pc> is a PC's name, the name or address it was added with, or its id (see `sshmgr pcs`).
+        --as <name> (any command) marks the calls as an AI agent's, e.g. --as Claude: the PC labels them
+        "Claude (<this computer>)" and applies its AI agent settings. The SSHMGR_AGENT environment variable
+        does the same; inside Claude Code, calls count as Claude's.
         Exit codes: the script's own for run/action; 1 = failed; 2 = wrong usage; 3 = SSH Manager isn't
         running, or the PC is unknown or not connected.
         """;
 
     static readonly HashSet<string> ValueOptions =
         ["-f", "--file", "--cwd", "--env", "--title", "--timeout", "--window", "--monitor", "--width", "--quality",
-         "--process", "--changed-after"];
+         "--process", "--changed-after", "--as"];
     static readonly HashSet<string> FlagOptions = ["--json", "--overwrite", "--exited", "-h", "--help", "--version"];
 
     /// <summary>Standard output as UTF-8, flushed after each batch rather than each line.</summary>
@@ -71,12 +75,15 @@ static class Program
         {
             var a = Parse(argv);
             var cmd = a.Pos.Count > 0 ? a.Pos[0].ToLowerInvariant() : "help";
+            Agent = AgentName(a.Value("--as") ?? Environment.GetEnvironmentVariable("SSHMGR_AGENT")
+                              ?? (Environment.GetEnvironmentVariable("CLAUDECODE") == "1" && cmd != "mcp" ? "Claude" : null));
             if (a.Flag("--version")) cmd = "version";
             if (a.Flag("-h") || a.Flag("--help")) cmd = "help";
             return cmd switch
             {
                 "help" => Print(Help),
                 "version" => Print(typeof(Program).Assembly.GetName().Version?.ToString(3) ?? ""),
+                "mcp" => await Mcp(a),
                 "pcs" => await Pcs(a),
                 "run" => await Run(a),
                 "actions" => await Actions(a),
@@ -186,6 +193,17 @@ static class Program
 
     static Task<Pc> Connect(string query) => Pc.Open(query);
 
+    /// <summary>The AI agent these calls are made for ("" for a person).</summary>
+    static string Agent = "";
+
+    /// <summary>A name that fits in a header: letters, digits, spaces and . @ + - only, at most 40 characters.</summary>
+    static string AgentName(string? name)
+    {
+        var clean = new string((name ?? "").Where(c => c < 128 && (char.IsLetterOrDigit(c) || " .@+-_".Contains(c))).ToArray());
+        var n = string.Join(' ', clean.Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        return n.Length > 40 ? n[..40].TrimEnd() : n;
+    }
+
     /// <summary>One PC's server, reached through the app's port forward.</summary>
     sealed class Pc
     {
@@ -243,6 +261,9 @@ static class Program
                 var req = new HttpRequestMessage(method, $"http://127.0.0.1:{port}{path}") { Content = body };
                 req.Headers.Add("X-SSHMgr-Token", token);
                 req.Headers.Add("X-SSHMgr", "1");
+                // an AI agent says who it is (the PC labels and limits its calls); where its app can approve
+                if (Agent != "") req.Headers.Add("X-SSHMgr-Agent", Agent);
+                req.Headers.Add("X-SSHMgr-From", Environment.MachineName);
                 try
                 {
                     r = await Http.SendAsync(req, stream ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead);

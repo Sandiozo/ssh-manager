@@ -271,6 +271,7 @@ internal static class Ui
               <div class="line"><span class="dot ok"></span><b>${esc(x.client || x.ip)}</b><span class="arrow">→</span>
                 <span><span class="pcdot" style="background:${color(x.pc)}"></span>${esc(x.pc)}</span>
                 ${x.app ? `<span class="tag">app</span>` : x.tunnel ? `<span class="tag">port forward</span>` : ""}<span class="when">${ago(x.start)}</span></div>
+              ${(x.agents || []).map(a => `<div class="cmd"><span class="kind setup">AI agent</span> ${esc(a)} (${esc(x.client || x.ip)})</div>`).join("")}
               ${x.commands.map(c => `<div class="cmd" title="${esc(c.summary)}"><span class="kind ${esc(c.kind)}">${esc(c.kind)}</span> ${esc(c.summary)}</div>`).join("")}
             </div>`).join("") : `<div class="none">No one is connected over SSH to any PC right now.</div>`;
         }
@@ -280,7 +281,9 @@ internal static class Ui
           if (a.kind === "setup") {
             const t = { settings: `Changed settings (${(a.changed || []).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
               "key-removed": `Removed SSH key ${a.label || a.fingerprint}`, "pair-requested": `Asked ${a.target} for access`,
-              "pair-allowed": `${a.target} allowed access`, "pair-denied": `${a.target} denied access`, "screen-viewed": "Viewed the screen" }[a.action] || a.action;
+              "pair-allowed": `${a.target} allowed access`, "pair-denied": `${a.target} denied access`, "screen-viewed": "Viewed the screen",
+              "approval-requested": `Asked for approval to run "${a.title}"`, "approval-allowed": `Allowed ${a.requested_by || "an AI agent"} to run "${a.title}"`,
+              "approval-denied": `Denied ${a.requested_by || "an AI agent"} running "${a.title}"`, "approval-unanswered": `"${a.title}" not run: nobody approved it` }[a.action] || a.action;
             return { kind: "setup", text: t };
           }
           const p = a.path || (a.paths || []).join(", ");

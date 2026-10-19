@@ -46,7 +46,7 @@ logging.basicConfig(filename=DATA / "server.log", level=logging.INFO,
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -96,7 +96,11 @@ async def guard(request: Request, call_next):
         return JSONResponse({"detail": "Not logged in"}, status_code=401)
     if request.method not in ("GET", "HEAD") and request.headers.get("x-sshmgr") != "1":
         return JSONResponse({"detail": "Missing X-SSHMgr header"}, status_code=403)
-    return await call_next(request)
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        # the page files change with every update: always ask (cheap, ETag) instead of using a stale copy
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 @app.get("/api/ping")
@@ -181,7 +185,11 @@ app.mount("/static", StaticFiles(directory=RES / "static"), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(RES / "static" / "index.html", headers={"Cache-Control": "no-store"})
+    # the version in the script/style URLs makes the app load the new files right after an update
+    html = (RES / "static" / "index.html").read_text(encoding="utf-8")
+    for name in ("app.js", "style.css"):
+        html = html.replace(f'"/static/{name}"', f'"/static/{name}?v={__version__}"')
+    return HTMLResponse(html, headers={"Cache-Control": "no-store"})
 
 
 def port_in_use() -> bool:

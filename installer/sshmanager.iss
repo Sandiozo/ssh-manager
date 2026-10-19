@@ -51,37 +51,27 @@ RestartApplications=yes
 ; writes %TEMP%\Setup Log <date> #NNN.txt, for when an install doesn't finish
 SetupLogging=yes
 
-; The roles are chosen on the custom "What should this PC do?" page; the standard components page is
-; skipped. Types/components still decide which files are installed, and /COMPONENTS= works for
-; scripted installs.
-[Types]
-Name: "both"; Description: "Both"
-Name: "app"; Description: "App only"
-Name: "server"; Description: "Managed only"
-Name: "custom"; Description: "Custom"; Flags: iscustom
-
-[Components]
-Name: "app"; Description: "SSH Manager app"; Types: both app
-Name: "server"; Description: "Let other PCs manage this PC"; Types: both server
-
+; What gets installed is decided only by the "What should this PC do?" page (WantApp / WantServer in
+; [Code]), not by Inno's components, which would otherwise bring back the previous choice. Silent
+; installs (updates) keep the roles already on the PC; /ROLES=app,server picks them for a new install.
 [Tasks]
-Name: "desktopicon"; Description: "Create a desktop shortcut"; Components: app
+Name: "desktopicon"; Description: "Create a desktop shortcut"; Check: WantApp
 
 [Files]
-Source: "{#BuildDir}\app\*"; DestDir: "{app}\App"; Components: app; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#BuildDir}\server\*"; DestDir: "{app}\Server"; Components: server; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\ensure-running.ps1"; DestDir: "{app}\Server"; Components: server; Flags: ignoreversion
-Source: "{#BuildDir}\tools\HiddenRun.exe"; DestDir: "{app}\Tools"; Components: server; Flags: ignoreversion
-Source: "server-setup.ps1"; DestDir: "{app}\Tools"; Components: server; Flags: ignoreversion
+Source: "{#BuildDir}\app\*"; DestDir: "{app}\App"; Check: WantApp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildDir}\server\*"; DestDir: "{app}\Server"; Check: WantServer; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\ensure-running.ps1"; DestDir: "{app}\Server"; Check: WantServer; Flags: ignoreversion
+Source: "{#BuildDir}\tools\HiddenRun.exe"; DestDir: "{app}\Tools"; Check: WantServer; Flags: ignoreversion
+Source: "server-setup.ps1"; DestDir: "{app}\Tools"; Check: WantServer; Flags: ignoreversion
 Source: "server-stop.ps1"; DestDir: "{app}\Tools"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Components: app
+Name: "{autoprograms}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Check: WantApp
 Name: "{autodesktop}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Tasks: desktopicon
 
 [Run]
 ; the server role is set up from [Code] (RunServerSetup) so its progress can be shown
-Filename: "{app}\App\SSHManager.exe"; Description: "Open SSH Manager"; Components: app; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\App\SSHManager.exe"; Description: "Open SSH Manager"; Check: WantApp; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Tools\server-stop.ps1"" -Remove"; \
@@ -102,6 +92,7 @@ var
   AppBox, ServerBox, RemoveAppBox, RemoveServerBox: TNewCheckBox;
   NowLabel, DepsLabel: TNewStaticText;
   AppInstalled, ServerInstalled, RemoveApp: Boolean;
+  AppChosen, ServerChosen: Boolean;   { what this run installs; see WantApp / WantServer }
 
 function InstallingUser(Param: String): String;
 begin
@@ -242,7 +233,7 @@ end;
 
 procedure InitializeWizard;
 var
-  Dir, Now: String;
+  Dir, Now, Roles: String;
   Top: Integer;
 begin
   DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing), 'Downloading what SSH Manager needs...', nil);
@@ -250,6 +241,22 @@ begin
   Dir := PreviousDir;
   AppInstalled := (Dir <> '') and FileExists(Dir + 'App\SSHManager.exe');
   ServerInstalled := (Dir <> '') and FileExists(Dir + 'Server\SSHManagerServer.exe') and ServerTaskExists;
+  Roles := Lowercase(ExpandConstant('{param:ROLES|}'));
+  if Roles <> '' then
+  begin
+    AppChosen := Pos('app', Roles) > 0;
+    ServerChosen := Pos('server', Roles) > 0;
+  end
+  else if (Dir <> '') and (FileExists(Dir + 'App\SSHManager.exe') or FileExists(Dir + 'Server\SSHManagerServer.exe')) then
+  begin
+    AppChosen := FileExists(Dir + 'App\SSHManager.exe');
+    ServerChosen := FileExists(Dir + 'Server\SSHManagerServer.exe');
+  end
+  else
+  begin
+    AppChosen := True;
+    ServerChosen := True;
+  end;
 
   RolePage := CreateCustomPage(wpLicense, 'What should this PC do?',
     'You can change this later by running this installer again.');
@@ -276,9 +283,36 @@ begin
   RolesChanged(nil);
 end;
 
-function ShouldSkipPage(PageID: Integer): Boolean;
+{ Check functions for [Files], [Icons], [Tasks] and [Run] }
+function WantApp: Boolean;
 begin
-  Result := PageID = wpSelectComponents;   { replaced by the "What should this PC do?" page }
+  Result := AppChosen;
+end;
+
+function WantServer: Boolean;
+begin
+  Result := ServerChosen;
+end;
+
+function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo,
+  MemoGroupInfo, MemoTasksInfo: String): String;
+begin
+  Result := MemoDirInfo + NewLine + NewLine + 'This PC will:' + NewLine;
+  if AppChosen then
+    Result := Result + Space + 'use SSH Manager' + NewLine
+  else if AppInstalled then
+    Result := Result + Space + 'no longer have the SSH Manager app (it will be removed)' + NewLine;
+  if ServerChosen then
+    Result := Result + Space + 'let other PCs manage it' + NewLine
+  else if ServerInstalled then
+    Result := Result + Space + 'no longer let other PCs manage it (that will be removed)' + NewLine;
+  Result := Result + NewLine + 'Will be downloaded:' + NewLine;
+  if AppChosen and not HasDotNetDesktop then Result := Result + Space + '.NET Desktop Runtime 8' + NewLine;
+  if AppChosen and not HasWebView2 then Result := Result + Space + 'WebView2 Runtime' + NewLine;
+  if ServerChosen and not HasOpenSshServer then Result := Result + Space + 'Windows'' OpenSSH Server (5-15 minutes)' + NewLine;
+  if not ((AppChosen and not (HasDotNetDesktop and HasWebView2)) or (ServerChosen and not HasOpenSshServer)) then
+    Result := Result + Space + 'nothing (everything needed is already installed)' + NewLine;
+  if MemoTasksInfo <> '' then Result := Result + NewLine + MemoTasksInfo;
 end;
 
 { ---- installing the runtimes the app needs ---- }
@@ -302,7 +336,6 @@ end;
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
   NeedDotNet, NeedWebView: Boolean;
-  Sel: String;
 begin
   Result := True;
 
@@ -317,15 +350,14 @@ begin
       Result := False;
       Exit;
     end;
-    if WillHaveApp then Sel := 'app' else Sel := '!app';
-    if WillHaveServer then Sel := Sel + ',server' else Sel := Sel + ',!server';
-    WizardSelectComponents(Sel);
-    RemoveApp := AppInstalled and not WillHaveApp;
+    AppChosen := WillHaveApp;
+    ServerChosen := WillHaveServer;
+    RemoveApp := AppInstalled and not AppChosen;
     Exit;
   end;
 
   { download missing runtimes when the app is being installed }
-  if (CurPageID <> wpReady) or not WizardIsComponentSelected('app') then Exit;
+  if (CurPageID <> wpReady) or not AppChosen then Exit;
   NeedDotNet := not HasDotNetDesktop;
   NeedWebView := not HasWebView2;
   if not (NeedDotNet or NeedWebView) then Exit;
@@ -461,7 +493,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep <> ssPostInstall then Exit;
-  if WizardIsComponentSelected('server') then
+  if ServerChosen then
     RunServerSetup
   else if DirExists(ExpandConstant('{app}\Server')) then
   begin
@@ -494,7 +526,7 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if (CurPageID = wpFinished) and WizardIsComponentSelected('server') then
+  if (CurPageID = wpFinished) and ServerChosen then
     WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10#13#10 +
       'Other PCs can now connect to this one. In the SSH Manager app on another PC, add this PC with:' + #13#10 +
       '   PC name:  ' + GetComputerNameString + #13#10 +

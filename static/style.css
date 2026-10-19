@@ -64,6 +64,7 @@ input:focus, textarea:focus { outline: none; border-color: var(--accent); box-sh
 .nav svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 .nav span, .pc-list span.name { overflow: hidden; text-overflow: ellipsis; }
 .pc-list .add { color: var(--accent); }
+.pc-list .client-tag { margin-left: auto; font-size: 10px; color: var(--faint); }
 .rail-foot { margin-top: auto; display: flex; flex-direction: column; gap: 2px; padding-top: 10px; border-top: 1px solid var(--line); }
 .rail-foot .pill { display: flex; align-items: center; gap: 8px; padding: 3px 8px; font-size: 12px; color: var(--muted); }
 .main { min-width: 0; display: flex; flex-direction: column; }
@@ -83,7 +84,7 @@ section[hidden] { display: none; }
 @media (max-width: 860px) {
   .app { grid-template-columns: 52px minmax(0, 1fr); }
   .rail { padding: 10px 6px; }
-  .brand-name, .rail-label, .nav span, .pc-list span.name, .rail-foot .pill span.t { display: none; }
+  .brand-name, .rail-label, .nav span, .pc-list span.name, .pc-list .client-tag, .rail-foot .pill span.t { display: none; }
   .nav button, .pc-list button { justify-content: center; padding: 0; }
   .brand { justify-content: center; padding-bottom: 8px; }
 }

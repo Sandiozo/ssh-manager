@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -58,7 +58,7 @@ internal sealed class MainForm : Form
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open SSH Manager", null, (_, _) => ShowWindow());
         menu.Items.Add("All PCs", null, (_, _) => { ShowWindow(); SwitchTo(All); });
-        menu.Items.Add("Add a PCâ€¦", null, (_, _) => { ShowWindow(); OpenWizard(null); });
+        menu.Items.Add("Add a PC…", null, (_, _) => { ShowWindow(); OpenWizard(null); });
         menu.Items.Add("Reconnect all", null, (_, _) => links.ForEach(l => l.Reconnect()));
         menu.Items.Add(new ToolStripSeparator());
         startupItem.Checked = StartsWithWindows();
@@ -190,7 +190,7 @@ internal sealed class MainForm : Form
         }
         if (current == All)
         {
-            Text = "SSH Manager Â· All PCs";
+            Text = "SSH Manager · All PCs";
             if (shown != All)
             {
                 shown = All;
@@ -201,7 +201,7 @@ internal sealed class MainForm : Form
         }
         var link = CurrentLink() ?? links[0];
         current = link.Pc.Id;
-        Text = $"SSH Manager Â· {link.Pc.DisplayName}" + (link.State == LinkState.Connected ? "" : " (not connected)");
+        Text = $"SSH Manager · {link.Pc.DisplayName}" + (link.State == LinkState.Connected ? "" : " (not connected)");
         if (link.State == LinkState.Connected)
         {
             if (shown != link.Url)
@@ -236,7 +236,7 @@ internal sealed class MainForm : Form
             connectedNow.Add(link.Pc.Id);
         }
         else if (state == LinkState.Disconnected && connectedNow.Remove(link.Pc.Id) && settings.NotifyConnection)
-            Balloon("SSH Manager", $"Lost the connection to {name}. Reconnectingâ€¦", ToolTipIcon.Warning);
+            Balloon("SSH Manager", $"Lost the connection to {name}. Reconnecting…", ToolTipIcon.Warning);
 
         if (link.Pc.Id == current) ShowCurrent();
         PushPcs();
@@ -267,12 +267,62 @@ internal sealed class MainForm : Form
         if (webReady) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(message));
     }
 
-    void PushPcs() => Post(new
+    void PushPcs()
     {
-        type = "pcs",
-        current = wizardOpen ? "" : current,
-        pcs = links.Select(l => new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() }),
-    });
+        var clients = Clients();
+        lastClientsKey = ClientsKey(clients);
+        Post(new
+        {
+            type = "pcs",
+            current = wizardOpen ? "" : current,
+            pcs = links.Select(l => (object)new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() })
+                .Concat(clients.Select(c => (object)new { id = "client:" + c.Name, name = c.Name, state = c.State, client = true })),
+        });
+    }
+
+    /// <summary>A computer that connects to one of the PCs here but has no server of its own (a client),
+    /// as that PC reports it: it can't be opened, but its status and stats can be shown.</summary>
+    sealed record ClientPc(string Name, string State, string Via, JsonElement? Stats, string Mac, string Ip, string Version);
+
+    string lastClientsKey = "";
+    static string ClientsKey(List<ClientPc> clients) => string.Join("|", clients.Select(c => c.Name + ":" + c.State));
+
+    List<ClientPc> Clients()
+    {
+        static string S(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        static bool B(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.True;
+        static JsonElement? O(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Object ? v : null;
+        static string FirstMac(JsonElement? st) =>
+            st is { } x && x.TryGetProperty("macs", out var m) && m.ValueKind == JsonValueKind.Array && m.GetArrayLength() > 0 ? m[0].GetString() ?? "" : "";
+
+        var known = links.Select(l => l.Pc.PcName).Append(Environment.MachineName).Where(n => n != "")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var list = new List<ClientPc>();
+        bool Seen(string name, string machine) => known.Contains(name) || (machine != "" && known.Contains(machine))
+            || list.Any(c => c.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        foreach (var l in links.Where(l => l.State == LinkState.Connected && l.Status is not null))
+        {
+            var s = l.Status!.Value;
+            if (s.TryGetProperty("peers", out var peers) && peers.ValueKind == JsonValueKind.Array)
+                foreach (var p in peers.EnumerateArray())
+                {
+                    var st = O(p, "stats");
+                    var name = S(p, "name");
+                    if (name == "" || Seen(name, st is { } x ? S(x, "machine") : "")) continue;
+                    var state = B(p, "connected") ? "Connected" : B(p, "online") ? "Online" : "Offline";
+                    var ip = S(p, "resolved_ip") is { Length: > 0 } r ? r : S(p, "ip");
+                    list.Add(new(name, state, l.Pc.DisplayName, st, FirstMac(st), ip, st is { } y ? S(y, "app_version") : ""));
+                }
+            if (s.TryGetProperty("other_apps", out var others) && others.ValueKind == JsonValueKind.Array)
+                foreach (var c in others.EnumerateArray())
+                {
+                    var name = S(c, "machine");
+                    if (name == "" || Seen(name, name)) continue;
+                    list.Add(new(name, "Connected", l.Pc.DisplayName, c, FirstMac(c), "", S(c, "app_version")));
+                }
+        }
+        return list;
+    }
 
     // ---- polling: this computer's stats to each PC, each PC's status for the overview and alerts ----
     async Task PollAsync()
@@ -296,6 +346,7 @@ internal sealed class MainForm : Form
                 }
                 catch (Exception) { }
             }
+            if (ClientsKey(Clients()) != lastClientsKey) PushPcs();
             if (current == All) PushOverview();
         }
         finally { polling = false; }
@@ -315,7 +366,7 @@ internal sealed class MainForm : Form
             if (newFails > 0 && settings.NotifyFailedLogin)
                 Balloon("Failed SSH login", $"{newFails} failed login attempt(s) on {link.Pc.DisplayName}.", ToolTipIcon.Warning, force: link.Pc.Id != current);
             if (unknown.Any(u => !before.unknown.Contains(u)) && settings.NotifyUnknown)
-                Balloon("Unknown computer logged in", $"A computer that isn't in {link.Pc.DisplayName}'s list logged in. See Settings â†’ Computers there.", ToolTipIcon.Warning, force: link.Pc.Id != current);
+                Balloon("Unknown computer logged in", $"A computer that isn't in {link.Pc.DisplayName}'s list logged in. See Settings → Computers there.", ToolTipIcon.Warning, force: link.Pc.Id != current);
         }
         seen[link.Pc.Id] = (fails, unknown);
     }
@@ -363,12 +414,15 @@ internal sealed class MainForm : Form
         }
         if (!links.Any(l => l.Pc.IsLocal) && lastLocalStats is not null)
             pcs.Add(new { id = "", name = Environment.MachineName, state = "Connected", kind = "this", stats = lastLocalStats });
+        foreach (var c in Clients())
+            pcs.Add(new { id = "client:" + c.Name, name = c.Name, state = c.State, kind = "client", stats = c.Stats, via = c.Via,
+                          mac = c.Mac, ip = c.Ip, version = c.Version });
 
         object? appUpdate = null;
         if (!AppUpdater.ServerUpdatesThisPc())
         {
             if (updater.Status != "idle")
-                appUpdate = new { text = updater.Status == "downloading" ? "Downloading the SSH Manager updateâ€¦" : "Installing the updateâ€¦", canInstall = false };
+                appUpdate = new { text = updater.Status == "downloading" ? "Downloading the SSH Manager update…" : "Installing the update…", canInstall = false };
             else if (updater.Available)
                 appUpdate = new { text = $"SSH Manager {updater.Latest} is available (you have {updater.Current}).", canInstall = AppUpdater.IsInstalled() };
             else if (updater.Error is { } err)
@@ -397,7 +451,15 @@ internal sealed class MainForm : Form
                 wizard.OnMessage(type, Str);
                 break;
             case "switch-pc":
-                SwitchTo(Str("id"));
+                SwitchTo(Str("id").StartsWith("client:") ? All : Str("id"));   // clients have no dashboard: show them in All PCs
+                break;
+            case "wake-mac":
+                try
+                {
+                    Wol.Send(Str("mac"), Str("ip") is { Length: > 0 } wip ? [wip] : []);
+                    Balloon("SSH Manager", $"Wake-up signal sent to {Str("name")}.", ToolTipIcon.Info, force: true);
+                }
+                catch (Exception e) { MessageBox.Show(this, e.Message, "Wake up", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
                 break;
             case "add-pc":
                 OpenWizard(null);
@@ -577,7 +639,7 @@ internal sealed class MainForm : Form
     {
         if (!webReady) return;
         wizardOpen = true;
-        Text = edit is null ? "SSH Manager Â· Add a PC" : $"SSH Manager Â· {edit.DisplayName}";
+        Text = edit is null ? "SSH Manager · Add a PC" : $"SSH Manager · {edit.DisplayName}";
         wizard.Open(edit, canCancel: links.Count > 0);
     }
 
@@ -613,7 +675,7 @@ internal sealed class MainForm : Form
     void RemovePc(Link link)
     {
         if (MessageBox.Show(this, $"Remove {link.Pc.DisplayName} from SSH Manager?\n\nThis only removes it from this app. " +
-                "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings â†’ SSH keys if you want to lock this computer out.",
+                "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings → SSH keys if you want to lock this computer out.",
                 "Remove PC", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
         link.Dispose();
         links.Remove(link);

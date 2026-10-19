@@ -37,6 +37,7 @@ internal static class Ui
         .pc-list button.on { background:var(--accent-soft); color:var(--text); }
         .pc-list .add { color:var(--accent); }
         .pc-list .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .pc-list .client-tag { margin-left:auto; font-size:10px; color:var(--faint); }
         .main { min-width:0; display:flex; flex-direction:column; }
         .topbar { height:48px; display:flex; align-items:center; gap:10px; padding:0 20px; border-bottom:1px solid var(--line); }
         .topbar h1 { margin:0; font-size:15px; font-weight:600; }
@@ -52,10 +53,10 @@ internal static class Ui
         chrome.webview.addEventListener("message", e => {
           const m = e.data;
           if (!m || m.type !== "pcs") return;
-          const st = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
+          const st = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : p.client && p.state === "Online" ? "" : "bad";
           document.getElementById("pcbar").innerHTML =
             (m.pcs.length > 1 ? `<button data-pc="all" class="${m.current === "all" ? "on" : ""}"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
-            m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}"><span class="dot ${st(p)}"></span><span class="name">${esc(p.name)}</span></button>`).join("") +
+            m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}${p.client ? " (client)" : ""}"><span class="dot ${st(p)}"></span><span class="name">${esc(p.name)}</span>${p.client ? `<span class="client-tag">client</span>` : ""}</button>`).join("") +
             `<button class="add" data-pc="add"><span class="dot" style="background:var(--accent)"></span><span class="name">Add PC</span></button>`;
           if (window.onPcs) window.onPcs(m);
         });
@@ -149,15 +150,18 @@ internal static class Ui
           if (s.uptime_s != null) rows.push(`<div class="row"><span>Up</span><span>${dur(s.uptime_s)}</span></div>`);
           if (p.sessions != null) rows.push(`<div class="row"><span>SSH sessions now</span><span>${p.sessions}</span></div>`);
           if (p.failures) rows.push(`<div class="row"><span>Failed logins · 24 h</span><span class="warn-text">${p.failures}</span></div>`);
-          const tag = p.kind === "this" ? "this computer · client" : p.version ? "v" + esc(p.version) : "";
-          const acts = p.kind === "this" ? "" : `<div class="actions">
+          if (p.kind === "client") rows.unshift(`<div class="row"><span>${p.state === "Connected" ? "Connected to" : "Status"}</span><span>${p.state === "Connected" ? esc(p.via) : p.state === "Online" ? "Online · not connected" : "Offline"}</span></div>`);
+          const tag = p.kind === "this" ? "this computer · client" : p.kind === "client" ? "client" + (p.version ? " · v" + esc(p.version) : "") : p.version ? "v" + esc(p.version) : "";
+          const acts = p.kind === "this" ? "" : p.kind === "client"
+            ? (p.state === "Offline" && p.mac ? `<div class="actions"><button onclick="send('wake-mac',{mac:'${esc(p.mac)}',ip:'${esc(p.ip)}',name:'${esc(p.name)}'})">Wake up</button></div>` : "")
+            : `<div class="actions">
               ${p.state === "Connected" ? `<button class="primary" onclick="send('switch-pc',{id:'${esc(p.id)}'})">Open</button>` : `<button onclick="send('retry',{id:'${esc(p.id)}'})">Retry</button>`}
               ${p.state !== "Connected" && p.mac ? `<button onclick="send('wake-pc',{id:'${esc(p.id)}'})">Wake up</button>` : ""}
               ${p.canUpdate ? `<button onclick="send('update-pc',{id:'${esc(p.id)}'})">Update to v${esc(p.latest)}</button>` : ""}
               ${p.local ? "" : `<button onclick="send('edit-pc',{id:'${esc(p.id)}'})">Edit</button><button onclick="send('remove-pc',{id:'${esc(p.id)}'})">Remove</button>`}
             </div>`;
-          return `<div class="card"><div class="head"><span class="dot ${p.kind === "this" ? "ok" : st}"></span>${esc(p.name)}${tag ? `<span class="tag">${tag}</span>` : ""}</div>
-            ${p.state !== "Connected" && p.kind !== "this" ? `<div class="msg">${esc(p.message)}</div>` : ""}${rows.join("")}${acts}</div>`;
+          return `<div class="card"><div class="head"><span class="dot ${p.kind === "this" ? "ok" : p.kind === "client" && p.state === "Online" ? "" : st}"></span>${esc(p.name)}${tag ? `<span class="tag">${tag}</span>` : ""}</div>
+            ${p.state !== "Connected" && p.kind === "pc" ? `<div class="msg">${esc(p.message)}</div>` : ""}${rows.join("")}${acts}</div>`;
         }
         chrome.webview.addEventListener("message", e => {
           const m = e.data;

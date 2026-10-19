@@ -33,7 +33,8 @@ sign-in, turn off "Only allow Windows Hello sign-in" there first (Settings → A
 ## Features
 
 - **All PCs:** one overview with every PC's status, CPU, RAM, disks and failed logins; switch between
-  PCs with the bar at the top.
+  PCs in the side bar. Computers that only connect to your PCs (installed as Client) are listed too,
+  with their CPU, memory, disks and battery.
 - **Live sessions:** who is connected over SSH and the command each session is running right now.
 - **Activity log:** every command run over SSH with the full script (`powershell -EncodedCommand`
   scripts are decoded), every file transfer and settings change.

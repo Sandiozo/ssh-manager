@@ -29,7 +29,7 @@ internal static class Ui
         .app { display:grid; grid-template-columns:208px minmax(0, 1fr); min-height:100vh; }
         .rail { position:sticky; top:0; height:100vh; display:flex; flex-direction:column; gap:2px; padding:12px 10px; background:var(--panel); border-right:1px solid var(--line); }
         .brand { display:flex; align-items:center; gap:9px; padding:2px 6px 12px; font-weight:600; font-size:14px; }
-        .logo { font:700 12px var(--mono); background:var(--ok); color:#062814; border-radius:6px; padding:3px 6px; }
+        .logo { width:24px; height:24px; flex:none; }
         .rail-label { font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--faint); padding:10px 8px 4px; }
         .pc-list { display:flex; flex-direction:column; gap:1px; }
         .pc-list button { display:flex; align-items:center; gap:9px; width:100%; height:30px; padding:0 8px; background:none; border:none; border-radius:6px; color:var(--muted); text-align:left; }
@@ -45,6 +45,9 @@ internal static class Ui
         @media (max-width: 860px) { .app { grid-template-columns:52px minmax(0, 1fr); } .brand span:last-child, .rail-label, .pc-list .name { display:none; }
           .pc-list button { justify-content:center; padding:0; } .brand { justify-content:center; } }
         """;
+
+    /// <summary>The app icon for pages shown with NavigateToString (no URL to load a file from).</summary>
+    static readonly string LogoUri = "data:image/png;base64," + Convert.ToBase64String(AppIcon.LogoPng());
 
     /// <summary>Fills the PC list from the app's "pcs" message; clicks go back to the app.</summary>
     public const string PcBarScript = """
@@ -70,7 +73,7 @@ internal static class Ui
         <!doctype html><html><head><meta charset="utf-8"><title>SSH Manager · {{WebUtility.HtmlEncode(title)}}</title><style>{{BaseCss}}{{css}}</style></head>
         <body><div class="app">
           <aside class="rail">
-            <div class="brand"><span class="logo">&gt;_</span><span>SSH Manager</span></div>
+            <div class="brand"><img class="logo" src="{{LogoUri}}" alt=""><span>SSH Manager</span></div>
             <div class="rail-label">PCs</div>
             <div class="pc-list" id="pcbar"></div>
           </aside>

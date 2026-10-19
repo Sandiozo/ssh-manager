@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/banner.jpg" alt="SSH Manager" width="760"></p>
+
 # SSH Manager
 
 See and manage all your Windows PCs from one app: who is connected, what they ran, CPU / RAM /

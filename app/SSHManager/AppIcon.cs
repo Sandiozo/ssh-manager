@@ -1,52 +1,59 @@
 using System.Drawing.Drawing2D;
-using System.Drawing.Text;
 using System.Runtime.InteropServices;
 
 namespace SSHManager;
 
-/// <summary>Tray icons: the app's ">_" mark, colored by connection state.</summary>
+/// <summary>The app's icon, and the tray icons: the icon with a dot showing the connection state.</summary>
 internal static class AppIcon
 {
     static readonly Dictionary<LinkState, Icon> Cache = [];
+    static Image? logo;
 
     public static Icon App => Icon.ExtractAssociatedIcon(Environment.ProcessPath!) ?? SystemIcons.Application;
+
+    /// <summary>The icon as a PNG (embedded resource), e.g. for the app's own pages.</summary>
+    public static byte[] LogoPng()
+    {
+        using var s = typeof(AppIcon).Assembly.GetManifestResourceStream("icon-64.png")!;
+        using var m = new MemoryStream();
+        s.CopyTo(m);
+        return m.ToArray();
+    }
+
+    static Image Logo => logo ??= Image.FromStream(new MemoryStream(LogoPng()));
 
     public static Icon For(LinkState state)
     {
         if (Cache.TryGetValue(state, out var icon)) return icon;
         var color = state switch
         {
-            LinkState.Connected => Color.FromArgb(34, 197, 94),
-            LinkState.Connecting => Color.FromArgb(245, 158, 11),
-            _ => Color.FromArgb(239, 68, 68),
+            LinkState.Connected => Color.FromArgb(52, 199, 123),
+            LinkState.Connecting => Color.FromArgb(232, 163, 23),
+            _ => Color.FromArgb(239, 83, 80),
         };
-        var size = SystemInformation.SmallIconSize.Width * 2 > 32 ? 32 : SystemInformation.SmallIconSize.Width * 2;
-        using var bmp = Draw(Math.Max(16, size), color);
+        var size = Math.Clamp(SystemInformation.SmallIconSize.Width * 2, 16, 32);
+        using var bmp = Draw(size, color);
         var handle = bmp.GetHicon();
         icon = (Icon)Icon.FromHandle(handle).Clone();
         DestroyIcon(handle);
         return Cache[state] = icon;
     }
 
-    static Bitmap Draw(int s, Color bg)
+    static Bitmap Draw(int s, Color dot)
     {
         var bmp = new Bitmap(s, s);
         using var g = Graphics.FromImage(bmp);
         g.SmoothingMode = SmoothingMode.AntiAlias;
-        g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-        var r = Math.Max(2, (int)(s * 0.22));
-        var d = r * 2;
-        using var path = new GraphicsPath();
-        path.AddArc(0, 0, d, d, 180, 90);
-        path.AddArc(s - d - 1, 0, d, d, 270, 90);
-        path.AddArc(s - d - 1, s - d - 1, d, d, 0, 90);
-        path.AddArc(0, s - d - 1, d, d, 90, 90);
-        path.CloseFigure();
-        using (var b = new SolidBrush(bg)) g.FillPath(b, path);
-        using var font = new Font("Consolas", s * 0.42f, FontStyle.Bold, GraphicsUnit.Pixel);
-        using var fmt = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
-        using var fg = new SolidBrush(Color.FromArgb(10, 20, 14));
-        g.DrawString(">_", font, fg, new RectangleF(0, 0, s, s), fmt);
+        g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+        g.PixelOffsetMode = PixelOffsetMode.HighQuality;
+        g.DrawImage(Logo, 0, 0, s, s);
+        // status dot in the bottom-right corner, with a dark ring so it reads on any taskbar
+        var d = s * 0.44f;
+        var ring = Math.Max(1.5f, s / 14f);
+        var rect = new RectangleF(s - d, s - d, d, d);
+        using (var b = new SolidBrush(Color.FromArgb(20, 22, 24))) g.FillEllipse(b, rect);
+        rect.Inflate(-ring, -ring);
+        using (var b = new SolidBrush(dot)) g.FillEllipse(b, rect);
         return bmp;
     }
 

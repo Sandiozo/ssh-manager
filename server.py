@@ -47,7 +47,7 @@ logging.basicConfig(filename=DATA / "server.log", level=logging.INFO,
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
@@ -186,6 +186,11 @@ app.include_router(make_tools_router(config, activity, runner, who))
 app.include_router(make_pairing_router(activity, lambda: monitor.host_name, who))
 loaded_plugins = plugins.load(plugins.PluginContext(config, HOME, monitor, activity, app))
 app.mount("/static", StaticFiles(directory=RES / "static"), name="static")
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(RES / "static" / "favicon.ico", media_type="image/x-icon")
 
 
 @app.get("/")

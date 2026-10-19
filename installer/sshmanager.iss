@@ -38,6 +38,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir={#BuildDir}
 SetupIconFile=..\app\SSHManager\app.ico
+WizardSmallImageFile=wizard-small-58.bmp,wizard-small-73.bmp,wizard-small-87.bmp,wizard-small-116.bmp
 UninstallDisplayIcon={app}\App\SSHManager.exe
 UninstallDisplayName=SSH Manager
 #ifndef PreviewOnly

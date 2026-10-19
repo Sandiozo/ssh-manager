@@ -234,8 +234,12 @@ $("#sessions").onclick = e => {
     if (x.pid === pid) showDetail(`Running · PID ${pid}`, `${s.client} · started ${fmtTime(x.start, true)} · ${x.children.join(", ")}`, x.summary);
 };
 
+let pageReady = false;
 async function pollStatus() {
-  try { renderStatus(await api("/api/status")); }
+  try {
+    renderStatus(await api("/api/status"));
+    if (!pageReady) { pageReady = true; toHost("page-ready"); }   // the app shows this page once it's drawn
+  }
   catch (e) { $("#pills").innerHTML = `<span class="pill">${dot("bad")}Dashboard unreachable</span>`; }
   setTimeout(pollStatus, 3000);
 }

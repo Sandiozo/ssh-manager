@@ -375,10 +375,14 @@ class Monitor:
             failures = [f for f in self.failures if datetime.fromisoformat(f["ts"]) >= day_ago]
             server_events = list(self.server_events)[-5:]
             # addresses that logged in but aren't in the computer list: offered as "add this computer"
+            # known: in the computer list, its SSH Manager app reports in from that address, or it logged
+            # in with a key that has a label here (keys allowed through the app get one)
             known = {ip for p in self.peers.values() for ip in (p.get("ip"), p.get("resolved_ip")) if ip}
+            known |= {c.get("ip") for c in list(self.clients.values()) if c.get("ip")}
+            labelled = {fp for fp, label in self.config.get("keys", {}).items() if label}
             unknown: dict[str, dict] = {}
             for c in self.conn_list:
-                if c["ip"] not in known and c["ip"] not in ("127.0.0.1", "::1"):
+                if c["ip"] not in known and c["ip"] not in ("127.0.0.1", "::1") and c["fp"] not in labelled:
                     u = unknown.setdefault(c["ip"], {"ip": c["ip"], "count": 0, "last": None, "user": c["user"], "fp": c["fp"]})
                     u["count"] += 1
                     u["last"] = c["start"]

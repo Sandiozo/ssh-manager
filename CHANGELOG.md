@@ -3,6 +3,17 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.4.1] - 2026-10-19
+
+### Changed
+- Switching between PCs is instant and no longer flashes: each connected PC's dashboard stays loaded
+  (keeping its page and scroll position), and a PC opened for the first time appears once it is drawn.
+
+### Fixed
+- "Unknown computer logged in" alerts for computers that aren't unknown: logins with a key allowed on
+  that PC (for example through Approve on the other PC) or from a PC whose SSH Manager app reports in
+  are no longer counted as unknown.
+
 ## [1.4.0] - 2026-10-19
 
 ### Added
@@ -172,6 +183,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.4.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.0
 [1.3.13]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.3.13
 [1.3.12]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.3.12

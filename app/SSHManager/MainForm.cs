@@ -20,7 +20,20 @@ internal sealed class MainForm : Form
 
     readonly AppSettings settings;
     readonly List<Link> links = [];
-    readonly WebView2 web = new() { Dock = DockStyle.Fill };
+    /// <summary>The shared view: All PCs, connection status pages and the setup pages.</summary>
+    readonly WebView2 web = new() { Dock = DockStyle.Fill, DefaultBackgroundColor = PageBack() };
+    /// <summary>A PC's dashboard, kept loaded while the PC is connected so switching between PCs is
+    /// instant and each keeps its page and scroll position.</summary>
+    sealed class PcView(WebView2 view, string url, string token)
+    {
+        public readonly WebView2 View = view;
+        public readonly string Url = url, Token = token;
+        public bool Ready;
+    }
+    readonly Dictionary<string, PcView> pcViews = [];
+    WebView2? visible;
+    bool mainPending;
+    CoreWebView2Environment? webEnv;
     readonly NotifyIcon tray = new();
     readonly ToolStripMenuItem startupItem = new("Start with Windows");
     readonly SetupWizard wizard;
@@ -38,7 +51,7 @@ internal sealed class MainForm : Form
     readonly Dictionary<string, (HashSet<string> fails, HashSet<string> unknown)> seen = [];
     readonly HashSet<string> everConnected = [], connectedNow = [];
     bool webReady, exiting, wizardOpen, polling;
-    string current = "", shown = "";
+    string current = "", mainShown = "";
     int downloadSeq;
     object? lastLocalStats;
 
@@ -56,7 +69,7 @@ internal sealed class MainForm : Form
         Controls.Add(web);
 
         pairing = new Pairing(() => links.FirstOrDefault(l => l.Pc.IsLocal));
-        wizard = new SetupWizard(html => { if (webReady) { shown = "wizard"; web.CoreWebView2.NavigateToString(html); } }, OnWizardDone, FindPeer, pairing);
+        wizard = new SetupWizard(html => { if (webReady) { mainShown = "wizard"; NavigateMain(html); } }, OnWizardDone, FindPeer, pairing);
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => links.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(() => Post(sync!.Snapshot())));
@@ -139,8 +152,8 @@ internal sealed class MainForm : Form
             // --devtools-port=N (testing only) exposes the page to Chrome DevTools Protocol on 127.0.0.1:N
             var port = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--devtools-port="))?.Split('=')[1];
             var options = new CoreWebView2EnvironmentOptions(port is null ? null : $"--remote-debugging-port={int.Parse(port)}");
-            var env = await CoreWebView2Environment.CreateAsync(null, Path.Combine(AppSettings.Folder, "WebView2"), options);
-            await web.EnsureCoreWebView2Async(env);
+            webEnv = await CoreWebView2Environment.CreateAsync(null, Path.Combine(AppSettings.Folder, "WebView2"), options);
+            await web.EnsureCoreWebView2Async(webEnv);
         }
         catch (Exception ex)
         {
@@ -149,32 +162,122 @@ internal sealed class MainForm : Form
             ExitApp();
             return;
         }
-        var core = web.CoreWebView2;
-        core.Settings.IsStatusBarEnabled = false;
-        core.NewWindowRequested += (_, a) => { a.Handled = true; OpenExternal(a.Uri); };
-        core.WebMessageReceived += (_, a) => OnPageMessage(a.WebMessageAsJson);
-        core.DownloadStarting += OnDownloadStarting;
-        web.NavigationCompleted += async (_, a) =>
+        Configure(web);
+        visible = web;
+        web.NavigationCompleted += (_, a) =>
         {
-            if (a.IsSuccess)
-            {
-                PushPcs();
-                if (shown == All) PushOverview();
-                return;
-            }
-            // a PC's server restarted under us: try again shortly while its link is still up
-            var link = CurrentLink();
-            if (link is not null && shown == link.Url && link.State == LinkState.Connected)
-            {
-                await Task.Delay(2000);
-                if (shown == link.Url && link.State == LinkState.Connected) web.CoreWebView2.Navigate(link.Url);
-            }
+            if (!a.IsSuccess) return;
+            PushPcs();
+            if (mainShown == All) PushOverview();
+            if (mainPending && WantsMain()) ShowView(web);   // shown once drawn, not while loading
+            mainPending = false;
         };
         webReady = true;
         ShowCurrent();
     }
 
     Link? CurrentLink() => links.FirstOrDefault(l => l.Pc.Id == current);
+
+    // ---- views: one per connected PC plus the shared one; only the one in front is visible ----
+    static Color PageBack() => SystemDark() ? Color.FromArgb(11, 14, 19) : Color.FromArgb(244, 246, 249);
+
+    void Configure(WebView2 v)
+    {
+        var core = v.CoreWebView2;
+        core.Settings.IsStatusBarEnabled = false;
+        core.NewWindowRequested += (_, a) => { a.Handled = true; OpenExternal(a.Uri); };
+        core.WebMessageReceived += (_, a) => OnPageMessage(a.WebMessageAsJson, v);
+        core.DownloadStarting += OnDownloadStarting;
+    }
+
+    IEnumerable<WebView2> AllViews() => pcViews.Values.Select(p => p.View).Prepend(web);
+
+    /// <summary>The shared view is wanted: setup, All PCs, or a PC that isn't connected.</summary>
+    bool WantsMain() => wizardOpen || current == All || CurrentLink() is not { State: LinkState.Connected };
+
+    void ShowView(WebView2 v)
+    {
+        if (visible == v) return;
+        v.Visible = true;
+        v.BringToFront();
+        visible = v;
+        // the others stop painting while hidden (they keep their page); ones still loading stay behind
+        foreach (var o in AllViews())
+            if (o != v && !(o == web ? mainPending : pcViews.Values.Any(p => p.View == o && !p.Ready)))
+                o.Visible = false;
+        PushPcs();
+    }
+
+    /// <summary>Loads a page in the shared view behind the one in front; it comes forward when drawn.</summary>
+    void NavigateMain(string html)
+    {
+        mainPending = true;
+        if (visible != web)
+        {
+            web.Visible = true;   // draws behind the page in front
+            web.SendToBack();
+        }
+        web.CoreWebView2.NavigateToString(html);
+    }
+
+    /// <summary>Shows a connected PC's dashboard: right away when it's already loaded, otherwise it loads
+    /// behind the current page and comes forward once its first data is drawn.</summary>
+    async void OpenPcView(Link link)
+    {
+        var id = link.Pc.Id;
+        if (pcViews.TryGetValue(id, out var pv) && pv.Url == link.Url && pv.Token == link.Token)
+        {
+            if (pv.Ready) ShowView(pv.View);
+            return;
+        }
+        if (pv is not null) DropPcView(id);
+        // the server only answers requests that carry its access token; one cookie per local port
+        // (the cookie store is shared by all views)
+        var cookies = web.CoreWebView2.CookieManager;
+        cookies.AddOrUpdateCookie(cookies.CreateCookie($"sshmgr_token_{link.Port}", link.Token, "localhost", "/"));
+        var v = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = PageBack() };
+        pv = new PcView(v, link.Url, link.Token);
+        pcViews[id] = pv;
+        Controls.Add(v);
+        v.SendToBack();   // load behind the page that is showing now
+        await v.EnsureCoreWebView2Async(webEnv);
+        if (!pcViews.TryGetValue(id, out var still) || still != pv) return;   // dropped while starting
+        Configure(v);
+        v.NavigationCompleted += async (_, a) =>
+        {
+            if (a.IsSuccess)
+            {
+                PushPcs();
+                await Task.Delay(1500);   // pages from older servers don't say when they're drawn
+                Reveal(id, pv);
+                return;
+            }
+            // the PC's server restarted under us: try again shortly while its link is still up
+            await Task.Delay(2000);
+            if (pcViews.TryGetValue(id, out var cur) && cur == pv && link.State == LinkState.Connected)
+                v.CoreWebView2.Navigate(pv.Url);
+        };
+        v.CoreWebView2.Navigate(link.Url);
+    }
+
+    void Reveal(string id, PcView pv)
+    {
+        if (!pcViews.TryGetValue(id, out var cur) || cur != pv || pv.Ready) return;
+        pv.Ready = true;
+        if (current == id && !WantsMain()) ShowView(pv.View);
+    }
+
+    void DropPcView(string id)
+    {
+        if (!pcViews.Remove(id, out var pv)) return;
+        if (visible == pv.View)
+        {
+            visible = null;
+            ShowView(web);
+        }
+        Controls.Remove(pv.View);
+        pv.View.Dispose();
+    }
 
     void SwitchTo(string id)
     {
@@ -198,37 +301,33 @@ internal sealed class MainForm : Form
         if (current == All)
         {
             Text = "SSH Manager · All PCs";
-            if (shown != All)
+            if (mainShown != All)
             {
-                shown = All;
-                web.CoreWebView2.NavigateToString(Ui.Overview());
+                mainShown = All;
+                NavigateMain(Ui.Overview());
                 _ = PollAsync();   // fetch everyone's activity now rather than at the next poll
             }
-            else PushOverview();
+            else
+            {
+                ShowView(web);
+                PushOverview();
+            }
             return;
         }
         var link = CurrentLink() ?? links[0];
         current = link.Pc.Id;
         Text = $"SSH Manager · {link.Pc.DisplayName}" + (link.State == LinkState.Connected ? "" : " (not connected)");
         if (link.State == LinkState.Connected)
-        {
-            if (shown != link.Url)
-            {
-                // the server only answers requests that carry its access token; one cookie per local port
-                var cookies = web.CoreWebView2.CookieManager;
-                cookies.AddOrUpdateCookie(cookies.CreateCookie($"sshmgr_token_{link.Port}", link.Token, "localhost", "/"));
-                shown = link.Url;
-                web.CoreWebView2.Navigate(link.Url);
-            }
-        }
+            OpenPcView(link);
         else
         {
             var key = $"status:{link.Pc.Id}:{link.State}:{link.Message}";
-            if (shown != key)
+            if (mainShown != key)
             {
-                shown = key;
-                web.CoreWebView2.NavigateToString(Ui.StatusPage(link.Pc, link.State, link.Message));
+                mainShown = key;
+                NavigateMain(Ui.StatusPage(link.Pc, link.State, link.Message));
             }
+            else ShowView(web);
         }
     }
 
@@ -246,6 +345,7 @@ internal sealed class MainForm : Form
         else if (state == LinkState.Disconnected && connectedNow.Remove(link.Pc.Id) && settings.NotifyConnection)
             Balloon("SSH Manager", $"Lost the connection to {name}. Reconnecting…", ToolTipIcon.Warning);
 
+        if (state != LinkState.Connected) DropPcView(link.Pc.Id);   // reloaded when it's back
         if (link.Pc.Id == current) ShowCurrent();
         PushPcs();
         if (current == All) PushOverview();
@@ -270,9 +370,15 @@ internal sealed class MainForm : Form
 
     bool IsActive() => Visible && WindowState != FormWindowState.Minimized && ActiveForm == this;
 
-    void Post(object message)
+    /// <summary>A message to the pages: to one view, or to all of them (each has the PC list).</summary>
+    void Post(object message, CoreWebView2? to = null)
     {
-        if (webReady) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(message));
+        if (!webReady) return;
+        var json = JsonSerializer.Serialize(message);
+        foreach (var core in to is not null ? [to] : AllViews().Select(v => v.CoreWebView2).Where(c => c is not null))
+        {
+            try { core.PostWebMessageAsJson(json); } catch (Exception) { }   // a view that is just closing
+        }
     }
 
     void PushPcs() => Post(new
@@ -463,7 +569,7 @@ internal sealed class MainForm : Form
 
     void PushOverview()
     {
-        if (shown != All) return;
+        if (mainShown != All) return;
         var pcs = new List<object>();
         foreach (var l in links)
         {
@@ -518,11 +624,11 @@ internal sealed class MainForm : Form
             else if (updater.Error is { } err)
                 appUpdate = new { text = err, canInstall = false };
         }
-        Post(new { type = "overview", pcs, appUpdate, combined = Combined() });
+        Post(new { type = "overview", pcs, appUpdate, combined = Combined() }, web.CoreWebView2);
     }
 
     // ---- messages from pages ----
-    void OnPageMessage(string json)
+    void OnPageMessage(string json, WebView2? from = null)
     {
         JsonElement m;
         try { m = JsonDocument.Parse(json).RootElement; } catch (JsonException) { return; }
@@ -537,6 +643,9 @@ internal sealed class MainForm : Form
 
         switch (t.GetString())
         {
+            case "page-ready":   // a PC's dashboard has drawn its first data: it can come forward
+                if (pcViews.FirstOrDefault(p => p.Value.View == from) is { Value: not null } ready) Reveal(ready.Key, ready.Value);
+                break;
             case { } type when type.StartsWith("setup-"):
                 wizard.OnMessage(type, Str);
                 break;
@@ -801,7 +910,7 @@ internal sealed class MainForm : Form
     void OnWizardDone(PcEntry? pc)
     {
         wizardOpen = false;
-        shown = "";
+        mainShown = "";
         if (pc is not null)
         {
             // adding a PC that is already in the list updates that entry instead of adding it twice
@@ -836,13 +945,14 @@ internal sealed class MainForm : Form
         if (MessageBox.Show(this, $"Remove {link.Pc.DisplayName} from SSH Manager?\n\nThis only removes it from this app. " +
                 "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings → SSH keys if you want to lock this computer out.",
                 "Remove PC", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
+        DropPcView(link.Pc.Id);
         link.Dispose();
         links.Remove(link);
         settings.Pcs.Remove(link.Pc);
         if (current == link.Pc.Id) current = links.Count > 1 ? All : links.FirstOrDefault()?.Pc.Id ?? "";
         settings.Selected = current;
         settings.Save();
-        shown = "";
+        mainShown = "";
         UpdateTray();
         ShowCurrent();
         PushPcs();
@@ -915,11 +1025,12 @@ internal sealed class MainForm : Form
 
         var id = ++downloadSeq;
         var target = e.ResultFilePath;
+        var page = sender as CoreWebView2;   // progress goes to the page that started the download
         void Report(string state, string? reason = null) => Post(new
         {
             type = "download", id, name = Path.GetFileName(target), received = op.BytesReceived,
             total = op.TotalBytesToReceive ?? 0, state, path = target, reason,
-        });
+        }, page);
         op.BytesReceivedChanged += (_, _) => Report("inprogress");
         op.StateChanged += (_, _) =>
         {

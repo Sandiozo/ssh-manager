@@ -22,6 +22,9 @@ internal sealed class PcEntry
     public int RemotePort { get; set; } = 8765;
     /// <summary>Name the PC reports for itself (learned when connecting).</summary>
     public string PcName { get; set; } = "";
+    /// <summary>MAC and addresses of the PC's network card (learned when connecting), for Wake-on-LAN.</summary>
+    public string Mac { get; set; } = "";
+    public List<string> Ips { get; set; } = [];
 
     [JsonIgnore] public bool IsLocal => Id == LocalId;
     [JsonIgnore] public string Target => User.Trim() != "" ? $"{User.Trim()}@{Host.Trim()}" : Host.Trim();
@@ -48,6 +51,8 @@ internal sealed class AppSettings
     public string DownloadFolder { get; set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
     public bool AskWhereToSave { get; set; }
+    public bool ShareClipboard { get; set; }
+    public List<SyncPair> Syncs { get; set; } = [];
 
     public int[]? WindowBounds { get; set; }
     public bool Maximized { get; set; }

@@ -91,6 +91,7 @@ internal static class Ui
         var id = Esc(pc.Id);
         var buttons = connecting ? "" :
             "<button class=\"primary\" onclick=\"chrome.webview.postMessage({type:'retry', id:'" + id + "'})\">Retry now</button>" +
+            (pc.Mac != "" && !pc.IsLocal ? "<button onclick=\"chrome.webview.postMessage({type:'wake-pc', id:'" + id + "'})\">Wake up PC</button>" : "") +
             (pc.IsLocal ? "" : "<button onclick=\"chrome.webview.postMessage({type:'edit-pc', id:'" + id + "'})\">Change connection…</button>");
         const string css = """
             .box { width:min(560px, 100%); padding:22px 24px; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
@@ -151,6 +152,7 @@ internal static class Ui
           const tag = p.kind === "this" ? "this computer · client" : p.version ? "v" + esc(p.version) : "";
           const acts = p.kind === "this" ? "" : `<div class="actions">
               ${p.state === "Connected" ? `<button class="primary" onclick="send('switch-pc',{id:'${esc(p.id)}'})">Open</button>` : `<button onclick="send('retry',{id:'${esc(p.id)}'})">Retry</button>`}
+              ${p.state !== "Connected" && p.mac ? `<button onclick="send('wake-pc',{id:'${esc(p.id)}'})">Wake up</button>` : ""}
               ${p.canUpdate ? `<button onclick="send('update-pc',{id:'${esc(p.id)}'})">Update to v${esc(p.latest)}</button>` : ""}
               ${p.local ? "" : `<button onclick="send('edit-pc',{id:'${esc(p.id)}'})">Edit</button><button onclick="send('remove-pc',{id:'${esc(p.id)}'})">Remove</button>`}
             </div>`;

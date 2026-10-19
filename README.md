@@ -41,8 +41,22 @@ sign-in, turn off "Only allow Windows Hello sign-in" there first (Settings → A
 - **Files:** browse a PC, drop files or folders anywhere in the window to send them, drag files out
   to download, folders come as zip; rename, delete (to the Recycle Bin), shortcuts. An animated
   transfer panel shows progress, speed and time left.
+- **Run:** one-click quick actions (PowerShell scripts you save, grouped, optionally asking before
+  they run) and a command panel for anything else. Output streams live, runs can be stopped, and the
+  last 50 runs stay on the page. Everything run here is also in the activity log.
+- **Logs:** follow any log file live, like `tail -f`: a file, the newest file in a folder, or the
+  newest match of a pattern such as `C:\Logs\app-*.log`. Filter lines as you type.
+- **Screen:** a live preview of a PC's screen (view only), one monitor at a time, refreshing every
+  1–10 seconds. Can be switched off per PC; every viewing is logged.
+- **Folder sync:** keep a folder on this computer and a folder on a PC the same: this computer → PC,
+  PC → this computer, or both ways. Changes are sent a few seconds after they happen. Sync never
+  deletes files; `.git`, `node_modules` and the like are skipped by default.
+- **Shared clipboard:** text copied on one computer can be pasted on the others (off by default,
+  switch it on in the app settings).
+- **Wake-on-LAN:** wake a PC that's asleep or off from its card. The app learns each PC's network
+  card while connected; the PC needs Wake-on-LAN enabled in its BIOS and network adapter settings.
 - **Settings:** the computers that connect, the SSH keys allowed to log in (add one to set up a
-  computer by hand, remove one to lock it out), file shortcuts, updates.
+  computer by hand, remove one to lock it out), file shortcuts, quick actions, logs, updates.
 - **Tray app:** keeps every connection open, reconnects by itself, notifies about lost connections,
   failed logins, unknown computers and finished transfers.
 - **Automatic updates:** each PC updates itself when a new release is out; app-only PCs ask once.
@@ -76,6 +90,9 @@ show it too.
   to people you'd give that to.
 - The activity log stores full command lines, which can include secrets passed on the command line.
   It stays on that PC.
+- Quick actions and the command panel run with the server's admin rights, the same as an SSH login.
+- The screen preview and shared clipboard only work while someone is signed in to that PC. The
+  preview can be turned off in Settings; the clipboard is off until you switch it on in the app.
 - New host keys are accepted the first time the app connects (trust on first use) and checked after.
 - Updates are downloaded from this repository's GitHub releases and checked against their SHA-256.
 

@@ -171,6 +171,25 @@ def make_router(config: dict, activity: ActivityLog, monitor) -> APIRouter:
         parent = str(p.parent) if p.parent != p else None
         return {"path": str(p), "parent": parent, "items": items}
 
+    @r.get("/tree")
+    def tree(path: str, max_files: int = 100_000):
+        """Every file under a folder with size and modification time (for folder sync)."""
+        root = resolve(path)
+        if not root.is_dir():
+            raise HTTPException(404, f"Not a folder: {root}")
+        files = []
+        for dirpath, _, filenames in os.walk(root):
+            for name in filenames:
+                full = os.path.join(dirpath, name)
+                try:
+                    st = os.stat(full)
+                except OSError:
+                    continue
+                files.append({"rel": Path(full).relative_to(root).as_posix(), "size": st.st_size, "mtime": st.st_mtime})
+                if len(files) > max_files:
+                    raise HTTPException(413, f"More than {max_files} files under {root}.")
+        return {"root": str(root), "files": files}
+
     @r.get("/download")
     def download(request: Request, path: list[str] = Query(...)):
         paths = [resolve(x) for x in path]

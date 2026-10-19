@@ -71,6 +71,10 @@ function showTab(name) {
   store.set("tab", name);
   if (name === "files" && !files.loaded) files.open(store.get("path", null));
   if (name === "settings") settingsUi.open();
+  if (name === "run") runUi.load();
+  if (name === "logs") logUi.load();
+  if (name === "screen") screenUi.open(); else screenUi.stop();
+  if (name === "sync") toHost("sync-get");
 }
 $("#tabs").onclick = e => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); };
 document.addEventListener("click", e => { const g = e.target.closest("[data-goto]"); if (g) showTab(g.dataset.goto); });
@@ -142,7 +146,8 @@ function renderStatus(s) {
       <div class="big">${p.connected ? "Connected" : p.online ? "Online · not connected" : "Offline"}</div>
       ${clientStats(p.stats)}
       <div class="row"><span>Address</span><span>${esc(p.resolved_ip || p.ip || "—")}</span></div>
-      <div class="row"><span>Ping · last login</span><span>${p.online ? (p.latency_ms ?? "<1") + " ms" : p.online === false ? "no reply" : "…"} · ${ago(p.last_login)}</span></div></div>`),
+      <div class="row"><span>Ping · last login</span><span>${p.online ? (p.latency_ms ?? "<1") + " ms" : p.online === false ? "no reply" : "…"} · ${ago(p.last_login)}</span></div>
+      ${!p.online && (p.mac || p.stats?.macs?.[0]) ? `<div><button data-wake="${esc(p.mac || p.stats.macs[0])}" data-ip="${esc(p.ip || "")}">Wake up</button></div>` : ""}</div>`),
     ...(s.other_apps || []).map(c => `<div class="card"><div class="head">${dot("ok")}${esc(c.machine)}<span class="tag green">app</span></div>
       ${clientStats(c)}<div class="muted small">Not in this PC's computer list (Settings → Computers).</div></div>`),
     !dc.installed ? "" : `<div class="card"><div class="head">${dot(dc.online ? "ok" : "")}Desktop Commander<span class="tag">${dc.online ? "online" : "offline"}</span></div>
@@ -324,6 +329,7 @@ const files = {
   updateButtons() {
     const n = this.sel.size;
     $("#fs-download").disabled = !n; $("#fs-delete").disabled = !n; $("#fs-rename").disabled = n !== 1;
+    $("#fs-log").disabled = !(n === 1 && !this.items.find(i => this.sel.has(i.path))?.dir);
     $("#fs-all").checked = n > 0 && n === this.visible().length;
     const size = this.items.filter(i => this.sel.has(i.path) && !i.dir).reduce((a, i) => a + i.size, 0);
     $("#fs-selinfo").textContent = n ? `${n} selected${size ? " · " + fmtBytes(size) : ""}` : "";
@@ -608,7 +614,9 @@ const settingsUi = {
     const body = next || this.draft;
     this.saved = await api("/api/settings", { method: "PUT", json: {
       name: body.name, peers: body.peers, keys: body.keys, bookmarks: body.bookmarks, default_upload: body.default_upload,
-      auto_update: body.auto_update !== false } });
+      auto_update: body.auto_update !== false, actions: body.actions || [], logs: body.logs || [],
+      screen_preview: body.screen_preview !== false } });
+    if (!$("#tab-run").hidden) runUi.load();
     this.draft = structuredClone(this.saved);
     this.touch();
     if (!$("#tab-settings").hidden) this.render();
@@ -619,7 +627,10 @@ const settingsUi = {
     $("#set-name").value = d.name; $("#set-name").placeholder = d.computer_name;
     $("#set-upload").value = d.default_upload;
     $("#set-autoupdate").checked = d.auto_update !== false;
+    $("#set-screen").checked = d.screen_preview !== false;
     renderUpdate();
+    renderActionEditor();
+    renderLogEditor();
     this.renderPeers(true);
     this.renderKeys();
     $("#set-shortcuts").innerHTML = d.bookmarks.map((b, i) => `<tr data-i="${i}">
@@ -637,8 +648,9 @@ const settingsUi = {
       return `<tr data-i="${i}"><td>${dot(l ? (l.connected ? "ok" : l.online ? "warn" : "bad") : "")}</td>
         <td><input data-f="name" value="${esc(p.name)}"></td><td><input data-f="host" value="${esc(p.host)}" spellcheck="false" placeholder="e.g. LAPTOP-1234"></td>
         <td><input data-f="ip" value="${esc(p.ip)}" spellcheck="false" placeholder="192.168.x.x"></td>
+        <td><input data-f="mac" value="${esc(p.mac || "")}" spellcheck="false" placeholder="${esc(l?.stats?.macs?.[0] || "AA:BB:CC:DD:EE:FF")}"></td>
         <td class="muted small">${l ? ago(l.last_login) : "—"}</td><td><button class="icon" data-act="del" title="Remove">✕</button></td></tr>`;
-    }).join("") || `<tr><td colspan="6" class="muted">No computers yet.</td></tr>`;
+    }).join("") || `<tr><td colspan="7" class="muted">No computers yet.</td></tr>`;
     const unknown = (last?.unknown_clients || []).filter(u => !d.peers.some(p => p.ip === u.ip));
     $("#set-unknown").innerHTML = unknown.length ? `<div class="unknown"><b>Logged in, but not in your list:</b>
       ${unknown.slice(0, 8).map(u => `<div><span class="mono">${esc(u.ip)}</span><span class="muted">${u.count} login(s) as ${esc(u.user)}, last ${ago(u.last)}</span>
@@ -768,6 +780,7 @@ $("#set-autoupdate").onchange = e => { settingsUi.draft.auto_update = e.target.c
 // ---------- PC switcher (inside the app) ----------
 hostHandlers.pcs = m => {
   $("#pc-section").hidden = false;
+  appPcs = m.pcs; fillSyncPcs();
   const state = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
   $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
     m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}">${dot(state(p))}<span class="name">${esc(p.name)}</span></button>`).join("") +
@@ -778,6 +791,304 @@ $("#pcbar").onclick = e => {
   toHost(b.dataset.pc === "add" ? "add-pc" : "switch-pc", { id: b.dataset.pc });
 };
 
+// ---------- Run: quick actions and the command panel ----------
+const runUi = {
+  actions: [], current: null, next: 0, timer: null,
+  async load() {
+    try {
+      const r = await api("/api/actions");
+      this.actions = r.actions;
+      this.renderActions();
+      this.renderRuns(r.runs);
+    } catch (e) { toast(e.message, true); }
+    this.renderHistory();
+  },
+  renderActions() {
+    const groups = {};
+    for (const a of this.actions) (groups[a.group || ""] ||= []).push(a);
+    const play = '<svg viewBox="0 0 16 16"><path d="M4 2.5v11l9-5.5z"/></svg>';
+    $("#actions").innerHTML = this.actions.length ? `<div class="action-groups">` + Object.entries(groups).map(([g, list]) =>
+      `<div class="action-group">${g ? `<h4>${esc(g)}</h4>` : ""}<div class="action-grid">` +
+      list.map(a => `<button data-action="${esc(a.id)}" title="${esc(a.script.slice(0, 400))}">${play}${esc(a.name)}</button>`).join("") + `</div></div>`).join("") + `</div>`
+      : `<div class="none">No quick actions yet. Add them under Settings → Quick actions, or type a command below and save it as one.</div>`;
+  },
+  renderRuns(runs) {
+    $("#runs").innerHTML = (runs || []).slice(0, 12).map(r => `<div class="run-row" data-run="${r.id}">${dot(r.status === "running" ? "warn" : r.status === "done" ? "ok" : "bad")}
+      <span class="t">${esc(r.title)}</span><span class="muted small">${esc(r.client)}</span><span class="muted small">${fmtTime(r.started)}</span></div>`).join("")
+      || `<div class="none">Nothing run yet.</div>`;
+  },
+  renderHistory() {
+    const h = store.get("cmdHistory", []);
+    $("#cmd-history").innerHTML = `<option value="">History…</option>` + h.map((c, i) => `<option value="${i}">${esc(c.split("\n")[0].slice(0, 60))}</option>`).join("");
+  },
+  async start(request) {
+    try { const run = await request; this.show(run.id); } catch (e) { toast(e.message, true); }
+  },
+  show(id) {
+    clearTimeout(this.timer);
+    this.current = id; this.next = 0;
+    $("#out-text").textContent = "";
+    this.poll();
+  },
+  async poll() {
+    const id = this.current; if (!id) return;
+    try {
+      const r = await api(`/api/runs/${id}?after=${this.next}`);
+      if (id !== this.current) return;
+      const out = $("#out-text");
+      const atBottom = out.scrollTop + out.clientHeight >= out.scrollHeight - 24;
+      if (r.lines.length) {
+        out.textContent += (out.textContent ? "\n" : "") + r.lines.join("\n");
+        this.next = r.next;
+        if (atBottom) out.scrollTop = out.scrollHeight;
+      }
+      $("#out-title").textContent = r.title;
+      $("#out-state").innerHTML = `<span class="state-chip ${r.status}">${r.status}${r.exit_code != null && r.status !== "done" ? " · exit " + r.exit_code : ""} · ${fmtDur(r.duration_s)}</span>`;
+      $("#out-stop").hidden = r.status !== "running";
+      if (r.status === "running") this.timer = setTimeout(() => this.poll(), 700);
+      else {
+        if (!out.textContent) out.textContent = "(no output)";
+        api("/api/runs").then(x => this.renderRuns(x.runs)).catch(() => { });
+      }
+    } catch (e) { $("#out-state").textContent = e.message; }
+  },
+};
+$("#actions").onclick = e => {
+  const b = e.target.closest("[data-action]"); if (!b) return;
+  const a = runUi.actions.find(x => x.id === b.dataset.action); if (!a) return;
+  if (a.confirm && !confirm(`Run "${a.name}" on ${hostName}?`)) return;
+  runUi.start(api(`/api/actions/${encodeURIComponent(a.id)}/run`, { method: "POST" }));
+};
+$("#runs").onclick = e => { const r = e.target.closest("[data-run]"); if (r) runUi.show(r.dataset.run); };
+$("#out-stop").onclick = () => runUi.current && api(`/api/runs/${runUi.current}/stop`, { method: "POST" }).catch(e => toast(e.message, true));
+function runCommand() {
+  const script = $("#cmd-text").value.trim(); if (!script) return;
+  const h = store.get("cmdHistory", []).filter(c => c !== script);
+  h.unshift(script); store.set("cmdHistory", h.slice(0, 20));
+  runUi.renderHistory();
+  runUi.start(api("/api/run", { method: "POST", json: { script } }));
+}
+$("#cmd-run").onclick = runCommand;
+$("#cmd-text").onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runCommand(); } };
+$("#cmd-history").onchange = e => { const h = store.get("cmdHistory", []); if (e.target.value !== "") $("#cmd-text").value = h[+e.target.value]; e.target.value = ""; };
+$("#cmd-save").onclick = async () => {
+  const script = $("#cmd-text").value.trim(); if (!script) return toast("Type a command first", true);
+  const name = prompt("Name for this quick action:"); if (!name) return;
+  if (!settingsUi.saved) await settingsUi.load();
+  const next = structuredClone(settingsUi.saved);
+  next.actions = [...(next.actions || []), { name, script, group: "", confirm: false }];
+  try { await settingsUi.save(next); toast("Saved as a quick action"); runUi.load(); } catch (e) { toast(e.message, true); }
+};
+$("#actions-edit").onclick = () => { showTab("settings"); setTimeout(() => $("#set-actions").scrollIntoView({ block: "center" }), 300); };
+
+// ---------- Logs ----------
+const logUi = {
+  list: [], sel: null, file: "", offset: -1, lines: [], tail: "", timer: null,
+  async load() {
+    try {
+      const r = await api("/api/logs");
+      this.list = r.logs;
+      this.renderList();
+      if (!this.sel && this.list.length) this.open({ index: 0 });
+      else this.poll();
+    } catch (e) { toast(e.message, true); }
+  },
+  renderList() {
+    $("#log-list").innerHTML = this.list.map(l => `<a data-log="${l.index}" class="${this.sel?.index === l.index ? "active" : ""} ${l.file ? "" : "missing"}" title="${esc(l.file || l.pattern)}">${esc(l.name)}${l.size != null ? `<span class="sz">${fmtBytes(l.size)}</span>` : ""}</a>`).join("")
+      || `<div class="muted small" style="padding:4px 8px">None yet. Add logs under Settings → Logs.</div>`;
+  },
+  open(sel) {
+    this.sel = sel; this.file = ""; this.offset = -1; this.lines = []; this.tail = "";
+    $("#log-text").textContent = "";
+    this.renderList();
+    this.poll();
+  },
+  async poll() {
+    clearTimeout(this.timer);
+    if (!this.sel || $("#tab-logs").hidden) return;
+    const q = this.sel.index != null ? `index=${this.sel.index}` : `path=${encodeURIComponent(this.sel.path)}`;
+    try {
+      const r = await api(`/api/logs/read?${q}&offset=${this.offset}&file=${encodeURIComponent(this.file)}`);
+      if (r.error) $("#log-file").textContent = r.error;
+      else {
+        $("#log-file").textContent = r.file; $("#log-file").title = r.file;
+        if (r.reset) { this.lines = []; this.tail = ""; }
+        if (r.text) {
+          const parts = (this.tail + r.text).replace(/\r/g, "").split("\n");
+          this.tail = parts.pop();
+          this.lines.push(...parts);
+          if (this.lines.length > 5000) this.lines.splice(0, this.lines.length - 5000);
+          this.render();
+        }
+        this.file = r.file; this.offset = r.offset;
+      }
+    } catch (e) { $("#log-file").textContent = e.message; }
+    this.timer = setTimeout(() => this.poll(), 1500);
+  },
+  render() {
+    const el = $("#log-text");
+    const f = $("#log-filter").value.trim().toLowerCase();
+    let lines = this.tail ? this.lines.concat([this.tail]) : this.lines;
+    if (f) {
+      const re = new RegExp(f.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+      el.innerHTML = lines.filter(l => l.toLowerCase().includes(f)).map(l => esc(l).replace(re, m => `<mark>${m}</mark>`)).join("\n");
+    } else el.textContent = lines.join("\n");
+    if ($("#log-follow").checked) el.scrollTop = el.scrollHeight;
+  },
+};
+$("#log-list").onclick = e => { const a = e.target.closest("[data-log]"); if (a) logUi.open({ index: +a.dataset.log }); };
+$("#log-open").onclick = () => { const p = $("#log-path").value.trim(); if (p) logUi.open({ path: p }); };
+$("#log-path").onkeydown = e => { if (e.key === "Enter") $("#log-open").click(); };
+$("#log-filter").oninput = () => logUi.render();
+$("#log-wrap").onchange = e => $("#log-text").classList.toggle("wrap", e.target.checked);
+$("#log-clear").onclick = () => { logUi.lines = []; logUi.tail = ""; logUi.render(); };
+$("#fs-log").onclick = () => { const p = [...files.sel][0]; if (!p) return; $("#log-path").value = p; showTab("logs"); logUi.open({ path: p }); };
+
+// ---------- Screen preview ----------
+const screenUi = {
+  timer: null, url: null, busy: false,
+  async open() {
+    $("#scr-wrap").classList.toggle("fit", $("#scr-fit").checked);
+    try {
+      const r = await api("/api/screen/monitors");
+      $("#scr-monitor").innerHTML = r.monitors.map(m => `<option value="${m.index}">Screen ${m.index} · ${m.width}×${m.height}</option>`).join("");
+      $("#scr-monitor").value = String(store.get("scrMonitor", 1));
+      if (!$("#scr-monitor").value) $("#scr-monitor").value = "1";
+      this.tick(true);
+    } catch (e) { this.message(e.message); }
+  },
+  stop() { clearTimeout(this.timer); },
+  message(text) { $("#scr-msg").hidden = !text; $("#scr-msg").textContent = text || ""; },
+  async tick(force) {
+    clearTimeout(this.timer);
+    if ($("#tab-screen").hidden) return;
+    const rate = +$("#scr-rate").value;
+    if ((force || rate) && !this.busy) {
+      this.busy = true;
+      try {
+        const r = await fetch(`/api/screen?monitor=${$("#scr-monitor").value || 1}&width=${$("#scr-size").value}&t=${Date.now()}`);
+        if (!r.ok) {
+          let m = r.statusText; try { m = (await r.json()).detail; } catch { }
+          this.message(m);
+        } else {
+          const b = await r.blob();
+          const u = URL.createObjectURL(b);
+          $("#scr-img").src = u;
+          if (this.url) URL.revokeObjectURL(this.url);
+          this.url = u;
+          this.message("");
+          $("#scr-info").textContent = `${new Date().toLocaleTimeString()} · ${fmtBytes(b.size)}`;
+        }
+      } catch (e) { this.message(e.message); }
+      finally { this.busy = false; }
+    }
+    if (rate && !$("#tab-screen").hidden) this.timer = setTimeout(() => this.tick(), rate);
+  },
+};
+$("#scr-monitor").onchange = e => { store.set("scrMonitor", +e.target.value); screenUi.tick(true); };
+$("#scr-size").onchange = () => screenUi.tick(true);
+$("#scr-rate").onchange = () => screenUi.tick(true);
+$("#scr-now").onclick = () => screenUi.tick(true);
+$("#scr-fit").onchange = e => $("#scr-wrap").classList.toggle("fit", e.target.checked);
+
+// ---------- Folder sync (runs in the app; this page shows and edits it) ----------
+let appPcs = [];
+const modeArrow = { "to-pc": "→", "from-pc": "←", "two-way": "⇄" };
+hostHandlers["sync-state"] = m => {
+  $("#sync-list").innerHTML = m.pairs.length ? m.pairs.map(p => `<div class="sync-row">
+      ${dot(!p.enabled ? "" : p.state === "error" ? "bad" : p.state === "syncing" ? "warn" : "ok")}
+      <span class="p" title="${esc(p.local)}">${esc(p.local)}</span><span class="arrow">${modeArrow[p.mode] || "→"}</span>
+      <span class="p" title="${esc(p.pcName)}: ${esc(p.remote)}">${esc(p.pcName)}: ${esc(p.remote)}</span>
+      <span class="st" title="${esc(p.message || "")}">${p.enabled ? esc(p.message || "") : "paused"}</span>
+      <span class="btns"><button class="icon" data-sync="now" data-id="${p.id}" title="Sync now">⟳</button>
+        <button class="icon" data-sync="toggle" data-id="${p.id}" title="${p.enabled ? "Pause" : "Resume"}">${p.enabled ? "❚❚" : "▶"}</button>
+        <button class="icon" data-sync="remove" data-id="${p.id}" title="Remove">✕</button></span></div>`).join("")
+    : `<div class="none">No folder pairs yet. Add one below.</div>`;
+};
+hostHandlers["sync-local-picked"] = m => { $("#sync-local").value = m.path || ""; };
+$("#sync-list").onclick = e => {
+  const b = e.target.closest("[data-sync]"); if (!b) return;
+  if (b.dataset.sync === "remove" && !confirm("Stop syncing this folder pair? No files are deleted.")) return;
+  toHost("sync-" + b.dataset.sync, { id: b.dataset.id });
+};
+$("#sync-pick").onclick = () => toHost("sync-pick-local");
+$("#sync-add").onclick = () => {
+  const pair = { local: $("#sync-local").value, pcId: $("#sync-pc").value, remote: $("#sync-remote").value.trim(),
+    mode: $("#sync-mode").value, ignore: $("#sync-ignore").value };
+  if (!pair.local || !pair.remote || !pair.pcId) return toast("Choose both folders and the PC", true);
+  toHost("sync-add", { pair });
+  $("#sync-local").value = ""; $("#sync-remote").value = "";
+};
+function fillSyncPcs() {
+  const sel = $("#sync-pc"), keep = sel.value;
+  sel.innerHTML = appPcs.filter(p => p.id !== "local").map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  if (keep) sel.value = keep;
+  if (!$("#sync-remote").value && files.path) $("#sync-remote").placeholder = files.path;
+}
+
+// ---------- settings: quick actions and logs editors ----------
+function renderActionEditor() {
+  const list = settingsUi.draft?.actions || [];
+  $("#set-actions").innerHTML = list.map((a, i) => `<div class="action-edit" data-i="${i}">
+      <div class="top"><input data-f="name" value="${esc(a.name)}" placeholder="Name">
+        <input data-f="group" value="${esc(a.group || "")}" placeholder="Group (optional)">
+        <label class="check"><input type="checkbox" data-f="confirm" ${a.confirm ? "checked" : ""}> ask first</label>
+        <button class="icon" data-act="up" ${i ? "" : "disabled"}>↑</button><button class="icon" data-act="down" ${i < list.length - 1 ? "" : "disabled"}>↓</button>
+        <button class="icon" data-act="del" title="Remove">✕</button></div>
+      <textarea data-f="script" rows="3" spellcheck="false" placeholder="PowerShell script">${esc(a.script)}</textarea></div>`).join("")
+    || `<div class="none">No quick actions.</div>`;
+}
+function renderLogEditor() {
+  const list = settingsUi.draft?.logs || [];
+  $("#set-logs").innerHTML = list.map((l, i) => `<tr data-i="${i}"><td><input data-f="name" value="${esc(l.name)}"></td>
+      <td style="width:65%"><input data-f="path" value="${esc(l.path)}" spellcheck="false"></td>
+      <td><button class="icon" data-act="del" title="Remove">✕</button></td></tr>`).join("")
+    || `<tr><td colspan="3" class="muted">No logs.</td></tr>`;
+}
+function editList(listName, rerender) {
+  return {
+    input: e => {
+      const row = e.target.closest("[data-i]"); if (!row || !e.target.dataset.f) return;
+      const item = settingsUi.draft[listName][+row.dataset.i];
+      item[e.target.dataset.f] = e.target.type === "checkbox" ? e.target.checked : e.target.value;
+      settingsUi.touch();
+    },
+    click: e => {
+      const b = e.target.closest("[data-act]"); if (!b) return;
+      const list = settingsUi.draft[listName], i = +b.closest("[data-i]").dataset.i;
+      if (b.dataset.act === "del") list.splice(i, 1);
+      else { const j = b.dataset.act === "up" ? i - 1 : i + 1; [list[i], list[j]] = [list[j], list[i]]; }
+      rerender(); settingsUi.touch();
+    },
+  };
+}
+{
+  const ae = editList("actions", renderActionEditor);
+  $("#set-actions").addEventListener("input", ae.input);
+  $("#set-actions").addEventListener("change", ae.input);
+  $("#set-actions").onclick = ae.click;
+  const le = editList("logs", renderLogEditor);
+  $("#set-logs").addEventListener("input", le.input);
+  $("#set-logs").onclick = le.click;
+}
+$("#set-add-action").onclick = () => {
+  (settingsUi.draft.actions ||= []).push({ name: "New action", script: "", group: "", confirm: false });
+  renderActionEditor(); settingsUi.touch();
+  $("#set-actions .action-edit:last-child input")?.select();
+};
+$("#set-add-log").onclick = () => {
+  (settingsUi.draft.logs ||= []).push({ name: "New log", path: files.path ? files.path + "\\*.log" : "C:\\path\\to\\*.log" });
+  renderLogEditor(); settingsUi.touch();
+};
+$("#set-screen").onchange = e => { settingsUi.draft.screen_preview = e.target.checked; settingsUi.touch(); };
+
+// ---------- Wake-on-LAN for computers in the list ----------
+document.addEventListener("click", async e => {
+  const b = e.target.closest("[data-wake]"); if (!b) return;
+  try { await api("/api/wol", { method: "POST", json: { mac: b.dataset.wake, ips: b.dataset.ip ? [b.dataset.ip] : [] } }); toast("Wake-up signal sent"); }
+  catch (err) { toast(err.message, true); }
+});
+
 // ---------- start ----------
 (async function whoami() {
   try {
@@ -787,7 +1098,7 @@ $("#pcbar").onclick = e => {
   if (!viewer || viewer === "SSH tunnel" || viewer === "unknown") setTimeout(whoami, 3000);   // login not logged yet
 })();
 settingsUi.load().then(() => files.markActive()).catch(() => { });
-if (host) $("#app-panel").hidden = false;
+if (host) { $("#app-panel").hidden = false; $("#nav-sync").hidden = false; }
 pollStatus();
 pollActivity();
 showTab(store.get("tab", "overview"));

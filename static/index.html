@@ -21,6 +21,10 @@
     <button data-tab="files"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span></button>
     <button data-tab="activity"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Activity</span></button>
     <button data-tab="connections"><svg viewBox="0 0 24 24"><path d="M8 3v4M16 3v4M6 7h12v4a6 6 0 0 1-12 0zM12 17v4"/></svg><span>Connections</span></button>
+    <button data-tab="run"><svg viewBox="0 0 24 24"><path d="M4 17l6-6-6-6M12 19h8"/></svg><span>Run</span></button>
+    <button data-tab="logs"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></svg><span>Logs</span></button>
+    <button data-tab="screen"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>Screen</span></button>
+    <button data-tab="sync" hidden id="nav-sync"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg><span>Sync</span></button>
     <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Settings</span></button>
     </nav>
     <div class="rail-foot" id="pills"></div>
@@ -79,6 +83,7 @@
           <button id="fs-download" disabled>Download</button>
           <button id="fs-mkdir">New folder</button>
           <button id="fs-rename" disabled>Rename</button>
+          <button id="fs-log" disabled title="Follow this file in the Logs tab">View as log</button>
           <button id="fs-delete" class="danger" disabled>Delete</button>
           <span class="muted" id="fs-selinfo"></span>
           <input type="file" id="pick-files" multiple hidden>
@@ -114,6 +119,88 @@
     </div>
   </section>
 
+  <!-- Run: quick actions and the command panel -->
+  <section id="tab-run" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Quick actions</h2><button class="link" id="actions-edit">Edit actions</button></div>
+      <div id="actions"></div>
+    </div>
+    <div class="grid2 run-grid">
+      <div class="panel">
+        <div class="panel-head"><h2>Command</h2><span class="muted small">PowerShell on this PC · Ctrl+Enter runs it</span></div>
+        <textarea id="cmd-text" rows="7" spellcheck="false" placeholder="Get-Process | Sort-Object CPU -Descending | Select-Object -First 10"></textarea>
+        <div class="row-actions"><button class="primary" id="cmd-run">Run</button><select id="cmd-history"><option value="">History…</option></select>
+          <span class="grow"></span><button class="link" id="cmd-save">Save as quick action</button></div>
+        <div class="panel-head spaced"><h2>Recent runs</h2></div>
+        <div id="runs"></div>
+      </div>
+      <div class="panel output-panel">
+        <div class="panel-head"><h2 id="out-title">Output</h2><span class="grow"></span><span id="out-state"></span><button id="out-stop" hidden>Stop</button></div>
+        <pre id="out-text" class="console">Run an action or a command to see its output here.</pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Logs -->
+  <section id="tab-logs" hidden>
+    <div class="files">
+      <aside class="fs-side">
+        <h3>Logs</h3>
+        <div id="log-list"></div>
+        <h3>Any file</h3>
+        <div class="log-open"><input id="log-path" spellcheck="false" placeholder="C:\path\to\file.log"><button id="log-open">Open</button></div>
+      </aside>
+      <div class="browser">
+        <div class="toolbar">
+          <span class="log-file mono" id="log-file">Choose a log</span><span class="grow"></span>
+          <input id="log-filter" placeholder="Filter lines…" spellcheck="false">
+          <label class="check"><input type="checkbox" id="log-follow" checked> follow</label>
+          <label class="check"><input type="checkbox" id="log-wrap"> wrap</label>
+          <button id="log-clear" title="Clear the view">Clear</button>
+        </div>
+        <pre id="log-text" class="console log-view"></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- Screen -->
+  <section id="tab-screen" hidden>
+    <div class="panel screen-panel">
+      <div class="toolbar flat">
+        <select id="scr-monitor"></select>
+        <select id="scr-size"><option value="960">Small</option><option value="1600" selected>Medium</option><option value="2560">Large</option></select>
+        <select id="scr-rate"><option value="1000">Live (1 s)</option><option value="3000" selected>Every 3 s</option><option value="10000">Every 10 s</option><option value="0">Paused</option></select>
+        <button id="scr-now">Refresh</button>
+        <label class="check"><input type="checkbox" id="scr-fit" checked> fit to window</label>
+        <span class="grow"></span><span class="muted small" id="scr-info"></span>
+      </div>
+      <div class="screen-wrap" id="scr-wrap"><img id="scr-img" alt=""><div class="none" id="scr-msg">Loading…</div></div>
+    </div>
+  </section>
+
+  <!-- Sync (inside the app only) -->
+  <section id="tab-sync" hidden>
+    <div class="panel">
+      <div class="panel-head"><h2>Folder sync</h2><span class="muted small">Keeps a folder on this computer and a folder on a PC in step. Runs in the app while it's open.</span></div>
+      <div id="sync-list"></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Add a folder pair</h2></div>
+      <div class="form">
+        <div class="inline"><input id="sync-local" readonly placeholder="Folder on this computer"><button id="sync-pick">Choose…</button></div>
+        <label>PC <select id="sync-pc"></select></label>
+        <label>Folder on that PC <input id="sync-remote" spellcheck="false" placeholder="D:\Projects\my-folder"></label>
+        <label>Direction <select id="sync-mode">
+          <option value="to-pc">This computer → PC (copy changes to the PC)</option>
+          <option value="from-pc">PC → this computer (copy changes from the PC)</option>
+          <option value="two-way">Both ways (newest copy wins; nothing is deleted)</option>
+        </select></label>
+        <label>Skip <input id="sync-ignore" spellcheck="false" value=".git;node_modules;bin;obj"></label>
+        <div class="row-actions"><button class="primary" id="sync-add">Add and sync now</button></div>
+      </div>
+    </div>
+  </section>
+
   <!-- Connections -->
   <section id="tab-connections" hidden>
     <div id="failures"></div>
@@ -140,13 +227,14 @@
         <label>Display name <input id="set-name" spellcheck="false"></label>
         <label>Folder for dropped files <span class="muted small">(used when the Files tab hasn't been opened)</span>
           <input id="set-upload" spellcheck="false" placeholder="%USERPROFILE%\Desktop"></label>
+        <label class="switch"><input type="checkbox" id="set-screen"> Allow screen preview of this PC</label>
       </div>
     </div>
 
     <div class="panel">
       <div class="panel-head"><h2>Computers</h2><span class="muted small">Computers that connect to this PC. They get a status card, and their logins and commands are labelled with their name.</span></div>
       <div class="table-wrap"><table class="edit">
-        <thead><tr><th></th><th>Name</th><th>Computer name</th><th>IP address</th><th>Last SSH login</th><th></th></tr></thead>
+        <thead><tr><th></th><th>Name</th><th>Computer name</th><th>IP address</th><th>MAC (for waking it)</th><th>Last SSH login</th><th></th></tr></thead>
         <tbody id="set-peers"></tbody>
       </table></div>
       <div class="row-actions"><button id="set-add-peer">+ Add computer</button></div>
@@ -170,6 +258,21 @@
         <textarea id="key-text" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@computer"></textarea>
         <div class="row-actions"><input id="key-label" placeholder="Label, e.g. Work laptop"><button id="key-add" class="primary">Allow this key</button></div>
       </details>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Quick actions</h2><span class="muted small">Buttons on the Run tab. Each runs a PowerShell script on this PC, with admin rights.</span></div>
+      <div id="set-actions"></div>
+      <div class="row-actions"><button id="set-add-action">+ Add action</button></div>
+    </div>
+
+    <div class="panel" id="logs-settings">
+      <div class="panel-head"><h2>Logs</h2><span class="muted small">Files on the Logs tab. A pattern like logs\app-*.log follows the newest match.</span></div>
+      <div class="table-wrap"><table class="edit">
+        <thead><tr><th>Name</th><th>File or pattern</th><th></th></tr></thead>
+        <tbody id="set-logs"></tbody>
+      </table></div>
+      <div class="row-actions"><button id="set-add-log">+ Add log</button></div>
     </div>
 
     <div class="panel">
@@ -208,6 +311,8 @@
         <div class="sub-head">Downloads</div>
         <div class="inline"><input id="app-dl" readonly><button id="app-dl-pick">Change…</button></div>
         <label class="switch"><input type="checkbox" data-app="AskWhereToSave"> Ask where to save each download</label>
+        <div class="sub-head">Clipboard</div>
+        <label class="switch"><input type="checkbox" data-app="ShareClipboard"> Share the clipboard (text) with the PCs this app is connected to</label>
         <div class="sub-head">Connection</div>
         <div class="inline"><input id="app-conn" readonly><button id="app-conn-change">Change connection…</button></div>
       </div>

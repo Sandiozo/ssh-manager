@@ -55,6 +55,9 @@ from sshmgr.activity import ActivityLog  # noqa: E402
 from sshmgr.files import client_label, make_router  # noqa: E402
 from sshmgr.monitor import Monitor  # noqa: E402
 from sshmgr.settings import make_router as make_settings_router  # noqa: E402
+from sshmgr.runner import Runner  # noqa: E402
+from sshmgr.tools import make_router as make_tools_router  # noqa: E402
+from sshmgr import wol  # noqa: E402
 from sshmgr.updater import Updater  # noqa: E402
 
 # any local port: the app may forward from a different local port than this server's
@@ -65,6 +68,7 @@ COOKIE = "sshmgr_token"
 activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
 updater = Updater(config, DATA, activity)
+runner = Runner(activity)
 app = FastAPI(title="SSH Manager", docs_url=None, redoc_url=None)
 
 NOT_LOGGED_IN = """<!doctype html><meta charset="utf-8"><title>SSH Manager</title>
@@ -121,7 +125,9 @@ def who(request: Request) -> str:
 
 @app.get("/api/whoami")
 def whoami(request: Request):
-    return {"viewer": who(request), "host": monitor.host_name, "version": __version__}
+    adapters = wol.own_macs()
+    return {"viewer": who(request), "host": monitor.host_name, "version": __version__,
+            "mac": adapters[0]["mac"] if adapters else None, "ips": [ip for a in adapters for ip in a["ips"]]}
 
 
 @app.get("/api/activity")
@@ -139,6 +145,7 @@ class ClientStats(BaseModel):
     charging: bool | None = None
     uptime_s: int | None = None
     app_version: str = ""
+    macs: list[str] = []
 
 
 @app.post("/api/clients/report")
@@ -167,6 +174,7 @@ def update_install(request: Request):
 
 app.include_router(make_router(config, activity, monitor))
 app.include_router(make_settings_router(config, CONFIG_PATH, DATA, activity, monitor, who))
+app.include_router(make_tools_router(config, activity, runner, who))
 loaded_plugins = plugins.load(plugins.PluginContext(config, HOME, monitor, activity, app))
 app.mount("/static", StaticFiles(directory=RES / "static"), name="static")
 

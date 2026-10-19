@@ -26,6 +26,7 @@ internal static class LocalStats
             charging = hasBattery ? (bool?)(power.PowerLineStatus == PowerLineStatus.Online) : null,
             uptime_s = Environment.TickCount64 / 1000,
             app_version = Application.ProductVersion.Split('+')[0],
+            macs = Wol.OwnMacs(),
         };
     }
 

@@ -4,9 +4,52 @@
   "peers": [],
   "keys": {},
   "bookmarks": [
-    { "name": "Desktop", "path": "%USERPROFILE%\\Desktop" },
-    { "name": "Documents", "path": "%USERPROFILE%\\Documents" },
-    { "name": "Downloads", "path": "%USERPROFILE%\\Downloads" }
+    {
+      "name": "Desktop",
+      "path": "%USERPROFILE%\\Desktop"
+    },
+    {
+      "name": "Documents",
+      "path": "%USERPROFILE%\\Documents"
+    },
+    {
+      "name": "Downloads",
+      "path": "%USERPROFILE%\\Downloads"
+    }
   ],
-  "default_upload": ""
+  "default_upload": "",
+  "actions": [
+    {
+      "id": "disk",
+      "name": "Disk space",
+      "group": "System",
+      "script": "Get-PSDrive -PSProvider FileSystem | Where-Object Used -ne $null | Format-Table Name, @{n='Free GB';e={[math]::Round($_.Free/1GB,1)}}, @{n='Used GB';e={[math]::Round($_.Used/1GB,1)}} -AutoSize"
+    },
+    {
+      "id": "top",
+      "name": "Busiest programs",
+      "group": "System",
+      "script": "Get-Process | Sort-Object CPU -Descending | Select-Object -First 10 Name, Id, @{n='CPU s';e={[math]::Round($_.CPU,0)}}, @{n='RAM MB';e={[math]::Round($_.WorkingSet64/1MB,0)}} | Format-Table -AutoSize"
+    },
+    {
+      "id": "network",
+      "name": "Network addresses",
+      "group": "System",
+      "script": "Get-NetIPAddress -AddressFamily IPv4 | Where-Object IPAddress -ne '127.0.0.1' | Format-Table InterfaceAlias, IPAddress, PrefixLength -AutoSize"
+    },
+    {
+      "id": "restart-pc",
+      "name": "Restart this PC",
+      "group": "Power",
+      "confirm": true,
+      "script": "shutdown.exe /r /t 30 /c 'Restart requested from SSH Manager'; 'Restarting in 30 seconds (cancel with: shutdown /a).'"
+    }
+  ],
+  "logs": [
+    {
+      "name": "Windows setup log",
+      "path": "%WINDIR%\\Logs\\CBS\\CBS.log"
+    }
+  ],
+  "screen_preview": true
 }

@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -25,7 +25,10 @@ internal sealed class MainForm : Form
     readonly ToolStripMenuItem startupItem = new("Start with Windows");
     readonly SetupWizard wizard;
     readonly AppUpdater updater;
+    readonly SyncManager sync;
     readonly System.Windows.Forms.Timer poll = new() { Interval = 5000 };
+    readonly System.Windows.Forms.Timer clipTimer = new() { Interval = 1500 };
+    bool clipBusy;
     readonly bool startHidden;
     readonly Dictionary<string, (HashSet<string> fails, HashSet<string> unknown)> seen = [];
     readonly HashSet<string> everConnected = [], connectedNow = [];
@@ -50,11 +53,12 @@ internal sealed class MainForm : Form
         wizard = new SetupWizard(html => { if (webReady) { shown = "wizard"; web.CoreWebView2.NavigateToString(html); } }, OnWizardDone);
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
+        sync = new SyncManager(settings, id => links.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(() => Post(sync!.Snapshot())));
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open SSH Manager", null, (_, _) => ShowWindow());
         menu.Items.Add("All PCs", null, (_, _) => { ShowWindow(); SwitchTo(All); });
-        menu.Items.Add("Add a PC…", null, (_, _) => { ShowWindow(); OpenWizard(null); });
+        menu.Items.Add("Add a PCâ€¦", null, (_, _) => { ShowWindow(); OpenWizard(null); });
         menu.Items.Add("Reconnect all", null, (_, _) => links.ForEach(l => l.Reconnect()));
         menu.Items.Add(new ToolStripSeparator());
         startupItem.Checked = StartsWithWindows();
@@ -120,6 +124,10 @@ internal sealed class MainForm : Form
         links.ForEach(l => l.Start());
         updater.Start();
         poll.Start();
+        sync.Start();
+        AddClipboardFormatListener(Handle);
+        clipTimer.Tick += async (_, _) => await PollClipboardAsync();
+        clipTimer.Start();
         try
         {
             // --devtools-port=N (testing only) exposes the page to Chrome DevTools Protocol on 127.0.0.1:N
@@ -182,7 +190,7 @@ internal sealed class MainForm : Form
         }
         if (current == All)
         {
-            Text = "SSH Manager · All PCs";
+            Text = "SSH Manager Â· All PCs";
             if (shown != All)
             {
                 shown = All;
@@ -193,7 +201,7 @@ internal sealed class MainForm : Form
         }
         var link = CurrentLink() ?? links[0];
         current = link.Pc.Id;
-        Text = $"SSH Manager · {link.Pc.DisplayName}" + (link.State == LinkState.Connected ? "" : " (not connected)");
+        Text = $"SSH Manager Â· {link.Pc.DisplayName}" + (link.State == LinkState.Connected ? "" : " (not connected)");
         if (link.State == LinkState.Connected)
         {
             if (shown != link.Url)
@@ -228,7 +236,7 @@ internal sealed class MainForm : Form
             connectedNow.Add(link.Pc.Id);
         }
         else if (state == LinkState.Disconnected && connectedNow.Remove(link.Pc.Id) && settings.NotifyConnection)
-            Balloon("SSH Manager", $"Lost the connection to {name}. Reconnecting…", ToolTipIcon.Warning);
+            Balloon("SSH Manager", $"Lost the connection to {name}. Reconnectingâ€¦", ToolTipIcon.Warning);
 
         if (link.Pc.Id == current) ShowCurrent();
         PushPcs();
@@ -307,7 +315,7 @@ internal sealed class MainForm : Form
             if (newFails > 0 && settings.NotifyFailedLogin)
                 Balloon("Failed SSH login", $"{newFails} failed login attempt(s) on {link.Pc.DisplayName}.", ToolTipIcon.Warning, force: link.Pc.Id != current);
             if (unknown.Any(u => !before.unknown.Contains(u)) && settings.NotifyUnknown)
-                Balloon("Unknown computer logged in", $"A computer that isn't in {link.Pc.DisplayName}'s list logged in. See Settings → Computers there.", ToolTipIcon.Warning, force: link.Pc.Id != current);
+                Balloon("Unknown computer logged in", $"A computer that isn't in {link.Pc.DisplayName}'s list logged in. See Settings â†’ Computers there.", ToolTipIcon.Warning, force: link.Pc.Id != current);
         }
         seen[link.Pc.Id] = (fails, unknown);
     }
@@ -350,6 +358,7 @@ internal sealed class MainForm : Form
             {
                 id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString(), message = l.Message.Split('\n')[0],
                 version = l.Version, stats, sessions, failures, latest, canUpdate, local = l.Pc.IsLocal, kind = "pc",
+                mac = l.Pc.Mac,
             });
         }
         if (!links.Any(l => l.Pc.IsLocal) && lastLocalStats is not null)
@@ -359,7 +368,7 @@ internal sealed class MainForm : Form
         if (!AppUpdater.ServerUpdatesThisPc())
         {
             if (updater.Status != "idle")
-                appUpdate = new { text = updater.Status == "downloading" ? "Downloading the SSH Manager update…" : "Installing the update…", canInstall = false };
+                appUpdate = new { text = updater.Status == "downloading" ? "Downloading the SSH Manager updateâ€¦" : "Installing the updateâ€¦", canInstall = false };
             else if (updater.Available)
                 appUpdate = new { text = $"SSH Manager {updater.Latest} is available (you have {updater.Current}).", canInstall = AppUpdater.IsInstalled() };
             else if (updater.Error is { } err)
@@ -412,6 +421,29 @@ internal sealed class MainForm : Form
             case "update-pc":
                 if (ById() is { } up) _ = UpdatePcAsync(up);
                 break;
+            case "wake-pc":
+                if (ById() is { } wake) WakePc(wake);
+                break;
+            case "sync-get":
+                Post(sync.Snapshot());
+                break;
+            case "sync-add" when m.TryGetProperty("pair", out var pr):
+                string P(string n) => pr.TryGetProperty(n, out var v) ? v.GetString() ?? "" : "";
+                sync.Add(new SyncPair { Local = P("local"), PcId = P("pcId"), Remote = P("remote"), Mode = P("mode"), Ignore = P("ignore") });
+                break;
+            case "sync-now":
+                sync.SyncNow(Str("id"));
+                break;
+            case "sync-toggle":
+                sync.Toggle(Str("id"));
+                break;
+            case "sync-remove":
+                sync.Remove(Str("id"));
+                break;
+            case "sync-pick-local":
+                using (var dlg = new FolderBrowserDialog { Description = "Folder on this computer to keep in sync" })
+                    if (dlg.ShowDialog(this) == DialogResult.OK) Post(new { type = "sync-local-picked", path = dlg.SelectedPath });
+                break;
             case "app-update-install":
                 _ = updater.InstallAsync();
                 break;
@@ -457,11 +489,95 @@ internal sealed class MainForm : Form
         }
     }
 
+    void WakePc(Link link)
+    {
+        if (link.Pc.Mac == "")
+        {
+            MessageBox.Show(this, $"SSH Manager doesn't know {link.Pc.DisplayName}'s network card yet. It learns it the next time it's connected.",
+                "Wake up", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+        try
+        {
+            Wol.Send(link.Pc.Mac, link.Pc.Ips);
+            Balloon("SSH Manager", $"Wake-up signal sent to {link.Pc.DisplayName}. It reconnects by itself once it's up.", ToolTipIcon.Info, force: true);
+            link.Reconnect();
+        }
+        catch (Exception e) { MessageBox.Show(this, e.Message, "Wake up", MessageBoxButtons.OK, MessageBoxIcon.Warning); }
+    }
+
+    // ---- shared clipboard (text): local copies go to the PCs, copies on a PC come here ----
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == 0x031D) OnLocalClipboardChanged();   // WM_CLIPBOARDUPDATE
+        base.WndProc(ref m);
+    }
+
+    void OnLocalClipboardChanged()
+    {
+        if (!settings.ShareClipboard) return;
+        string text;
+        try
+        {
+            if (!Clipboard.ContainsText()) return;
+            text = Clipboard.GetText();
+        }
+        catch (Exception) { return; }
+        if (text.Length == 0 || text.Length > 1_000_000) return;
+        foreach (var l in links.Where(l => l.State == LinkState.Connected && !l.Pc.IsLocal && l.ClipText != text).ToList())
+        {
+            l.ClipText = text;
+            _ = SendClipAsync(l, text);
+        }
+    }
+
+    static async Task SendClipAsync(Link link, string text)
+    {
+        try
+        {
+            using var r = await Link.Http.SendAsync(link.Request(HttpMethod.Post, "/api/clipboard",
+                JsonContent.Create(new { text, origin = Environment.MachineName })));
+        }
+        catch (Exception) { }
+    }
+
+    async Task PollClipboardAsync()
+    {
+        if (!settings.ShareClipboard || clipBusy) return;
+        clipBusy = true;
+        try
+        {
+            foreach (var l in links.Where(l => l.State == LinkState.Connected && !l.Pc.IsLocal).ToList())
+            {
+                try
+                {
+                    using var r = await Link.Http.SendAsync(l.Request(HttpMethod.Get, $"/api/clipboard?since={Math.Max(l.ClipSeq, 0)}"));
+                    if (!r.IsSuccessStatusCode) continue;
+                    using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+                    var root = doc.RootElement;
+                    var seq = root.GetProperty("seq").GetInt32();
+                    var first = l.ClipSeq < 0 || seq < l.ClipSeq;   // just enabled, or the PC's server restarted
+                    l.ClipSeq = seq;
+                    if (first || !root.GetProperty("changed").GetBoolean()) continue;
+                    var text = root.GetProperty("text").GetString();
+                    if (string.IsNullOrEmpty(text) || root.GetProperty("origin").GetString() == Environment.MachineName || text == l.ClipText) continue;
+                    l.ClipText = text;
+                    try { Clipboard.SetText(text); } catch (Exception) { }
+                }
+                catch (Exception) { }
+            }
+        }
+        finally { clipBusy = false; }
+    }
+
+    [DllImport("user32.dll")]
+    static extern bool AddClipboardFormatListener(IntPtr hwnd);
+
     void OpenWizard(PcEntry? edit)
     {
         if (!webReady) return;
         wizardOpen = true;
-        Text = edit is null ? "SSH Manager · Add a PC" : $"SSH Manager · {edit.DisplayName}";
+        Text = edit is null ? "SSH Manager Â· Add a PC" : $"SSH Manager Â· {edit.DisplayName}";
         wizard.Open(edit, canCancel: links.Count > 0);
     }
 
@@ -497,7 +613,7 @@ internal sealed class MainForm : Form
     void RemovePc(Link link)
     {
         if (MessageBox.Show(this, $"Remove {link.Pc.DisplayName} from SSH Manager?\n\nThis only removes it from this app. " +
-                "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings → SSH keys if you want to lock this computer out.",
+                "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings â†’ SSH keys if you want to lock this computer out.",
                 "Remove PC", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
         link.Dispose();
         links.Remove(link);
@@ -525,6 +641,7 @@ internal sealed class MainForm : Form
             settings.AutoUpdate,
             settings.DownloadFolder,
             settings.AskWhereToSave,
+            settings.ShareClipboard,
             Connection = CurrentLink() is { } l ? (l.Pc.IsLocal ? "this PC (local)" : l.Pc.Target) : "",
             AppVersion = updater.Current,
             ServerUpdatesApp = AppUpdater.ServerUpdatesThisPc(),
@@ -545,6 +662,7 @@ internal sealed class MainForm : Form
                 case "NotifyTransfers": settings.NotifyTransfers = on; break;
                 case "AutoUpdate": settings.AutoUpdate = on; break;
                 case "AskWhereToSave": settings.AskWhereToSave = on; break;
+                case "ShareClipboard": settings.ShareClipboard = on; links.ForEach(l => l.ClipSeq = -1); break;
             }
         }
         settings.Save();

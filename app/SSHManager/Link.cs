@@ -42,6 +42,9 @@ internal sealed partial class Link : IDisposable
     public string Url => $"http://localhost:{Port}/";
     /// <summary>Latest /api/status from this PC (refreshed by the main window).</summary>
     public JsonElement? Status { get; set; }
+    /// <summary>Shared clipboard: the PC's clipboard change counter we've seen, and the text last exchanged.</summary>
+    public int ClipSeq { get; set; } = -1;
+    public string? ClipText { get; set; }
 
     public Link(PcEntry pc, int preferredPort, Action save)
     {
@@ -117,11 +120,17 @@ internal sealed partial class Link : IDisposable
             using var r = await Http.SendAsync(Request(HttpMethod.Get, "/api/whoami"), ct);
             if (r.StatusCode != HttpStatusCode.OK) return false;
             using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync(ct));
-            var name = doc.RootElement.GetProperty("host").GetString() ?? "";
-            Version = doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() ?? "" : remoteVersion ?? "";
-            if (name != "" && name != Pc.PcName)
+            var root = doc.RootElement;
+            var name = root.GetProperty("host").GetString() ?? "";
+            Version = root.TryGetProperty("version", out var v) ? v.GetString() ?? "" : remoteVersion ?? "";
+            var mac = root.TryGetProperty("mac", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : Pc.Mac;
+            var ips = root.TryGetProperty("ips", out var i) && i.ValueKind == JsonValueKind.Array
+                ? i.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x != "").ToList() : Pc.Ips;
+            if ((name != "" && name != Pc.PcName) || mac != Pc.Mac || !ips.SequenceEqual(Pc.Ips))
             {
-                Pc.PcName = name;
+                if (name != "") Pc.PcName = name;
+                Pc.Mac = mac;
+                Pc.Ips = ips;
                 save();
             }
             return true;

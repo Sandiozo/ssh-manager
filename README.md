@@ -11,12 +11,15 @@ a machine your scripts or AI tools reach over SSH) and want to see what's going 
 Download **[SSHManager-Setup.exe](https://github.com/Sandiozo/ssh-manager/releases/latest/download/SSHManager-Setup.exe)**
 and run it on **every PC** you want to use. The installer asks what the PC should do:
 
-- **Use SSH Manager:** installs the app, to see and manage your other PCs from this one.
-- **Let other PCs manage this PC:** turns on Windows' OpenSSH Server, allows it through the firewall
-  on private networks, and runs SSH Manager in the background (starts at logon).
+- **Client:** installs the app, to see and manage your other PCs from this one.
+- **Client and server:** the same, and your other PCs can manage this one too: it turns on
+  Windows' OpenSSH Server, allows it through the firewall on private networks, and runs SSH Manager
+  in the background (starts at logon).
 
-Most people pick **both** on every PC. Everything it needs is included or downloaded for you
-(the .NET Desktop Runtime and WebView2 if they're missing; no Python needed).
+Pick **Client and server** on the PCs you want to reach (a desktop, a home server) and **Client** on
+the ones you only work from (a laptop). The page shows what's installed now and what will be
+downloaded: the .NET Desktop Runtime and WebView2 if they're missing, and OpenSSH Server for the
+server role. No Python needed. Run the installer again any time to switch.
 
 Then, in the app, click **+ Add PC** and enter the other PC's name (or use **Search my network**)
 and your Windows user name there. The first time, a window asks for that account's Windows password

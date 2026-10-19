@@ -8,38 +8,45 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<nav class="pcbar" id="pcbar"></nav>
-<header class="top">
-  <div class="brand">
-    <span class="logo">&gt;_</span>
-    <div>
-      <div class="title" id="title">SSH Manager</div>
-      <div class="sub" id="hostline">connecting…</div>
+<div class="app">
+  <aside class="rail">
+    <div class="brand"><span class="logo">&gt;_</span><span class="brand-name">SSH Manager</span></div>
+    <div class="rail-section" id="pc-section" hidden>
+      <div class="rail-label">PCs</div>
+      <div class="pc-list" id="pcbar"></div>
     </div>
-  </div>
-  <div class="pills" id="pills"></div>
-</header>
+    <div class="rail-label">Dashboard</div>
+    <nav class="nav" id="tabs">
+    <button data-tab="overview" class="active"><svg viewBox="0 0 24 24"><path d="M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z"/></svg><span>Overview</span></button>
+    <button data-tab="files"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg><span>Files</span></button>
+    <button data-tab="activity"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>Activity</span></button>
+    <button data-tab="connections"><svg viewBox="0 0 24 24"><path d="M8 3v4M16 3v4M6 7h12v4a6 6 0 0 1-12 0zM12 17v4"/></svg><span>Connections</span></button>
+    <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Settings</span></button>
+    </nav>
+    <div class="rail-foot" id="pills"></div>
+  </aside>
 
-<nav class="tabs" id="tabs">
-  <button data-tab="overview" class="active">Overview</button>
-  <button data-tab="files">Files</button>
-  <button data-tab="activity">Activity</button>
-  <button data-tab="connections">Connections</button>
-  <button data-tab="settings">Settings</button>
-</nav>
+  <div class="main">
+  <header class="topbar">
+    <div class="topbar-title">
+      <h1 id="title">SSH Manager</h1>
+      <span class="sub" id="hostline">connecting…</span>
+    </div>
+    <div class="topbar-right" id="viewer-chip"></div>
+  </header>
 
 <main>
   <!-- Overview -->
   <section id="tab-overview">
     <div id="notice"></div>
+    <div class="kpis" id="kpis"></div>
+    <div class="section-title">Computers</div>
     <div class="cards" id="cards"></div>
-    <div class="panel">
-      <div class="panel-head"><h2>Live sessions</h2><span class="muted" id="session-count"></span></div>
-      <div id="sessions"></div>
-    </div>
     <div class="grid2">
       <div class="panel">
-        <div class="panel-head"><h2>SSH logins · last 24 hours</h2><span class="muted" id="login-total"></span></div>
+        <div class="panel-head"><h2>Live sessions</h2><span class="muted small" id="session-count"></span></div>
+        <div id="sessions"></div>
+        <div class="panel-head spaced"><h2>SSH logins · 24 h</h2><span class="muted small" id="login-total"></span></div>
         <div class="bars" id="hours"></div>
       </div>
       <div class="panel">
@@ -52,7 +59,7 @@
   <!-- Files -->
   <section id="tab-files" hidden>
     <div class="files">
-      <aside class="side">
+      <aside class="fs-side">
         <h3>Shortcuts</h3>
         <div id="bookmarks"></div>
         <h3>Drives</h3>
@@ -207,6 +214,8 @@
     </div>
   </section>
 </main>
+  </div>
+</div>
 
 <!-- drop anywhere -->
 <div class="dropzone" id="dropzone">

@@ -257,6 +257,7 @@ internal sealed partial class Link : IDisposable
         p.OutputDataReceived += (_, e) => Keep(e.Data, store: true);
         p.ErrorDataReceived += (_, e) => Keep(e.Data, store: true);
         p.Start();
+        ProcessJob.Add(p);   // ends with the app, even if the app is killed
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         ssh = p;

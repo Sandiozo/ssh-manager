@@ -233,29 +233,24 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
                 </div>
                 """,
         };
-        show($$"""
-            <!doctype html><html><head><meta charset="utf-8"><title>SSH Manager</title><style>
-              {{Ui.BaseCss}}
-              body { display:flex; align-items:center; justify-content:center; min-height:100vh; }
-              .box { width:min(540px, 90vw); padding:28px 32px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
-              h2 { font-size:18px; margin:14px 0 6px; } p { color:var(--muted); margin:0 0 14px; } .small { font-size:12px; margin-top:6px; }
-              label { display:flex; flex-direction:column; gap:4px; margin-bottom:12px; color:var(--muted); font-size:13px; }
-              .row { display:flex; gap:6px; } .row input { flex:1; }
-              details { margin:4px 0 12px; } summary { cursor:pointer; color:var(--accent); margin-bottom:8px; }
-              .buttons { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
-              .err { white-space:pre-wrap; background:color-mix(in srgb, var(--bad) 12%, var(--panel)); border:1px solid color-mix(in srgb, var(--bad) 50%, transparent);
-                     border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:13px; max-height:220px; overflow:auto; }
-              .center { display:flex; align-items:center; gap:10px; justify-content:center; padding:30px 0; }
-              .found { display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 12px; }
-              .pick { font-size:12.5px; padding:5px 10px; } .pick span { color:var(--muted); margin-left:4px; }
-            </style></head><body>{{Ui.PcBar}}<div class="box"><div class="logo">&gt;_</div>
-            {{body}}
-            </div><script>
-              const v = id => (document.getElementById(id) || {}).value || "";
-              function send(type, data) { chrome.webview.postMessage({ type, ...(data || {}) }); }
-              document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "host") document.querySelector(".primary").click(); });
-              {{Ui.PcBarScript}}
-            </script></body></html>
-            """);
+        const string css = """
+            .box { width:min(520px, 100%); padding:20px 22px; background:var(--panel); border:1px solid var(--line); border-radius:10px; }
+            h2 { font-size:15px; margin:0 0 6px; } p { color:var(--muted); margin:0 0 12px; font-size:12.5px; } .small { font-size:11.5px; margin-top:6px; }
+            label { display:flex; flex-direction:column; gap:4px; margin-bottom:10px; color:var(--muted); font-size:12px; }
+            .row { display:flex; gap:6px; } .row input { flex:1; }
+            details { margin:2px 0 10px; } summary { cursor:pointer; color:var(--accent); margin-bottom:6px; font-size:12.5px; }
+            .buttons { display:flex; justify-content:flex-end; gap:8px; margin-top:6px; }
+            .err { white-space:pre-wrap; background:color-mix(in srgb, var(--bad) 10%, var(--panel)); border:1px solid color-mix(in srgb, var(--bad) 45%, transparent);
+                   border-radius:6px; padding:8px 10px; margin-bottom:12px; font-size:12px; max-height:200px; overflow:auto; }
+            .center { display:flex; align-items:center; gap:10px; justify-content:center; padding:24px 0; }
+            .found { display:flex; flex-wrap:wrap; gap:6px; margin:-2px 0 10px; }
+            .pick { font-size:12px; height:26px; padding:2px 9px; } .pick span { color:var(--muted); margin-left:4px; }
+            """;
+        const string script = """
+            const v = id => (document.getElementById(id) || {}).value || "";
+            function send(type, data) { chrome.webview.postMessage({ type, ...(data || {}) }); }
+            document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "host") document.querySelector(".primary").click(); });
+            """;
+        show(Ui.Shell(editing is null ? "Add a PC" : editing.DisplayName, css, $"<div class=\"box\">{body}</div>", script, center: true));
     }
 }

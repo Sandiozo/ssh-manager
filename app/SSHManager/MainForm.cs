@@ -186,7 +186,7 @@ internal sealed class MainForm : Form
             if (shown != All)
             {
                 shown = All;
-                web.CoreWebView2.NavigateToString(Ui.Overview);
+                web.CoreWebView2.NavigateToString(Ui.Overview());
             }
             else PushOverview();
             return;

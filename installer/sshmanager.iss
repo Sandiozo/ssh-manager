@@ -1,8 +1,8 @@
 ; SSH Manager installer (Inno Setup 6). Built by build.ps1, which first puts the app, the server and
 ; HiddenRun into ..\build\{app,server,tools}.
-;  - "What should this PC do?" page: the app (manage other PCs) and/or the server (let other PCs manage
-;    this one). Roles already installed can't be chosen again, only removed; the page lists which
-;    dependencies are already there and which will be downloaded.
+;  - "What should this PC do?" page: Client (the app, to manage other PCs) or Client and server (also
+;    let other PCs manage this one). It shows what is installed now and which dependencies are already
+;    there or will be downloaded.
 ;  - Downloads and installs the .NET 8 Desktop Runtime and the WebView2 Runtime if the app needs them.
 ;  - The server role turns on Windows' OpenSSH Server and starts SSH Manager at logon (server-setup.ps1).
 ;  - Also used for updates: run silently (/VERYSILENT) it keeps the roles chosen before.
@@ -93,8 +93,7 @@ const
 var
   DownloadPage: TDownloadWizardPage;
   RolePage: TWizardPage;
-  AppBox, ServerBox, RemoveAppBox, RemoveServerBox: TNewCheckBox;
-  NowLabel, DepsLabel: TNewStaticText;
+  DepsLabel: TNewStaticText;
   AppInstalled, ServerInstalled, RemoveApp: Boolean;
   AppChosen, ServerChosen: Boolean;   { what this run installs; see WantApp / WantServer }
   AppWasRunning: Boolean;
@@ -150,16 +149,14 @@ begin
   Result := FileExists(ExpandConstant('{sys}\OpenSSH\sshd.exe'));
 end;
 
-{ ---- "What should this PC do?" ---- }
+{ ---- "What should this PC do?": Client, or Client and server ---- }
 
-function WillHaveApp: Boolean;
-begin
-  if AppInstalled then Result := not RemoveAppBox.Checked else Result := AppBox.Checked;
-end;
+var
+  ClientRadio, BothRadio: TNewRadioButton;
 
 function WillHaveServer: Boolean;
 begin
-  if ServerInstalled then Result := not RemoveServerBox.Checked else Result := ServerBox.Checked;
+  Result := (BothRadio <> nil) and BothRadio.Checked;
 end;
 
 function DepLine(const Name: String; Present: Boolean; const Download: String): String;
@@ -174,28 +171,13 @@ procedure RolesChanged(Sender: TObject);
 var
   S: String;
 begin
-  { ticking a box while the page is still being built fires this too }
-  if (RemoveServerBox = nil) or (DepsLabel = nil) then Exit;
-  S := '';
-  if WillHaveApp then
-    S := S + DepLine('.NET Desktop Runtime 8', HasDotNetDesktop, 'about 55 MB') + #13#10 +
-             DepLine('WebView2 Runtime', HasWebView2, 'about 2 MB') + #13#10;
+  { choosing a button while the page is still being built fires this too }
+  if (BothRadio = nil) or (DepsLabel = nil) then Exit;
+  S := DepLine('.NET Desktop Runtime 8', HasDotNetDesktop, 'about 55 MB') + #13#10 +
+       DepLine('WebView2 Runtime', HasWebView2, 'about 2 MB') + #13#10;
   if WillHaveServer then
     S := S + DepLine('Windows'' OpenSSH Server', HasOpenSshServer, 'from Windows Update; can take 5-15 minutes') + #13#10;
-  if S = '' then S := '   Nothing.';
   DepsLabel.Caption := S;
-end;
-
-function AddBox(const Caption: String; Left, Top: Integer): TNewCheckBox;
-begin
-  Result := TNewCheckBox.Create(RolePage);
-  Result.Parent := RolePage.Surface;
-  Result.Left := Left;
-  Result.Top := Top;
-  Result.Width := RolePage.SurfaceWidth - Left;
-  Result.Height := ScaleY(18);
-  Result.Caption := Caption;
-  Result.OnClick := @RolesChanged;
 end;
 
 function AddText(const Caption: String; Left, Top: Integer; Bold: Boolean): TNewStaticText;
@@ -211,41 +193,36 @@ begin
   if Bold then Result.Font.Style := [fsBold];
 end;
 
-var
-  NewBox, NewRemoveBox: TNewCheckBox;   { set by AddRole }
-
-{ One role: a checkbox to add it, or, when it's already installed, a locked "installed" line and a
-  "Remove" checkbox. Leaves them in NewBox / NewRemoveBox and returns the next free Top. }
-function AddRole(const Name, Description: String; Installed: Boolean; Top: Integer): Integer;
-var
-  T: TNewStaticText;
+function AddRadio(const Caption: String; Top: Integer): TNewRadioButton;
 begin
-  if Installed then
-  begin
-    NewBox := AddBox(Name + ' (installed)', 0, Top);
-    NewBox.Checked := True;
-    NewBox.Enabled := False;
-  end
-  else
-    NewBox := AddBox(Name, 0, Top);
-  T := AddText(Description, ScaleX(18), NewBox.Top + NewBox.Height, False);
-  Result := T.Top + T.Height + ScaleY(4);
-  NewRemoveBox := AddBox('Remove it from this PC', ScaleX(18), Result);
-  NewRemoveBox.Visible := Installed;
-  if Installed then Result := NewRemoveBox.Top + NewRemoveBox.Height;
-  Result := Result + ScaleY(12);
+  Result := TNewRadioButton.Create(RolePage);
+  Result.Parent := RolePage.Surface;
+  Result.Left := 0;
+  Result.Top := Top;
+  Result.Width := RolePage.SurfaceWidth;
+  Result.Height := ScaleY(18);
+  Result.Caption := Caption;
+  Result.Font.Style := [fsBold];
+  Result.OnClick := @RolesChanged;
+end;
+
+function InstalledNow(Yes: Boolean): String;
+begin
+  if Yes then Result := '   (installed now)' else Result := '';
 end;
 
 procedure InitializeWizard;
 var
   Dir, Now, Roles: String;
   Top: Integer;
+  T: TNewStaticText;
 begin
   DownloadPage := CreateDownloadPage(SetupMessage(msgWizardPreparing), 'Downloading what SSH Manager needs...', nil);
 
   Dir := PreviousDir;
   AppInstalled := (Dir <> '') and FileExists(Dir + 'App\SSHManager.exe');
   ServerInstalled := (Dir <> '') and FileExists(Dir + 'Server\SSHManagerServer.exe') and ServerTaskExists;
+  { silent installs (updates) keep what is there; /ROLES=app,server picks the roles for a new one }
   Roles := Lowercase(ExpandConstant('{param:ROLES|}'));
   if Roles <> '' then
   begin
@@ -265,26 +242,24 @@ begin
 
   RolePage := CreateCustomPage(wpLicense, 'What should this PC do?',
     'You can change this later by running this installer again.');
-  Now := '';
-  if AppInstalled then Now := 'the app';
-  if ServerInstalled then
+  Top := 0;
+  if ServerInstalled then Now := 'Client and server' else if AppInstalled then Now := 'Client' else Now := '';
+  if Now <> '' then
   begin
-    if Now <> '' then Now := Now + ' and ';
-    Now := Now + 'letting other PCs manage it';
+    T := AddText('This PC is set up as: ' + Now + '. Keep that choice to just update it.', 0, 0, False);
+    Top := T.Top + T.Height + ScaleY(14);
   end;
-  if Now = '' then Now := 'nothing yet';
-  NowLabel := AddText('Installed on this PC now: ' + Now + '.', 0, 0, False);
-  Top := NowLabel.Top + NowLabel.Height + ScaleY(12);
-  Top := AddRole('Use SSH Manager on this PC', 'See and manage your other PCs from this one.', AppInstalled, Top);
-  AppBox := NewBox;
-  RemoveAppBox := NewRemoveBox;
-  Top := AddRole('Let other PCs manage this PC',
-    'Turns on Windows'' OpenSSH Server and runs SSH Manager in the background, so your other PCs can connect to this one.',
-    ServerInstalled, Top);
-  ServerBox := NewBox;
-  RemoveServerBox := NewRemoveBox;
-  AddText('Needed for this, and what happens with it:', 0, Top, True);
+  ClientRadio := AddRadio('Client' + InstalledNow(AppInstalled and not ServerInstalled), Top);
+  T := AddText('Use SSH Manager on this PC to see and manage your other PCs. Your other PCs can''t connect to this one.',
+    ScaleX(18), ClientRadio.Top + ClientRadio.Height + ScaleY(2), False);
+  Top := T.Top + T.Height + ScaleY(12);
+  BothRadio := AddRadio('Client and server' + InstalledNow(ServerInstalled), Top);
+  T := AddText('The same, and your other PCs can manage this one too: turns on Windows'' OpenSSH Server and runs SSH Manager in the background.',
+    ScaleX(18), BothRadio.Top + BothRadio.Height + ScaleY(2), False);
+  Top := T.Top + T.Height + ScaleY(18);
+  AddText('Needed for this:', 0, Top, True);
   DepsLabel := AddText('', 0, Top + ScaleY(18), False);
+  if ServerInstalled then BothRadio.Checked := True else ClientRadio.Checked := True;
   RolesChanged(nil);
 end;
 
@@ -347,18 +322,9 @@ begin
 
   if (RolePage <> nil) and (CurPageID = RolePage.ID) then
   begin
-    if not (WillHaveApp or WillHaveServer) then
-    begin
-      if AppInstalled or ServerInstalled then
-        MsgBox('To remove SSH Manager completely, uninstall it in Settings > Apps.', mbInformation, MB_OK)
-      else
-        MsgBox('Choose at least one option.', mbInformation, MB_OK);
-      Result := False;
-      Exit;
-    end;
-    AppChosen := WillHaveApp;
+    AppChosen := True;
     ServerChosen := WillHaveServer;
-    RemoveApp := AppInstalled and not AppChosen;
+    RemoveApp := False;
     Exit;
   end;
 

@@ -99,15 +99,18 @@ function renderStatus(s) {
   const dc = s.desktop_commander;
   document.title = `SSH Manager · ${s.host.name}`;
   $("#title").textContent = s.host.name;
-  $("#hostline").textContent = `${s.host.ips.join(", ")} · up ${fmtDur(s.host.uptime_s)}${viewer && viewer !== s.host.name ? " · you are on " + viewer : ""}`;
+  $("#hostline").textContent = `${s.host.ips.join(", ")} · up ${fmtDur(s.host.uptime_s)}`;
+  $("#viewer-chip").innerHTML = viewer && viewer !== s.host.name ? `<span class="chip">${dot("ok")}you're on ${esc(viewer)}</span>` : "";
   $("#lane-right").textContent = s.host.name;
   $("#drop-host").textContent = s.host.name;
 
-  const pills = [`<span class="pill">${dot(sshOk ? "ok" : "bad")}SSH server ${sshOk ? "running" : s.sshd.status}</span>`];
-  for (const p of s.peers)
-    pills.push(`<span class="pill">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)} ${p.connected ? "connected" : p.online ? "online, idle" : "offline"}</span>`);
-  if (dc.installed) pills.push(`<span class="pill">${dot(dc.online ? "ok" : "")}Desktop Commander ${dc.state}</span>`);
+  // status in the sidebar footer
+  const pill = (state, text, title) => `<div class="pill" title="${esc(title || text)}">${dot(state)}<span class="t">${esc(text)}</span></div>`;
+  const pills = [pill(sshOk ? "ok" : "bad", sshOk ? "SSH server running" : `SSH server ${s.sshd.status}`)];
+  if (dc.installed) pills.push(pill(dc.online ? "ok" : "", `Desktop Commander ${dc.state}`));
+  pills.push(`<div class="pill muted small"><span class="t">v${esc(s.version || "")}</span></div>`);
   $("#pills").innerHTML = pills.join("");
+
   const u = s.update || {};
   const upd = u.status && u.status !== "idle" ? `<div class="alert update"><span>${u.status === "downloading" ? "Downloading" : "Installing"} SSH Manager ${esc(u.latest)}… the page reconnects by itself.</span></div>`
     : u.available ? `<div class="alert update"><span><b>SSH Manager ${esc(u.latest)} is available</b> on ${esc(s.host.name)} (it has ${esc(u.current)}).
@@ -115,33 +118,34 @@ function renderStatus(s) {
         ${u.installable ? `<button class="primary" data-update-now>Install now</button>` : ""}</div>` : "";
   $("#notice").innerHTML = upd + (s.elevated ? "" : `<div class="alert warnish"><b>Running without admin rights.</b>
     SSH commands from an admin account run elevated, so their contents show as "hidden", and SSH keys can't be managed,
-    until SSH Manager runs as admin. Opening the SSH Manager app on another computer starts it with admin rights,
-    or reinstall SSH Manager on this PC with "Let other PCs manage this PC".</div>`);
+    until SSH Manager runs as admin. Reinstall SSH Manager on this PC as "Client and server" to fix it.</div>`);
 
+  // KPI tiles
   const ram = s.host.ram;
+  const kpi = (label, value, sub, extra = "", cls = "") =>
+    `<div class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value ${cls}">${value}</div>${sub ? `<div class="kpi-sub">${sub}</div>` : ""}${extra}</div>`;
+  $("#kpis").innerHTML = [
+    kpi(`${dot(sshOk ? "ok" : "bad")}SSH server`, sshOk ? "Running" : esc(s.sshd.status), `port 22 · ${esc(s.sshd.start_type || "")}`),
+    kpi("Sessions now", s.sessions.length, s.sessions.length ? esc([...new Set(s.sessions.map(x => x.client))].join(", ")) : "nobody connected"),
+    kpi("Logins · 24 h", s.logins_24h, `${s.unknown_clients.length ? s.unknown_clients.length + " unknown computer(s)" : "all from known computers"}`),
+    kpi("Failed logins · 24 h", s.failures_24h.length, s.failures_24h.length ? `last from ${esc(s.failures_24h.at(-1).ip)}` : "none", "", s.failures_24h.length ? "bad" : ""),
+    kpi("CPU", `${s.host.cpu.toFixed(0)}%`, "", meter(s.host.cpu)),
+    kpi("Memory", `${ram.percent.toFixed(0)}%`, `${fmtBytes(ram.used)} of ${fmtBytes(ram.total)}`, meter(ram.percent)),
+  ].join("");
+
+  // computers: this PC, the computers that connect to it, and Desktop Commander if installed
   const disks = s.host.disks.map(d => `<div class="row"><span>${esc(d.mount)}</span><span>${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</span></div>${meter(d.percent)}`).join("");
   const cards = [
-    `<div class="card"><div class="head">${dot(sshOk ? "ok" : "bad")}SSH server</div>
-      <div class="big">${sshOk ? "Running" : esc(s.sshd.status)}</div>
-      <div class="row"><span>Port 22</span><span>${s.sshd.listening ? "listening" : "not listening"}</span></div>
-      <div class="row"><span>Startup</span><span>${esc(s.sshd.start_type || "—")}</span></div>
-      <div class="row"><span>Logins (24h)</span><span>${s.logins_24h}</span></div>
-      <div class="row"><span>Failed logins (24h)</span><span style="color:${s.failures_24h.length ? "var(--bad)" : ""}">${s.failures_24h.length}</span></div></div>`,
-    `<div class="card"><div class="head">${dot("ok")}${esc(s.host.name)}</div>
-      <div class="row"><span>CPU</span><span>${s.host.cpu.toFixed(0)}%</span></div>${meter(s.host.cpu)}
-      <div class="row"><span>RAM</span><span>${fmtBytes(ram.used)} / ${fmtBytes(ram.total)}</span></div>${meter(ram.percent)}
-      ${disks}</div>`,
-    ...s.peers.map(p => `<div class="card"><div class="head">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)}${p.stats ? `<span class="tag green" style="margin-left:auto">app</span>` : ""}</div>
+    `<div class="card"><div class="head">${dot("ok")}${esc(s.host.name)}<span class="tag blue">this PC · server</span></div>
+      <div class="row"><span>Uptime</span><span>${fmtDur(s.host.uptime_s)}</span></div>${disks}</div>`,
+    ...s.peers.map(p => `<div class="card"><div class="head">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)}${p.stats ? `<span class="tag green">app</span>` : ""}</div>
       <div class="big">${p.connected ? "Connected" : p.online ? "Online · not connected" : "Offline"}</div>
       ${clientStats(p.stats)}
-      <div class="row"><span>Address</span><span>${esc(p.resolved_ip || p.ip || "—")}${p.host ? " (" + esc(p.host) + ")" : ""}</span></div>
-      <div class="row"><span>Ping</span><span>${p.online ? (p.latency_ms ?? "<1") + " ms" : p.online === false ? "no reply" : "checking…"}</span></div>
-      <div class="row"><span>Last SSH login</span><span title="${esc(p.last_login || "")}">${ago(p.last_login)}</span></div></div>`),
-    ...(s.other_apps || []).map(c => `<div class="card"><div class="head">${dot("ok")}${esc(c.machine)}<span class="tag green" style="margin-left:auto">app</span></div>
+      <div class="row"><span>Address</span><span>${esc(p.resolved_ip || p.ip || "—")}</span></div>
+      <div class="row"><span>Ping · last login</span><span>${p.online ? (p.latency_ms ?? "<1") + " ms" : p.online === false ? "no reply" : "…"} · ${ago(p.last_login)}</span></div></div>`),
+    ...(s.other_apps || []).map(c => `<div class="card"><div class="head">${dot("ok")}${esc(c.machine)}<span class="tag green">app</span></div>
       ${clientStats(c)}<div class="muted small">Not in this PC's computer list (Settings → Computers).</div></div>`),
-    !dc.installed ? "" : `<div class="card"><div class="head">${dot(dc.online ? "ok" : "")}Desktop Commander</div>
-      <div class="big">${dc.online ? "Online" : dc.installed ? "Offline" : "Not set up"}</div>
-      <div class="row"><span>Status since</span><span>${dc.since ? fmtTime(dc.since, true) : "—"}</span></div>
+    !dc.installed ? "" : `<div class="card"><div class="head">${dot(dc.online ? "ok" : "")}Desktop Commander<span class="tag">${dc.online ? "online" : "offline"}</span></div>
       <div class="row"><span>Last heartbeat</span><span>${dc.heartbeat ? ago(dc.heartbeat) : "—"}</span></div>
       <div class="muted small">A second way in that doesn't go through SSH. Its commands don't show up here.</div></div>`,
   ];
@@ -149,20 +153,22 @@ function renderStatus(s) {
 
   // sessions
   $("#session-count").textContent = s.sessions.length ? `${s.sessions.length} open` : "";
-  $("#sessions").innerHTML = s.sessions.length ? s.sessions.map(x => `
-    <div class="session">
-      <div class="line">
+  // one compact row per session; its running commands underneath
+  $("#sessions").innerHTML = s.sessions.length ? s.sessions.map(x => {
+    const cmds = x.commands.filter(c => c.kind !== "dashboard");
+    return `<div class="session">
+      <div class="line" title="${esc(x.user || "?")}@${esc(x.ip)}:${x.port}${x.key ? " · " + esc(x.key) : ""}">
         ${dot("ok")}<span class="who">${esc(x.client)}</span>
-        <span class="muted">${esc(x.user || "?")}@${esc(x.ip)}:${x.port}</span>
-        ${x.key ? `<span class="tag">${esc(x.key)}</span>` : ""}
-        ${x.tunnel ? `<span class="tag blue">SSH Manager app</span>` : ""}
-        <span class="muted" style="margin-left:auto">${x.start ? "connected " + ago(x.start) : ""}</span>
+        ${x.tunnel ? `<span class="tag blue">app</span>` : ""}
+        <span class="what">${cmds.length ? "" : x.tunnel ? "SSH Manager connection" : "idle"}</span>
+        <span class="muted small">${x.start ? ago(x.start) : ""}</span>
       </div>
-      ${x.commands.filter(c => c.kind !== "dashboard").map(c => `<div class="cmd" data-running="${c.pid}">
+      ${cmds.map(c => `<div class="cmd" data-running="${c.pid}">
           <span class="kind ${c.kind}">${esc(c.kind)}</span><code>${esc(c.summary)}</code>
-          <span class="muted small">${c.children.length ? esc(c.children.slice(0, 4).join(", ")) + " · " : ""}${fmtDur((Date.now() - new Date(c.start)) / 1000)}</span>
-        </div>`).join("") || (x.tunnel ? "" : `<div class="muted small" style="margin-top:4px">idle (no command running)</div>`)}
-    </div>`).join("") : `<div class="none">No one is connected over SSH right now.</div>`;
+          <span class="muted small">${fmtDur((Date.now() - new Date(c.start)) / 1000)}</span>
+        </div>`).join("")}
+    </div>`;
+  }).join("") : `<div class="none">No one is connected over SSH right now.</div>`;
 
   // hourly bars
   const max = Math.max(1, ...s.hours.map(h => h.count));
@@ -300,7 +306,7 @@ const files = {
   },
   visible() { return this.items.filter(i => $("#fs-hidden").checked || !i.hidden); },
   markActive() {
-    $$(".side a").forEach(a => a.classList.toggle("active", !!this.path && a.dataset.path.toLowerCase() === this.path.toLowerCase()));
+    $$(".fs-side a").forEach(a => a.classList.toggle("active", !!this.path && a.dataset.path.toLowerCase() === this.path.toLowerCase()));
     const starred = settingsUi.saved?.bookmarks.some(b => b.path.toLowerCase() === (this.path || "").toLowerCase());
     $("#fs-star").textContent = starred ? "★" : "☆";
   },
@@ -332,7 +338,7 @@ const files = {
   },
 };
 
-$(".side").onclick = e => { const a = e.target.closest("a[data-path]"); if (a) files.open(a.dataset.path); };
+$(".fs-side").onclick = e => { const a = e.target.closest("a[data-path]"); if (a) files.open(a.dataset.path); };
 $("#fs-up").onclick = () => files.parent && files.open(files.parent);
 $("#fs-refresh").onclick = () => files.open(files.path);
 $("#fs-path").onkeydown = e => { if (e.key === "Enter") files.open(e.target.value.trim()); };
@@ -761,9 +767,11 @@ $("#set-autoupdate").onchange = e => { settingsUi.draft.auto_update = e.target.c
 
 // ---------- PC switcher (inside the app) ----------
 hostHandlers.pcs = m => {
-  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all">▦ All PCs</button>` : "") +
-    m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}">${dot(p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad")}${esc(p.name)}</button>`).join("") +
-    `<button class="add" data-pc="add">+ Add PC</button>`;
+  $("#pc-section").hidden = false;
+  const state = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
+  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
+    m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}">${dot(state(p))}<span class="name">${esc(p.name)}</span></button>`).join("") +
+    `<button class="add" data-pc="add" title="Add a PC"><span class="dot" style="background:none;color:var(--accent)">+</span><span class="name">Add PC</span></button>`;
 };
 $("#pcbar").onclick = e => {
   const b = e.target.closest("[data-pc]"); if (!b) return;

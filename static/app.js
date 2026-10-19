@@ -172,11 +172,12 @@ function renderStatus(s) {
   // one compact row per session; its running commands underneath
   $("#sessions").innerHTML = s.sessions.length ? s.sessions.map(x => {
     const cmds = x.commands.filter(c => c.kind !== "dashboard");
+    const isApp = x.commands.some(c => c.kind === "dashboard");
     return `<div class="session">
       <div class="line" title="${esc(x.user || "?")}@${esc(x.ip)}:${x.port}${x.key ? " · " + esc(x.key) : ""}">
         ${dot("ok")}<span class="who">${esc(x.client)}</span>
-        ${x.tunnel ? `<span class="tag blue">app</span>` : ""}
-        <span class="what">${cmds.length ? "" : x.tunnel ? "SSH Manager connection" : "idle"}</span>
+        ${isApp ? `<span class="tag blue">app</span>` : x.tunnel ? `<span class="tag">port forward</span>` : ""}
+        <span class="what">${cmds.length ? "" : isApp ? "SSH Manager app" : x.tunnel ? "Port forward (script or tool)" : "idle"}</span>
         <span class="muted small">${x.start ? ago(x.start) : ""}</span>
       </div>
       ${cmds.map(c => `<div class="cmd" data-running="${c.pid}">

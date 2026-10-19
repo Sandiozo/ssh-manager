@@ -546,6 +546,8 @@ internal sealed class MainForm : Form
                 {
                     pc = x.l.Pc.DisplayName, client = S(se, "client"), user = S(se, "user"), ip = S(se, "ip"), start = S(se, "start"),
                     tunnel = se.TryGetProperty("tunnel", out var t) && t.ValueKind == JsonValueKind.True,
+                    app = se.TryGetProperty("commands", out var ac) && ac.ValueKind == JsonValueKind.Array
+                          && ac.EnumerateArray().Any(c => S(c, "kind") == "dashboard"),
                     commands = se.TryGetProperty("commands", out var cs) && cs.ValueKind == JsonValueKind.Array
                         ? cs.EnumerateArray().Where(c => S(c, "kind") != "dashboard")
                             .Select(c => new { kind = S(c, "kind"), summary = S(c, "summary"), start = S(c, "start") }).ToArray()

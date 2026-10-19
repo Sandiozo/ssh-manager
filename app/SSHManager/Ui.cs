@@ -270,7 +270,7 @@ internal static class Ui
           $("sessions").innerHTML = list.length ? list.map(x => `<div class="sess">
               <div class="line"><span class="dot ok"></span><b>${esc(x.client || x.ip)}</b><span class="arrow">→</span>
                 <span><span class="pcdot" style="background:${color(x.pc)}"></span>${esc(x.pc)}</span>
-                ${x.tunnel ? `<span class="tag">app</span>` : ""}<span class="when">${ago(x.start)}</span></div>
+                ${x.app ? `<span class="tag">app</span>` : x.tunnel ? `<span class="tag">port forward</span>` : ""}<span class="when">${ago(x.start)}</span></div>
               ${x.commands.map(c => `<div class="cmd" title="${esc(c.summary)}"><span class="kind ${esc(c.kind)}">${esc(c.kind)}</span> ${esc(c.summary)}</div>`).join("")}
             </div>`).join("") : `<div class="none">No one is connected over SSH to any PC right now.</div>`;
         }

@@ -3,6 +3,13 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.4.2] - 2026-10-19
+
+### Fixed
+- Live sessions labelled every port forward as "SSH Manager connection", so a computer could appear
+  twice with the same label. The app's own connection is now marked **app**; a port forward used by a
+  script or tool is marked **port forward**.
+
 ## [1.4.1] - 2026-10-19
 
 ### Changed
@@ -183,6 +190,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.4.2]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.0
 [1.3.13]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.3.13

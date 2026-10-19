@@ -781,9 +781,13 @@ $("#set-autoupdate").onchange = e => { settingsUi.draft.auto_update = e.target.c
 hostHandlers.pcs = m => {
   $("#pc-section").hidden = false;
   appPcs = m.pcs; fillSyncPcs();
-  const state = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : p.client && p.state === "Online" ? "" : "bad";
-  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
-    m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}${p.client ? " (client)" : ""}">${dot(state(p))}<span class="name">${esc(p.name)}</span>${p.client ? `<span class="client-tag">client</span>` : ""}</button>`).join("") +
+  const state = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
+  // the Screen page would show the screen this app runs on: hide it for this PC
+  const own = m.current === "local";
+  $("#nav-screen").hidden = own;
+  if (own && !$("#tab-screen").hidden) showTab("overview");
+  $("#pcbar").innerHTML = (m.pcs.length > 1 || m.clients ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
+    m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}">${dot(state(p))}<span class="name">${esc(p.name)}</span></button>`).join("") +
     `<button class="add" data-pc="add" title="Add a PC"><span class="dot" style="background:none;color:var(--accent)">+</span><span class="name">Add PC</span></button>`;
 };
 $("#pcbar").onclick = e => {
@@ -1043,7 +1047,7 @@ $("#sync-add").onclick = () => {
 };
 function fillSyncPcs() {
   const sel = $("#sync-pc"), keep = sel.value;
-  sel.innerHTML = appPcs.filter(p => p.id !== "local" && !p.client).map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  sel.innerHTML = appPcs.filter(p => p.id !== "local").map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
   if (keep) sel.value = keep;
   if (!$("#sync-remote").value && files.path) $("#sync-remote").placeholder = files.path;
 }

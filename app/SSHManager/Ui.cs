@@ -37,7 +37,6 @@ internal static class Ui
         .pc-list button.on { background:var(--accent-soft); color:var(--text); }
         .pc-list .add { color:var(--accent); }
         .pc-list .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-        .pc-list .client-tag { margin-left:auto; font-size:10px; color:var(--faint); }
         .main { min-width:0; display:flex; flex-direction:column; }
         .topbar { height:48px; display:flex; align-items:center; gap:10px; padding:0 20px; border-bottom:1px solid var(--line); }
         .topbar h1 { margin:0; font-size:15px; font-weight:600; }
@@ -53,10 +52,10 @@ internal static class Ui
         chrome.webview.addEventListener("message", e => {
           const m = e.data;
           if (!m || m.type !== "pcs") return;
-          const st = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : p.client && p.state === "Online" ? "" : "bad";
+          const st = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
           document.getElementById("pcbar").innerHTML =
-            (m.pcs.length > 1 ? `<button data-pc="all" class="${m.current === "all" ? "on" : ""}"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
-            m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}${p.client ? " (client)" : ""}"><span class="dot ${st(p)}"></span><span class="name">${esc(p.name)}</span>${p.client ? `<span class="client-tag">client</span>` : ""}</button>`).join("") +
+            (m.pcs.length > 1 || m.clients ? `<button data-pc="all" class="${m.current === "all" ? "on" : ""}"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
+            m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}"><span class="dot ${st(p)}"></span><span class="name">${esc(p.name)}</span></button>`).join("") +
             `<button class="add" data-pc="add"><span class="dot" style="background:var(--accent)"></span><span class="name">Add PC</span></button>`;
           if (window.onPcs) window.onPcs(m);
         });

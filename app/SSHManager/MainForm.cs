@@ -275,8 +275,8 @@ internal sealed class MainForm : Form
         {
             type = "pcs",
             current = wizardOpen ? "" : current,
-            pcs = links.Select(l => (object)new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() })
-                .Concat(clients.Select(c => (object)new { id = "client:" + c.Name, name = c.Name, state = c.State, client = true })),
+            pcs = links.Select(l => new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() }),
+            clients = clients.Count,   // computers without a server: shown as cards in All PCs, not in the list
         });
     }
 
@@ -451,7 +451,7 @@ internal sealed class MainForm : Form
                 wizard.OnMessage(type, Str);
                 break;
             case "switch-pc":
-                SwitchTo(Str("id").StartsWith("client:") ? All : Str("id"));   // clients have no dashboard: show them in All PCs
+                SwitchTo(Str("id"));
                 break;
             case "wake-mac":
                 try

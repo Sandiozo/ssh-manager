@@ -175,6 +175,48 @@ begin
   Result := '';
 end;
 
+function AskDisableSshd(const Why: String): String;
+begin
+  Result := '';
+  if (not WizardSilent) and (MsgBox(Why + #13#10#13#10 +
+      'Also turn off Windows'' OpenSSH Server on this PC? Choose No if you use SSH to reach this PC for anything else.',
+      mbConfirmation, MB_YESNO) = IDYES) then
+    Result := ' -DisableSshd';
+end;
+
+function RunServerStop(const Args: String): Boolean;
+var
+  Code: Integer;
+begin
+  Result := Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\Tools\server-stop.ps1') + '"' + Args,
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
+{ Changing roles: when "Let other PCs manage this PC" was installed before and is now unticked,
+  remove it (the installer itself only adds files). }
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if (CurStep = ssPostInstall) and not WizardIsComponentSelected('server') and DirExists(ExpandConstant('{app}\Server')) then
+  begin
+    WizardForm.StatusLabel.Caption := 'Removing "Let other PCs manage this PC"...';
+    RunServerStop(' -Remove' + AskDisableSshd('Other PCs can no longer manage this PC.'));
+    DelTree(ExpandConstant('{app}\Server'), True, True, True);
+    DeleteFile(ExpandConstant('{app}\Tools\HiddenRun.exe'));
+    DeleteFile(ExpandConstant('{app}\Tools\server-setup.ps1'));
+  end;
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Code: Integer;
+begin
+  if (CurUninstallStep = usUninstall) and DirExists(ExpandConstant('{app}\Server')) and not UninstallSilent and
+     (MsgBox('Also turn off Windows'' OpenSSH Server on this PC? Choose No if you use SSH to reach this PC for anything else.',
+       mbConfirmation, MB_YESNO) = IDYES) then
+    Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\Tools\server-stop.ps1') + '" -Remove -DisableSshd',
+      '', SW_HIDE, ewWaitUntilTerminated, Code);
+end;
+
 procedure CurPageChanged(CurPageID: Integer);
 begin
   if (CurPageID = wpFinished) and WizardIsComponentSelected('server') then

@@ -49,6 +49,8 @@ class SettingsBody(BaseModel):
     actions: list[Action] = []
     logs: list[LogEntry] = []
     screen_preview: bool = True
+    screen_apps: list[str] | None = None        # None (older dashboards): keep what is there
+    screen_monitors: bool | None = None
 
 
 class AddKeyBody(BaseModel):
@@ -75,7 +77,8 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
                 "bookmarks": config.get("bookmarks", []), "default_upload": config.get("default_upload", ""),
                 "auto_update": config.get("auto_update", True), "port": config.get("port", 8765),
                 "actions": config.get("actions", []), "logs": config.get("logs", []),
-                "screen_preview": config.get("screen_preview", True)}
+                "screen_preview": config.get("screen_preview", True), "screen_apps": config.get("screen_apps", []),
+                "screen_monitors": config.get("screen_monitors", True)}
 
     @r.get("/settings")
     def get_settings():
@@ -119,10 +122,14 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
         config["actions"] = actions
         config["logs"] = [{"name": l.name.strip(), "path": l.path.strip()} for l in body.logs]
         config["screen_preview"] = body.screen_preview
+        if body.screen_apps is not None:
+            config["screen_apps"] = sorted({a.strip().removesuffix(".exe") for a in body.screen_apps if a.strip()}, key=str.lower)
+        if body.screen_monitors is not None:
+            config["screen_monitors"] = body.screen_monitors
         save()
         monitor.reload_peers()
         changed = [k for k in ("name", "peers", "keys", "bookmarks", "default_upload", "auto_update", "actions", "logs",
-                               "screen_preview") if before[k] != current()[k]]
+                               "screen_preview", "screen_apps", "screen_monitors") if before[k] != current()[k]]
         if changed:
             activity.add("setup", action="settings", client=who(request), changed=changed)
         return current()

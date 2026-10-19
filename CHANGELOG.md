@@ -3,6 +3,26 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.4.0] - 2026-10-19
+
+### Added
+- Lossless screenshots: `format=png` on `/api/screen`, full size with `width=0`, and JPEG quality up
+  to 100 (sharper edges at high quality).
+- `/api/wait`: wait until a file appears or changes, or until a program starts or exits, instead of
+  polling in a loop.
+- Runs: the complete output can be downloaded (`/api/runs/{id}/output`); a run can get a working
+  directory and extra environment variables.
+- Screen privacy settings: allow single app windows only, and/or limit viewing to a list of apps. The
+  server enforces both, for the dashboard and the API.
+- An Automation API section in the README.
+
+### Changed
+- Run titles over 200 characters are shortened instead of rejected.
+
+### Fixed
+- When a long run dropped its oldest output lines, reading "the lines after N" could skip or repeat
+  lines. Line numbers now always count from the start of the run.
+
 ## [1.3.13] - 2026-10-19
 
 ### Added
@@ -152,6 +172,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.4.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.0
 [1.3.13]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.3.13
 [1.3.12]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.3.12
 [1.3.11]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.3.11

@@ -627,7 +627,8 @@ const settingsUi = {
     this.saved = await api("/api/settings", { method: "PUT", json: {
       name: body.name, peers: body.peers, keys: body.keys, bookmarks: body.bookmarks, default_upload: body.default_upload,
       auto_update: body.auto_update !== false, actions: body.actions || [], logs: body.logs || [],
-      screen_preview: body.screen_preview !== false } });
+      screen_preview: body.screen_preview !== false, screen_monitors: body.screen_monitors !== false,
+      screen_apps: body.screen_apps || [] } });
     if (!$("#tab-run").hidden) runUi.load();
     this.draft = structuredClone(this.saved);
     this.touch();
@@ -640,6 +641,9 @@ const settingsUi = {
     $("#set-upload").value = d.default_upload;
     $("#set-autoupdate").checked = d.auto_update !== false;
     $("#set-screen").checked = d.screen_preview !== false;
+    $("#set-screen-monitors").checked = d.screen_monitors !== false;
+    $("#set-screen-apps").value = (d.screen_apps || []).join(", ");
+    $("#set-screen-monitors").disabled = $("#set-screen-apps").disabled = d.screen_preview === false;
     renderUpdate();
     renderActionEditor();
     renderLogEditor();
@@ -974,7 +978,7 @@ const screenUi = {
       const [m, w] = await Promise.all([api("/api/screen/monitors"), api("/api/screen/windows").catch(() => ({ windows: [] }))]);
       const short = t => t.length > 60 ? t.slice(0, 58) + "…" : t;
       $("#scr-monitor").innerHTML =
-        `<optgroup label="Screens">${m.monitors.map(x => `<option value="m:${x.index}">Screen ${x.index} · ${x.width}×${x.height}</option>`).join("")}</optgroup>` +
+        (m.monitors.length ? `<optgroup label="Screens">${m.monitors.map(x => `<option value="m:${x.index}">Screen ${x.index} · ${x.width}×${x.height}</option>`).join("")}</optgroup>` : "") +
         (w.windows.length ? `<optgroup label="Apps">${w.windows.map(x =>
           `<option value="w:${x.id}" data-app="${esc(x.app)}">${esc(x.app || "App")} · ${esc(short(x.title))}${x.minimized ? " (minimized)" : ""}</option>`).join("")}</optgroup>` : "");
       const want = String(store.get("scrSource", "m:1"));
@@ -985,7 +989,10 @@ const screenUi = {
         const same = [...sel.options].find(o => o.dataset.app && o.dataset.app === app);
         sel.value = same ? same.value : "m:1";
       }
-      if (!sel.value) sel.value = "m:1";
+      if (!sel.value) sel.value = sel.options[0]?.value || "";
+      if (!sel.options.length) this.message(m.whole_screen === false
+        ? "Whole-screen preview is off on this PC, and none of the apps that may be viewed are open."
+        : "Nothing to show.");
     } catch (e) { this.message(e.message); }
   },
   remember() {
@@ -1002,7 +1009,8 @@ const screenUi = {
     if ((force || rate) && !this.busy) {
       this.busy = true;
       try {
-        const [kind, id] = ($("#scr-monitor").value || "m:1").split(":");
+        if (!$("#scr-monitor").value) { this.busy = false; return; }
+        const [kind, id] = $("#scr-monitor").value.split(":");
         const what = kind === "w" ? `window=${id}` : `monitor=${id}`;
         const r = await fetch(`/api/screen?${what}&width=${$("#scr-size").value}&t=${Date.now()}`);
         if (!r.ok) {
@@ -1118,7 +1126,12 @@ $("#set-add-log").onclick = () => {
   (settingsUi.draft.logs ||= []).push({ name: "New log", path: files.path ? files.path + "\\*.log" : "C:\\path\\to\\*.log" });
   renderLogEditor(); settingsUi.touch();
 };
-$("#set-screen").onchange = e => { settingsUi.draft.screen_preview = e.target.checked; settingsUi.touch(); };
+$("#set-screen").onchange = e => { settingsUi.draft.screen_preview = e.target.checked; settingsUi.touch(); settingsUi.render(); };
+$("#set-screen-monitors").onchange = e => { settingsUi.draft.screen_monitors = e.target.checked; settingsUi.touch(); };
+$("#set-screen-apps").oninput = e => {
+  settingsUi.draft.screen_apps = e.target.value.split(/[,;]/).map(s => s.trim().replace(/\.exe$/i, "")).filter(Boolean);
+  settingsUi.touch();
+};
 
 // ---------- Wake-on-LAN for computers in the list ----------
 document.addEventListener("click", async e => {

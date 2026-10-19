@@ -70,7 +70,7 @@ COOKIE = "sshmgr_token"
 activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
 updater = Updater(config, DATA, activity)
-runner = Runner(activity)
+runner = Runner(activity, DATA)
 app = FastAPI(title="SSH Manager", docs_url=None, redoc_url=None)
 
 NOT_LOGGED_IN = """<!doctype html><meta charset="utf-8"><title>SSH Manager</title>

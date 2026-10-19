@@ -109,7 +109,8 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
 - **Logs:** follow any log file live, like `tail -f`: a file, the newest file in a folder, or the newest
   match of a pattern such as `C:\Logs\app-*.log`. Filter lines as you type.
 - **Screen:** a view-only live preview of a monitor or of a single app window (even when other windows
-  cover it), refreshed every 1 to 10 seconds. Can be turned off per PC; every viewing is logged.
+  cover it), refreshed every 1 to 10 seconds. Each PC decides what may be viewed: everything, only
+  single app windows, only a list of apps, or nothing. Every viewing is logged.
 
 **Connect**
 
@@ -131,6 +132,27 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
 - **Automatic updates:** each PC updates itself when a new release is published; downloads are checked
   against their SHA-256.
 - **Plugins:** small Python files that add your own command decoders, activity details or API routes.
+
+## Automation API
+
+Scripts and AI agents can use the same API as the dashboard. It is only reachable on `127.0.0.1` of
+each PC, so open an SSH port forward first (`ssh -L 18765:127.0.0.1:8765 <pc>`). Read the access token
+once over SSH with `"C:\Program Files\SSH Manager\Server\SSHManagerServer.exe" --client-info` (the
+`SSHMGR-TOKEN:` line) and send it with every request as the `X-SSHMgr-Token` header; requests that
+change something also need `X-SSHMgr: 1`. Everything done through the API is in the activity log.
+
+| Call | What it does |
+|---|---|
+| `POST /api/run` `{script, title?, cwd?, env?}` | Runs a PowerShell script (admin, in the signed-in user's session). `cwd` may use environment variables; `env` adds variables for this run; titles over 200 characters are shortened. |
+| `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines are kept here; `skipped` tells how many were left out. |
+| `GET /api/runs/{id}/output` | The complete output as a text file (for the last 50 runs). |
+| `POST /api/runs/{id}/stop` | Stops a run. |
+| `GET /api/actions`, `POST /api/actions/{id}/run` | Lists and runs quick actions. |
+| `GET /api/screen/windows` | Open app windows (`id`, `app`, `title`), limited to the allowed apps. |
+| `GET /api/screen?window=ID` or `?monitor=N` | A screenshot. `format=png` is lossless; `width=0` keeps the full size; `quality` (JPEG) goes up to 100. |
+| `GET /api/wait?file=PATH[&changed_after=now]` | Waits until a file exists (and changed after a time: ISO, Unix seconds or `now`). |
+| `GET /api/wait?process=NAME&state=started\|exited` | Waits until a program has started or exited. Both forms take `timeout` (seconds, up to 300) and answer `{"met": true/false, ...}`. |
+| `GET /api/fs/download?path=…`, `PUT /api/fs/upload?path=…&overwrite=1` | Downloads a file (several paths or a folder come as a zip) and uploads one (the request body is the file). |
 
 ## How it works
 
@@ -159,8 +181,10 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
 - Quick actions and the command panel run with the server's administrator rights.
 - The activity log stores full command lines, which can include secrets passed on the command line. It
   stays on that PC.
-- The screen preview and shared clipboard only work while someone is signed in to that PC. The preview can
-  be turned off in Settings; the clipboard is off until you switch it on.
+- The screen preview and shared clipboard only work while someone is signed in to that PC. In Settings
+  each PC can turn the preview off, allow single app windows only, or limit it to a list of apps (other
+  windows are then neither listed nor captured, also through the API). The clipboard is off until you
+  switch it on.
 - New host keys are accepted the first time the app connects (trust on first use) and checked after that.
 - Pairing requests only carry a public key, can only be filed by someone who can already use this PC's
   dashboard, reach only apps connected to this PC, expire after two minutes and change nothing until
@@ -202,6 +226,8 @@ Most of `config.json` can be edited under **Settings** (⚙):
 | `actions` | quick actions: `{ "name", "group", "script", "confirm", "timeout" }` |
 | `logs` | logs: `{ "name", "path" }` (a file, a folder or a pattern like `logs\app-*.log`) |
 | `screen_preview` | allow other PCs to view this PC's screen (default `true`) |
+| `screen_monitors` | allow whole-screen (monitor) previews; `false` allows single app windows only (default `true`) |
+| `screen_apps` | program names whose windows may be listed and viewed, e.g. `["notepad", "Code"]` (default: all) |
 | `auto_update` | install new releases automatically (default `true`) |
 
 See [`config.example.json`](config.example.json) for a starting point.

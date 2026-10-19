@@ -45,7 +45,7 @@ def monitors() -> list[dict]:
         return [{"index": i, "width": m["width"], "height": m["height"]} for i, m in enumerate(sct.monitors) if i > 0]
 
 
-def capture(monitor: int = 1, width: int = 1280, quality: int = 70) -> bytes:
+def capture(monitor: int = 1, width: int = 1280, quality: int = 70, fmt: str = "jpeg") -> bytes:
     _require_desktop()
     import mss
     from PIL import Image
@@ -53,15 +53,19 @@ def capture(monitor: int = 1, width: int = 1280, quality: int = 70) -> bytes:
         mons = sct.monitors
         mon = mons[monitor] if 0 <= monitor < len(mons) else mons[1]
         shot = sct.grab(mon)
-    return _jpeg(Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX"), width, quality)
+    return _encode(Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX"), width, quality, fmt)
 
 
-def _jpeg(img, width: int, quality: int) -> bytes:
+def _encode(img, width: int, quality: int, fmt: str = "jpeg") -> bytes:
+    """Scaled down to `width` (0 = full size), as JPEG or lossless PNG."""
     from PIL import Image
     if width and img.width > width:
         img = img.resize((width, round(img.height * width / img.width)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, "JPEG", quality=quality, optimize=True)
+    if fmt == "png":
+        img.save(buf, "PNG", compress_level=3)
+    else:   # at high quality keep full color resolution too (no chroma subsampling): sharper edges
+        img.save(buf, "JPEG", quality=quality, optimize=True, subsampling=0 if quality >= 90 else 2)
     return buf.getvalue()
 
 
@@ -149,7 +153,18 @@ def windows() -> list[dict]:
     return found
 
 
-def capture_window(hwnd: int, width: int = 1280, quality: int = 70) -> bytes:
+def window_app(hwnd: int) -> str:
+    """Name of the program that owns a window, without .exe ("" if unknown)."""
+    import psutil
+    pid = wt.DWORD()
+    _u32.GetWindowThreadProcessId(wt.HWND(hwnd), ctypes.byref(pid))
+    try:
+        return psutil.Process(pid.value).name().removesuffix(".exe")
+    except Exception:
+        return ""
+
+
+def capture_window(hwnd: int, width: int = 1280, quality: int = 70, fmt: str = "jpeg") -> bytes:
     """One app window, also when other windows cover it (not when it's minimized)."""
     _require_desktop()
     from PIL import Image
@@ -186,7 +201,7 @@ def capture_window(hwnd: int, width: int = 1280, quality: int = 70) -> bytes:
         with mss.mss() as sct:
             shot = sct.grab({"left": l, "top": t, "width": r - l, "height": b - t})
         img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-    return _jpeg(img, width, quality)
+    return _encode(img, width, quality, fmt)
 
 
 # ---- clipboard (text) ----

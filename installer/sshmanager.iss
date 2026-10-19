@@ -64,8 +64,7 @@ Name: "{autoprograms}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Compon
 Name: "{autodesktop}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Tools\server-setup.ps1"" -InstallDir ""{app}"" -User ""{code:InstallingUser}"""; \
-  StatusMsg: "Setting up the SSH server. The first time, Windows downloads OpenSSH Server, which can take 5-15 minutes..."; Components: server; Flags: runhidden waituntilterminated
+; the server role is set up from [Code] (RunServerSetup) so its progress can be shown
 Filename: "{app}\App\SSHManager.exe"; Description: "Open SSH Manager"; Components: app; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]
@@ -129,8 +128,13 @@ function RunInstaller(const Name, Params, What: String): Boolean;
 var
   Code: Integer;
 begin
-  WizardForm.StatusLabel.Caption := 'Installing ' + What + '...';
-  Result := Exec(ExpandConstant('{tmp}\') + Name, Params, '', SW_HIDE, ewWaitUntilTerminated, Code) and ((Code = 0) or (Code = 3010) or (Code = 1638));
+  DownloadPage.SetText('Installing ' + What + '...', 'This usually takes a minute.');
+  DownloadPage.ProgressBar.Style := npbstMarquee;
+  try
+    Result := Exec(ExpandConstant('{tmp}\') + Name, Params, '', SW_HIDE, ewWaitUntilTerminated, Code) and ((Code = 0) or (Code = 3010) or (Code = 1638));
+  finally
+    DownloadPage.ProgressBar.Style := npbstNormal;
+  end;
   if not Result then
     SuppressibleMsgBox('Installing ' + What + ' failed (code ' + IntToStr(Code) + '). SSH Manager may not start until it is installed.',
       mbError, MB_OK, IDOK);
@@ -192,10 +196,89 @@ begin
     '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
-{ Changing roles: when "Let other PCs manage this PC" was installed before and is now unticked,
-  remove it (the installer itself only adds files). }
+{ Runs server-setup.ps1 and shows what it is doing: it appends "percent|text|detail" lines to a
+  progress file and ends with DONE or ERROR|message. Installing OpenSSH Server can take many minutes. }
+procedure RunServerSetup;
+var
+  Page: TOutputProgressWizardPage;
+  ProgressFile, Last, Rest, Text, Detail, ErrorText: String;
+  Lines: TArrayOfString;
+  Code, Pct, P, Count, Quiet: Integer;
+  Finished: Boolean;
+begin
+  ProgressFile := ExpandConstant('{tmp}\server-progress.txt');
+  DeleteFile(ProgressFile);
+  Page := CreateOutputProgressPage('Setting up this PC so your other PCs can manage it',
+    'Turning on Windows'' OpenSSH Server and starting SSH Manager in the background.');
+  Page.SetText('Starting...', '');
+  Page.SetProgress(0, 100);
+  Page.Show;
+  Finished := False;
+  ErrorText := '';
+  Pct := 0;
+  Count := 0;
+  Quiet := 0;
+  try
+    if not Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\Tools\server-setup.ps1') +
+        '" -InstallDir "' + ExpandConstant('{app}') + '" -User "' + InstallingUser('') + '" -ProgressFile "' + ProgressFile + '"',
+        '', SW_HIDE, ewNoWait, Code) then
+    begin
+      ErrorText := 'Could not start the setup script: ' + SysErrorMessage(Code);
+      Finished := True;
+    end;
+    { the script reports at least every few seconds; 5 minutes of silence means it died }
+    while (not Finished) and (Quiet < 5 * 60 * 4) do
+    begin
+      Sleep(250);
+      Quiet := Quiet + 1;
+      if LoadStringsFromFile(ProgressFile, Lines) and (GetArrayLength(Lines) > Count) then
+      begin
+        Count := GetArrayLength(Lines);
+        Quiet := 0;
+        Last := Lines[Count - 1];
+        if Last = 'DONE' then
+          Finished := True
+        else if Copy(Last, 1, 6) = 'ERROR|' then
+        begin
+          ErrorText := Copy(Last, 7, Length(Last));
+          Finished := True;
+        end
+        else
+        begin
+          P := Pos('|', Last);
+          Pct := StrToIntDef(Copy(Last, 1, P - 1), Pct);
+          Rest := Copy(Last, P + 1, Length(Last));
+          P := Pos('|', Rest);
+          if P > 0 then
+          begin
+            Text := Copy(Rest, 1, P - 1);
+            Detail := Copy(Rest, P + 1, Length(Rest));
+          end
+          else
+          begin
+            Text := Rest;
+            Detail := '';
+          end;
+          Page.SetText(Text + '...', Detail);
+        end;
+      end;
+      Page.SetProgress(Pct, 100);   { also keeps the window responsive }
+    end;
+  finally
+    Page.Hide;
+  end;
+  if not Finished then ErrorText := 'The setup script stopped responding.';
+  if ErrorText <> '' then
+    SuppressibleMsgBox('Setting up "Let other PCs manage this PC" didn''t finish:' + #13#10#13#10 + ErrorText + #13#10#13#10 +
+      'Details are in ' + ExpandConstant('{app}\Server\setup.log') + '. Run this installer again to retry.', mbError, MB_OK, IDOK);
+end;
+
+{ After the files are in place: set up the server role, or remove it when it was installed before and
+  is now unticked (the installer itself only adds files). }
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if (CurStep = ssPostInstall) and WizardIsComponentSelected('server') then
+    RunServerSetup;
   if (CurStep = ssPostInstall) and not WizardIsComponentSelected('server') and DirExists(ExpandConstant('{app}\Server')) then
   begin
     WizardForm.StatusLabel.Caption := 'Removing "Let other PCs manage this PC"...';

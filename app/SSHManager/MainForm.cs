@@ -26,6 +26,9 @@ internal sealed class MainForm : Form
     readonly SetupWizard wizard;
     readonly AppUpdater updater;
     readonly SyncManager sync;
+    readonly Pairing pairing;
+    readonly HashSet<string> pairSeen = [];
+    bool pairPrompting;
     readonly System.Windows.Forms.Timer poll = new() { Interval = 5000 };
     readonly System.Windows.Forms.Timer clipTimer = new() { Interval = 1500 };
     bool clipBusy;
@@ -50,7 +53,8 @@ internal sealed class MainForm : Form
         RestoreWindowBounds();
         Controls.Add(web);
 
-        wizard = new SetupWizard(html => { if (webReady) { shown = "wizard"; web.CoreWebView2.NavigateToString(html); } }, OnWizardDone, KnownUser);
+        pairing = new Pairing(() => links.FirstOrDefault(l => l.Pc.IsLocal));
+        wizard = new SetupWizard(html => { if (webReady) { shown = "wizard"; web.CoreWebView2.NavigateToString(html); } }, OnWizardDone, FindPeer, pairing);
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => links.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(() => Post(sync!.Snapshot())));
@@ -278,16 +282,20 @@ internal sealed class MainForm : Form
     /// <summary>A computer that connects to one of the PCs here but has no server of its own (a client),
     /// as that PC reports it: it can't be opened, but All PCs shows its status and stats.</summary>
     sealed record ClientPc(string Name, string State, string Via, JsonElement? Stats, string Mac, string Ip, string Version,
-        string Host = "", string Machine = "", string User = "");
+        string Host = "", string Machine = "", string User = "", bool ViaLocal = false, bool CanPair = false);
 
-    /// <summary>The Windows user name a computer that connects here reported (by name, computer name or address).</summary>
-    string? KnownUser(string hostOrIp)
+    /// <summary>For the setup page: a computer whose app is connected to a PC here, found by its name, computer
+    /// name or address. It can approve a pairing request when it is connected to this PC's own server.</summary>
+    SetupWizard.Peer? FindPeer(string hostOrIp)
     {
         var key = hostOrIp.Trim();
         if (key == "") return null;
         bool Is(string s) => s != "" && (s.Equals(key, StringComparison.OrdinalIgnoreCase)
                                          || s.Split('.')[0].Equals(key.Split('.')[0], StringComparison.OrdinalIgnoreCase) && !char.IsDigit(key[0]));
-        return Clients().FirstOrDefault(c => c.User != "" && (Is(c.Name) || Is(c.Host) || Is(c.Machine) || c.Ip == key))?.User;
+        var c = Clients().Where(c => Is(c.Name) || Is(c.Host) || Is(c.Machine) || c.Ip == key)
+            .OrderByDescending(c => c.ViaLocal).FirstOrDefault();
+        return c is null ? null
+            : new(c.Machine != "" ? c.Machine : c.Name, c.User, c.ViaLocal && c.CanPair && c.State == "Connected");
     }
 
     List<ClientPc> Clients()
@@ -297,6 +305,9 @@ internal sealed class MainForm : Form
         static JsonElement? O(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Object ? v : null;
         static string FirstMac(JsonElement? st) =>
             st is { } x && x.TryGetProperty("macs", out var m) && m.ValueKind == JsonValueKind.Array && m.GetArrayLength() > 0 ? m[0].GetString() ?? "" : "";
+        static bool Pairs(JsonElement? st) =>
+            st is { } x && x.TryGetProperty("features", out var f) && f.ValueKind == JsonValueKind.Array
+            && f.EnumerateArray().Any(v => v.ValueKind == JsonValueKind.String && v.GetString() == "pair");
 
         var known = links.Select(l => l.Pc.PcName).Append(Environment.MachineName).Where(n => n != "")
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -315,14 +326,15 @@ internal sealed class MainForm : Form
                     var state = B(p, "connected") ? "Connected" : B(p, "online") ? "Online" : "Offline";
                     var ip = S(p, "resolved_ip") is { Length: > 0 } r ? r : S(p, "ip");
                     list.Add(new(name, state, l.Pc.DisplayName, st, FirstMac(st), ip, st is { } y ? S(y, "app_version") : "",
-                        S(p, "host"), st is { } z ? S(z, "machine") : "", st is { } u ? S(u, "user") : ""));
+                        S(p, "host"), st is { } z ? S(z, "machine") : "", st is { } u ? S(u, "user") : "", l.Pc.IsLocal, Pairs(st)));
                 }
             if (s.TryGetProperty("other_apps", out var others) && others.ValueKind == JsonValueKind.Array)
                 foreach (var c in others.EnumerateArray())
                 {
                     var name = S(c, "machine");
                     if (name == "" || Seen(name, name)) continue;
-                    list.Add(new(name, "Connected", l.Pc.DisplayName, c, FirstMac(c), "", S(c, "app_version"), "", name, S(c, "user")));
+                    list.Add(new(name, "Connected", l.Pc.DisplayName, c, FirstMac(c), "", S(c, "app_version"), "", name, S(c, "user"),
+                        l.Pc.IsLocal, Pairs(c)));
                 }
         }
         return list;
@@ -347,6 +359,7 @@ internal sealed class MainForm : Form
                     using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
                     link.Status = doc.RootElement.Clone();
                     CheckAlerts(link);
+                    if (!link.Pc.IsLocal && !pairPrompting) await CheckPairRequestAsync(link);
                 }
                 catch (Exception) { }
             }
@@ -638,6 +651,71 @@ internal sealed class MainForm : Form
     [DllImport("user32.dll")]
     static extern bool AddClipboardFormatListener(IntPtr hwnd);
 
+    // ---- pairing, approving side: a PC this app is connected to asks to be allowed to manage this PC ----
+    async Task CheckPairRequestAsync(Link link)
+    {
+        using var r = await Link.Http.SendAsync(link.Request(HttpMethod.Get,
+            "/api/pair/pending?machine=" + Uri.EscapeDataString(Environment.MachineName)));
+        if (!r.IsSuccessStatusCode) return;   // an older server without pairing
+        using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+        if (doc.RootElement.GetProperty("request") is not { ValueKind: JsonValueKind.Object } q) return;
+        var id = q.GetProperty("id").GetString() ?? "";
+        if (id == "" || !pairSeen.Add(id)) return;
+        var from = q.GetProperty("from").GetString() ?? link.Pc.DisplayName;
+        var key = q.GetProperty("public_key").GetString() ?? "";
+        var fp = q.GetProperty("fingerprint").GetString() ?? "";
+        pairPrompting = true;
+        _ = AnswerPairRequestAsync(link, id, from, key, fp).ContinueWith(_ => pairPrompting = false);
+    }
+
+    async Task AnswerPairRequestAsync(Link link, string id, string from, string key, string fingerprint)
+    {
+        async Task Answer(bool allowed, string error = "")
+        {
+            try
+            {
+                using (await Link.Http.SendAsync(link.Request(HttpMethod.Post, $"/api/pair/{Uri.EscapeDataString(id)}/answer",
+                    JsonContent.Create(new { machine = Environment.MachineName, allowed, user = allowed ? Environment.UserName : "", error })))) { }
+            }
+            catch (Exception) { }
+        }
+
+        ShowWindow();
+        var choice = MessageBox.Show(this,
+            $"{from} asks to be allowed to manage this PC.\n\n" +
+            $"If you allow it, {from} can sign in to this PC as {Environment.UserName} over SSH, with the same rights as you: " +
+            "open and change files, run commands and view the screen.\n\n" +
+            $"Requested by: {from} (through the connection to {link.Pc.DisplayName})\nKey fingerprint: {fingerprint}\n\n" +
+            $"Allow only if you started this yourself on {from}. You can take it back at any time in Settings → SSH keys.",
+            "SSH Manager: allow access?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (choice != DialogResult.Yes)
+        {
+            await Answer(false);
+            return;
+        }
+        if (links.FirstOrDefault(l => l.Pc.IsLocal) is not { State: LinkState.Connected } own)
+        {
+            await Answer(false, "SSH Manager's server isn't running on this PC.");
+            MessageBox.Show(this, "SSH Manager's server isn't running on this PC, so the key could not be added.",
+                "SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+        try
+        {
+            using var r = await Link.Http.SendAsync(own.Request(HttpMethod.Post, "/api/keys/add",
+                JsonContent.Create(new { public_key = key, label = $"{from} (allowed {DateTime.Now:yyyy-MM-dd})" })));
+            if (!r.IsSuccessStatusCode)
+                throw new InvalidOperationException(Pairing.Detail(await r.Content.ReadAsStringAsync()) ?? "The key could not be added.");
+            await Answer(true);
+            Balloon("SSH Manager", $"{from} can now manage this PC.", ToolTipIcon.Info, force: true);
+        }
+        catch (Exception e)
+        {
+            await Answer(false, e.Message);
+            MessageBox.Show(this, e.Message, "SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
     void OpenWizard(PcEntry? edit)
     {
         if (!webReady) return;
@@ -652,7 +730,11 @@ internal sealed class MainForm : Form
         shown = "";
         if (pc is not null)
         {
-            var existing = settings.Pcs.FirstOrDefault(p => p.Id == pc.Id);
+            // adding a PC that is already in the list updates that entry instead of adding it twice
+            var existing = settings.Pcs.FirstOrDefault(p => p.Id == pc.Id)
+                ?? settings.Pcs.FirstOrDefault(p => p.Host.Equals(pc.Host, StringComparison.OrdinalIgnoreCase)
+                                                    && p.User.Equals(pc.User, StringComparison.OrdinalIgnoreCase));
+            if (existing is not null) pc.Id = existing.Id;
             if (existing is not null)
             {
                 existing.Host = pc.Host;

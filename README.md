@@ -21,11 +21,20 @@ the ones you only work from (a laptop). The page shows what's installed now and 
 downloaded: the .NET Desktop Runtime and WebView2 if they're missing, and OpenSSH Server for the
 server role. No Python needed. Run the installer again any time to switch.
 
-Then, in the app, click **+ Add PC** and enter the other PC's name (or use **Search my network**)
-and your Windows user name there. The first time, a window asks for that account's Windows password
-once; the app creates a key for this computer and adds it to that PC, and logs in with the key from
-then on. With a Microsoft account, use its password; if that PC only allows PIN / Windows Hello
-sign-in, turn off "Only allow Windows Hello sign-in" there first (Settings → Accounts → Sign-in options).
+Then, in the app, click **+ Add PC** and enter the other PC's name (or use **Search my network**).
+The app creates a key for this computer and signs in with it. If a key already works (one of yours
+in `~/.ssh`, or a host from `~/.ssh/config`), the PC is added right away. Otherwise you allow this
+computer on that PC once, in one of three ways:
+
+- **Approve on the other PC** (when its SSH Manager app is connected to this PC): send a request and
+  click **Allow** on the other PC. It shows who is asking and the key's fingerprint, and expires
+  after two minutes. No password needed.
+- **Sign in with a password:** the Windows password of your account on that PC, typed on the page,
+  used once and never stored. For a Microsoft account, use the account password, not the PIN.
+- **Copy the key:** for PCs that only allow PIN / Windows Hello sign-in. Copy this computer's public
+  key and paste it on the other PC under Settings → SSH keys → Allow a new key.
+
+Each PC decides for itself who may manage it: adding PC B on PC A never lets B manage A.
 
 > Windows may show "Windows protected your PC" because the installer isn't code-signed. Click
 > **More info → Run anyway**.
@@ -96,6 +105,10 @@ show it too.
 - The screen preview and shared clipboard only work while someone is signed in to that PC. The
   preview can be turned off in Settings; the clipboard is off until you switch it on in the app.
 - New host keys are accepted the first time the app connects (trust on first use) and checked after.
+- Pairing requests (Approve on the other PC) only carry a public key, can only be filed by someone who
+  can already use this PC's dashboard, reach only apps connected to this PC, expire after two minutes,
+  and change nothing until someone clicks Allow on the other PC. Every request and answer is logged.
+- Passwords typed when adding a PC are handed to ssh once and never stored.
 - Updates are downloaded from this repository's GitHub releases and checked against their SHA-256.
 
 ## Where things are
@@ -166,10 +179,10 @@ it), and so do your settings folders listed above.
 | Problem | Fix |
 |---|---|
 | "didn't answer" / timed out | The PC is off, on another network, or its firewall blocks port 22. Make sure the network is set to **Private** on that PC. |
-| "refused the connection" | OpenSSH Server isn't running there: reinstall SSH Manager on that PC with "Let other PCs manage this PC". |
-| "didn't accept this computer's key" | Add the PC again (the password step adds the key). |
+| "refused the connection" | OpenSSH Server isn't running there: reinstall SSH Manager on that PC with "Client and server". |
+| "didn't accept this computer's key" | Add the PC again and allow this computer (approve, password or copied key). |
 | Commands show as "hidden" | The server isn't running with admin rights; reinstalling SSH Manager on that PC fixes the logon task. |
-| "SSH Manager isn't set up there yet" | Install SSH Manager on that PC and choose "Let other PCs manage this PC". |
+| "SSH Manager's server isn't installed there" | Install SSH Manager on that PC and choose "Client and server". |
 
 ## Building from source
 

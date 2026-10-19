@@ -18,6 +18,7 @@ internal static class LocalStats
         {
             machine = Environment.MachineName,
             user = Environment.UserName,
+            features = new[] { "pair" },   // this app can approve pairing requests (see Pairing.cs)
             cpu = CpuPercent(),
             ram_total = (long)mem.TotalPhys,
             ram_used = (long)(mem.TotalPhys - mem.AvailPhys),

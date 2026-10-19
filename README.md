@@ -182,6 +182,7 @@ change something also need `X-SSHMgr: 1`. Everything done through the API is in 
 | `GET /api/wait?file=PATH[&changed_after=now]` | Waits until a file exists (and changed after a time: ISO, Unix seconds or `now`). |
 | `GET /api/wait?process=NAME&state=started\|exited` | Waits until a program has started or exited. Both forms take `timeout` (seconds, up to 300) and answer `{"met": true/false, ...}`. |
 | `GET /api/fs/download?path=…`, `PUT /api/fs/upload?path=…&overwrite=1` | Downloads a file (several paths or a folder come as a zip) and uploads one (the request body is the file). |
+| `POST /api/server/restart` | Restarts the server (10 to 20 seconds), for example after editing `config.json` by hand or changing a plugin; refused when `config.json` isn't valid JSON. |
 
 ## How it works
 

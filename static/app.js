@@ -796,6 +796,23 @@ function renderUpdate() {
 }
 $("#upd-check").onclick = async () => { try { last.update = await api("/api/update/check", { method: "POST" }); renderUpdate(); } catch (e) { toast(e.message, true); } };
 $("#upd-install").onclick = installUpdate;
+$("#srv-restart").onclick = async () => {
+  if (!confirm(`Restart SSH Manager's server on ${hostName}? Pages and connections pause for 10 to 20 seconds.`)) return;
+  const b = $("#srv-restart");
+  b.disabled = true; b.textContent = "Restarting…";
+  try {
+    await api("/api/server/restart", { method: "POST" });
+    const t0 = Date.now();
+    await new Promise(r => setTimeout(r, 1500));
+    while (Date.now() - t0 < 30000) {   // wait until it answers again
+      try { if ((await fetch("/api/ping", { cache: "no-store" })).ok) break; } catch { }
+      await new Promise(r => setTimeout(r, 700));
+    }
+    toast("Server restarted.");
+    settingsUi.open();
+  } catch (e) { toast(e.message, true); }
+  finally { b.disabled = false; b.textContent = "Restart"; }
+};
 $("#set-autoupdate").onchange = e => { settingsUi.draft.auto_update = e.target.checked; settingsUi.touch(); };
 
 // ---------- PC switcher (inside the app) ----------

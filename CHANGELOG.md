@@ -12,6 +12,8 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
   code, run quick actions, take screenshots, download and upload files, and wait for a file or program.
   The app answers it over a local pipe that only the same Windows account can open. See **Command
   line** in the README.
+- **Restart server** (Settings → Updates): restarts that PC's server so changes made to `config.json` by
+  hand and new or changed plugins take effect. It refuses when `config.json` isn't valid JSON.
 
 ## [1.4.2] - 2026-10-19
 

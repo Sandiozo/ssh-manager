@@ -192,6 +192,42 @@ loaded_plugins = plugins.load(plugins.PluginContext(config, HOME, monitor, activ
 app.mount("/static", StaticFiles(directory=RES / "static"), name="static")
 
 
+# ---- restart: applies a hand-edited config.json or a new/changed plugin ----
+RESTART_SCRIPT = r"""
+$ErrorActionPreference = 'SilentlyContinue'
+Wait-Process -Id {pid} -Timeout 15            # this server quits right after answering
+Start-Process -FilePath '{exe}' -ArgumentList {args} -WorkingDirectory '{cwd}' -WindowStyle Hidden
+"""
+
+
+@app.post("/api/server/restart")
+def restart_server(request: Request):
+    """Restarts this server (same session and rights). Refuses when config.json isn't valid JSON, since
+    the server couldn't start again with it."""
+    try:
+        json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+    except ValueError as e:
+        raise HTTPException(400, f"config.json is not valid JSON, so the server was not restarted: {e}")
+    activity.add("setup", action="server-restart", client=who(request))
+    exe = sys.executable
+    args = ["--log-console"] if home_mod.FROZEN else [str(ROOT / "server.py")]
+    script = RESTART_SCRIPT.format(pid=os.getpid(), exe=exe.replace("'", "''"), cwd=str(ROOT).replace("'", "''"),
+                                   args=",".join("'" + a.replace("'", "''") + "'" for a in args))
+
+    def later():
+        import base64, subprocess, threading, time
+        time.sleep(0.5)   # let this answer reach the page first
+        subprocess.Popen(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                          "-EncodedCommand", base64.b64encode(script.encode("utf-16-le")).decode()],
+                         creationflags=0x08000000 | 0x00000200)   # no window, own process group
+        time.sleep(0.3)
+        os._exit(0)
+
+    import threading
+    threading.Thread(target=later, daemon=True).start()
+    return {"restarting": True}
+
+
 @app.get("/favicon.ico", include_in_schema=False)
 def favicon():
     return FileResponse(RES / "static" / "favicon.ico", media_type="image/x-icon")

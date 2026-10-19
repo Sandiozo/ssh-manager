@@ -4,29 +4,34 @@ using System.Net;
 namespace SSHManager;
 
 /// <summary>
-/// First-run setup (and "Change connection…"): pick the PC, make sure this computer has an SSH key the
-/// PC accepts (creating one and installing it with a one-time password prompt if needed), and check
-/// that SSH Manager is installed there. Runs as a page in the app window; talks to MainForm through
-/// page messages.
+/// Adds a PC (or changes how one is reached): pick it (typed, found on the network, or a host from
+/// ~/.ssh/config), make sure this computer has an SSH key the PC accepts (creating one and installing it
+/// with a one-time password prompt if needed), and check that SSH Manager is installed there. Runs as a
+/// page in the app window; talks to MainForm through page messages.
 /// </summary>
-internal sealed class SetupWizard(AppSettings settings, Action<string> show, Action done)
+internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
 {
-    string host = "", user = Environment.UserName, alias = "", error = "", step = "pick";
-    bool busy;
+    PcEntry? editing;
+    string host = "", user = Environment.UserName, alias = "", error = "", step = "pick", working = "";
+    bool busy, canCancel;
+    List<Discovery.Found>? found;
 
-    public void Open()
+    public void Open(PcEntry? edit, bool canCancel)
     {
-        alias = settings.IsConfigured && Ssh.ConfigHosts().Contains(settings.Host) ? settings.Host : "";
-        host = alias == "" ? settings.Host : "";
-        user = settings.User != "" ? settings.User : Environment.UserName;
+        editing = edit;
+        this.canCancel = canCancel;
+        alias = edit is not null && Ssh.ConfigHosts().Contains(edit.Host) ? edit.Host : "";
+        host = alias == "" ? edit?.Host ?? "" : "";
+        user = edit is { User: not "" } ? edit.User : Environment.UserName;
         step = "pick";
         error = "";
+        found = null;
         Render();
     }
 
     public async void OnMessage(string type, Func<string, string> field)
     {
-        if (busy) return;
+        if (busy && type != "setup-cancel") return;
         switch (type)
         {
             case "setup-connect":
@@ -34,6 +39,16 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
                 host = field("host").Trim();
                 user = field("user").Trim();
                 await ConnectAsync();
+                break;
+            case "setup-search":
+                user = field("user").Trim();
+                await SearchAsync();
+                break;
+            case "setup-pick":
+                host = field("host");
+                alias = "";
+                step = "pick";
+                Render();
                 break;
             case "setup-install-key":
                 await InstallKeyAsync();
@@ -44,15 +59,34 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
                 Render();
                 break;
             case "setup-cancel":
-                done();
+                busy = false;
+                done(null);
                 break;
         }
     }
 
-    /// <summary>The settings this attempt would use (not saved until it works).</summary>
-    AppSettings Candidate() => alias != ""
-        ? new AppSettings { Host = alias, LookupName = alias == settings.Host ? settings.LookupName : "" }
-        : new AppSettings { Host = host, User = user, KeyFile = File.Exists(Ssh.AppKey) ? Ssh.AppKey : "" };
+    /// <summary>The PC this attempt would add (not saved until it works).</summary>
+    PcEntry Candidate()
+    {
+        var pc = alias != ""
+            ? new PcEntry { Host = alias, LookupName = editing?.Host == alias ? editing.LookupName : "" }
+            : new PcEntry { Host = host, User = user, KeyFile = File.Exists(Ssh.AppKey) ? Ssh.AppKey : "" };
+        if (editing is not null) pc.Id = editing.Id;
+        return pc;
+    }
+
+    async Task SearchAsync()
+    {
+        busy = true;
+        step = "working";
+        working = "Searching your network for PCs that accept SSH…";
+        Render();
+        try { found = await Discovery.ScanAsync(); }
+        catch (Exception e) { error = "Searching failed: " + e.Message; }
+        finally { busy = false; }
+        step = "pick";
+        Render();
+    }
 
     async Task ConnectAsync()
     {
@@ -65,19 +99,21 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
         busy = true;
         error = "";
         step = "working";
-        Render("Checking the connection…");
+        working = "Checking the connection…";
+        Render();
         try
         {
             if (alias == "" && !File.Exists(Ssh.AppKey))
             {
-                Render("Creating a key for this computer…");
+                working = "Creating a key for this computer…";
+                Render();
                 Directory.CreateDirectory(Ssh.SshFolder);
                 var (kc, ko) = await Ssh.RunAsync("ssh-keygen.exe",
                     ["-q", "-t", "ed25519", "-N", "", "-C", $"ssh-manager@{Environment.MachineName}", "-f", Ssh.AppKey]);
                 if (kc != 0) throw new InvalidOperationException("Couldn't create an SSH key:\n" + ko);
             }
             var c = Candidate();
-            var (code, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), c.Target, "echo SSHMGR-OK"], 20000);
+            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), c.Target, "echo SSHMGR-OK"], 20000);
             if (!output.Contains("SSHMGR-OK"))
             {
                 if (alias == "" && output.Contains("Permission denied", StringComparison.OrdinalIgnoreCase))
@@ -106,7 +142,8 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
     {
         busy = true;
         step = "working";
-        Render($"Waiting for the password window… (type {user}'s Windows password for {host} there)");
+        working = $"Waiting for the password window… (type {user}'s Windows password for {host} there)";
+        Render();
         try
         {
             var pub = File.ReadAllText(Ssh.AppKey + ".pub").Trim().Replace("'", "''");
@@ -120,12 +157,12 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
                 'Key added. This window closes in a moment.'
                 Start-Sleep 2
                 """;
-            var c = new AppSettings { Host = host, User = user };
+            var c = new PcEntry { Host = host, User = user };
             var args = string.Join(" ", Ssh.Options(c, batch: false).Select(Quote)) + $" {Quote(c.Target)} {Ssh.PowerShell(script)}";
             var psi = new ProcessStartInfo("cmd.exe", $"/c title SSH Manager: log in to {host} & ssh.exe {args} || pause")
             { UseShellExecute = true };
             using (var p = Process.Start(psi)!) await p.WaitForExitAsync();
-            Render("Checking the connection…");
+            busy = false;
             await ConnectAsync();
         }
         catch (Exception e)
@@ -137,46 +174,53 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
         finally { busy = false; }
     }
 
-    async Task FinishAsync(AppSettings c)
+    async Task FinishAsync(PcEntry c)
     {
-        Render("Checking SSH Manager on the PC…");
+        working = "Checking SSH Manager on the PC…";
+        Render();
         var check = Ssh.PowerShell("if (Test-Path (Join-Path $env:ProgramData 'SSHManager\\install-path.txt')) { 'SSHMGR-INSTALLED' } else { 'SSHMGR-MISSING' }");
         var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), c.Target, check], 20000);
         if (!output.Contains("SSHMGR-INSTALLED"))
-            throw new InvalidOperationException($"This computer can log in to {c.Host}, but SSH Manager isn't installed there yet. Run Setup.cmd on {c.Host}, then press Connect again.");
-        settings.Host = c.Host;
-        settings.User = c.User;
-        settings.KeyFile = c.KeyFile;
-        settings.LookupName = c.LookupName;
-        settings.PcName = "";
-        settings.Save();
-        done();
+            throw new InvalidOperationException($"This computer can log in to {c.Host}, but SSH Manager isn't set up there yet. " +
+                $"Install SSH Manager on {c.Host} and choose \"Let other PCs manage this PC\", then press Add again.");
+        done(c);
     }
 
     static string Quote(string a) => a.Contains(' ') ? $"\"{a}\"" : a;
 
-    void Render(string? working = null)
+    void Render()
     {
         var aliases = Ssh.ConfigHosts();
         string Esc(string s) => WebUtility.HtmlEncode(s);
+        var title = editing is null ? "Add a PC" : $"Change how to reach {Esc(editing.DisplayName)}";
+        var foundHtml = found is null ? "" : found.Count == 0
+            ? "<div class='found'><p class='small'>No PCs accepting SSH were found on your network.</p></div>"
+            : "<div class='found'>" + string.Join("", found.Select(f =>
+                $"<button class='pick' onclick=\"send('setup-pick', {{host: '{Esc(f.Name != "" ? f.Name : f.Address)}'}})\"><b>{Esc(f.Name != "" ? f.Name : f.Address)}</b> <span>{Esc(f.Address)}</span></button>")) + "</div>";
         var body = step switch
         {
-            "working" => $"""<div class="center"><span class="spin"></span>{Esc(working ?? "Working…")}</div>""",
+            "working" => $"""<div class="center"><span class="spin"></span>{Esc(working)}</div>""",
             "key" => $$"""
                 <h2>Allow this computer on {{Esc(host)}}</h2>
                 <p>{{Esc(host)}} answered, but doesn't know this computer yet. SSH Manager made a key for this computer and
                 will add it to {{Esc(host)}} for you. A window opens where you type <b>{{Esc(user)}}</b>'s Windows password
                 for {{Esc(host)}}. This is needed only once; after that it logs in with the key.</p>
+                <p class="small">Sign in to Windows on that PC with a Microsoft account? Use that account's password. If the PC
+                only allows PIN / Windows Hello sign-in, turn off "Only allow Windows Hello sign-in" there first
+                (Settings → Accounts → Sign-in options).</p>
                 {{(error != "" ? $"<div class='err'>{Esc(error)}</div>" : "")}}
                 <div class="buttons"><button onclick="send('setup-back')">Back</button>
                 <button class="primary" onclick="send('setup-install-key')">Open the password window</button></div>
                 """,
             _ => $$"""
-                <h2>Connect to a PC</h2>
-                <p>SSH Manager connects to a Windows PC over SSH. Run <b>Setup.cmd</b> on that PC first (it installs the
-                SSH server and SSH Manager), then enter it here.</p>
+                <h2>{{title}}</h2>
+                <p>SSH Manager connects to Windows PCs over SSH. Install SSH Manager on that PC first and choose
+                <b>Let other PCs manage this PC</b>; then enter it here.</p>
                 {{(error != "" ? $"<div class='err'>{Esc(error)}</div>" : "")}}
-                <label>PC name or IP address <input id="host" value="{{Esc(host)}}" placeholder="e.g. DESKTOP-1234 or 192.168.1.20" autofocus></label>
+                <label>PC name or IP address
+                  <span class="row"><input id="host" value="{{Esc(host)}}" placeholder="e.g. DESKTOP-1234 or 192.168.1.20" autofocus>
+                  <button onclick="send('setup-search', {user: v('user')})">Search my network</button></span></label>
+                {{foundHtml}}
                 <label>Your Windows user name on that PC <input id="user" value="{{Esc(user)}}"></label>
                 {{(aliases.Count > 0 ? $$"""
                 <details {{(alias != "" ? "open" : "")}}><summary>Or use a host from your SSH config</summary>
@@ -184,38 +228,33 @@ internal sealed class SetupWizard(AppSettings settings, Action<string> show, Act
                 <p class="small">Uses the user name, key and address from <code>~/.ssh/config</code>.</p></details>
                 """ : "<input type='hidden' id='alias' value=''>")}}
                 <div class="buttons">
-                  {{(settings.IsConfigured ? "<button onclick=\"send('setup-cancel')\">Cancel</button>" : "")}}
-                  <button class="primary" onclick="send('setup-connect', {host: v('host'), user: v('user'), alias: v('alias')})">Connect</button>
+                  {{(canCancel ? "<button onclick=\"send('setup-cancel')\">Cancel</button>" : "")}}
+                  <button class="primary" onclick="send('setup-connect', {host: v('host'), user: v('user'), alias: v('alias')})">{{(editing is null ? "Add PC" : "Save")}}</button>
                 </div>
                 """,
         };
         show($$"""
-            <!doctype html><html><head><meta charset="utf-8"><style>
-              :root { color-scheme: dark; --bg:#0d1117; --panel:#151b23; --line:#273140; --text:#e6edf3; --muted:#8b98a8; }
-              @media (prefers-color-scheme: light) { :root { color-scheme: light; --bg:#f5f7fa; --panel:#fff; --line:#dde3ea; --text:#17202b; --muted:#5f6b7a; } }
-              body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center; background:var(--bg); color:var(--text);
-                     font:14px/1.5 "Segoe UI", system-ui, sans-serif; }
-              .box { width:min(520px, 90vw); padding:28px 32px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
-              .logo { display:inline-block; font:700 18px Consolas, monospace; background:#22c55e; color:#052e16; border-radius:8px; padding:6px 10px; }
+            <!doctype html><html><head><meta charset="utf-8"><title>SSH Manager</title><style>
+              {{Ui.BaseCss}}
+              body { display:flex; align-items:center; justify-content:center; min-height:100vh; }
+              .box { width:min(540px, 90vw); padding:28px 32px; background:var(--panel); border:1px solid var(--line); border-radius:12px; }
               h2 { font-size:18px; margin:14px 0 6px; } p { color:var(--muted); margin:0 0 14px; } .small { font-size:12px; margin-top:6px; }
               label { display:flex; flex-direction:column; gap:4px; margin-bottom:12px; color:var(--muted); font-size:13px; }
-              input, select { font:inherit; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:7px; padding:7px 10px; }
-              details { margin:4px 0 12px; } summary { cursor:pointer; color:#3b82f6; margin-bottom:8px; }
+              .row { display:flex; gap:6px; } .row input { flex:1; }
+              details { margin:4px 0 12px; } summary { cursor:pointer; color:var(--accent); margin-bottom:8px; }
               .buttons { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
-              button { font:inherit; padding:7px 16px; border-radius:7px; border:1px solid var(--line); background:var(--bg); color:var(--text); cursor:pointer; }
-              button.primary { background:#3b82f6; border-color:#3b82f6; color:#fff; }
-              .err { white-space:pre-wrap; background:color-mix(in srgb, #ef4444 12%, var(--panel)); border:1px solid color-mix(in srgb, #ef4444 50%, transparent);
+              .err { white-space:pre-wrap; background:color-mix(in srgb, var(--bad) 12%, var(--panel)); border:1px solid color-mix(in srgb, var(--bad) 50%, transparent);
                      border-radius:8px; padding:10px 12px; margin-bottom:14px; font-size:13px; max-height:220px; overflow:auto; }
               .center { display:flex; align-items:center; gap:10px; justify-content:center; padding:30px 0; }
-              .spin { width:18px; height:18px; border:2px solid var(--line); border-top-color:#22c55e; border-radius:50%; display:inline-block; animation:s .9s linear infinite; }
-              @keyframes s { to { transform:rotate(360deg); } }
-              code { font-family:Consolas, monospace; }
-            </style></head><body><div class="box"><div class="logo">&gt;_</div>
+              .found { display:flex; flex-wrap:wrap; gap:6px; margin:-4px 0 12px; }
+              .pick { font-size:12.5px; padding:5px 10px; } .pick span { color:var(--muted); margin-left:4px; }
+            </style></head><body>{{Ui.PcBar}}<div class="box"><div class="logo">&gt;_</div>
             {{body}}
             </div><script>
               const v = id => (document.getElementById(id) || {}).value || "";
               function send(type, data) { chrome.webview.postMessage({ type, ...(data || {}) }); }
-              document.addEventListener("keydown", e => { if (e.key === "Enter" && document.getElementById("host")) document.querySelector(".primary").click(); });
+              document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "host") document.querySelector(".primary").click(); });
+              {{Ui.PcBarScript}}
             </script></body></html>
             """);
     }

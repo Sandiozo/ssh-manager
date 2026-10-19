@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+<nav class="pcbar" id="pcbar"></nav>
 <header class="top">
   <div class="brand">
     <span class="logo">&gt;_</span>
@@ -174,6 +175,15 @@
     </div>
 
     <div class="panel">
+      <div class="panel-head"><h2>Updates</h2><span class="muted small" id="upd-version"></span></div>
+      <div class="form">
+        <div id="upd-state" class="small"></div>
+        <label class="switch"><input type="checkbox" id="set-autoupdate"> Install updates automatically on this PC</label>
+        <div class="inline"><button id="upd-check">Check now</button><button id="upd-install" class="primary" hidden>Install update</button></div>
+      </div>
+    </div>
+
+    <div class="panel">
       <div class="panel-head"><h2>Plugins</h2><span class="muted small">Extra features loaded from the <code>plugins</code> folder of the home folder.</span></div>
       <div id="plugins"></div>
     </div>
@@ -182,6 +192,7 @@
       <div class="panel-head"><h2>This app</h2><span class="muted small" id="app-where"></span></div>
       <div class="form">
         <label class="switch"><input type="checkbox" data-app="StartWithWindows"> Start with Windows (in the tray)</label>
+        <label class="switch" id="app-autoupdate-row"><input type="checkbox" data-app="AutoUpdate"> Install app updates automatically</label>
         <div class="sub-head">Notifications</div>
         <label class="switch"><input type="checkbox" data-app="NotifyConnection"> Connection to the PC lost or restored</label>
         <label class="switch"><input type="checkbox" data-app="NotifyFailedLogin"> Failed login attempts</label>

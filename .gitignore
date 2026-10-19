@@ -22,3 +22,5 @@ app/**/obj/
 .vscode/
 .idea/
 *.user
+
+build/

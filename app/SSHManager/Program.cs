@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace SSHManager;
 
 internal static class Program
@@ -14,6 +16,9 @@ internal static class Program
             return;
         }
 
+        // Lets Windows start the app again after the installer closed it for an update.
+        RegisterApplicationRestart(null, 0);
+
         ApplicationConfiguration.Initialize();
         var form = new MainForm(AppSettings.Load(), args.Contains("--tray"));
         var listener = new Thread(() =>
@@ -24,4 +29,7 @@ internal static class Program
         listener.Start();
         Application.Run(form);
     }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    static extern int RegisterApplicationRestart(string? commandLine, int flags);
 }

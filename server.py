@@ -1,26 +1,25 @@
 """SSH Manager server: a dashboard for the OpenSSH server on this Windows PC (status, sessions,
-command activity, file transfer, settings).
+command activity, file transfer, settings, updates).
 
 It listens on 127.0.0.1 only. Other computers reach it through an SSH port forward (the SSH Manager
 app does this), and every request must carry the access token, which clients read over SSH.
 
-    python server.py                 run the server
-    python server.py --print-token   print the access token
-    python server.py --client-info   print port and token for the app (ensure-running.ps1)
-    python server.py --login-url     print a one-time login URL for a browser on this PC
+    server.py                 run the server
+    server.py --client-info   print the version, port and access token (used by the app)
+    server.py --print-token   print the access token
+    server.py --login-url     print a one-time login URL for a browser on this PC
 """
 import hmac
 import json
 import logging
 import socket
 import sys
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
+from sshmgr import __version__
+from sshmgr import home as home_mod
 
-from sshmgr import home as home_mod  # noqa: E402
-
+ROOT = home_mod.install_folder()
+RES = home_mod.resources()
 HOME = home_mod.resolve(ROOT)
 DATA = HOME / "data"
 TOKEN = home_mod.token(HOME)
@@ -32,29 +31,31 @@ if "--print-token" in sys.argv:
     print(TOKEN)
     sys.exit(0)
 if "--client-info" in sys.argv:
-    print(f"SSHMGR-PORT:{PORT}\nSSHMGR-TOKEN:{TOKEN}")
+    print(f"SSHMGR-VERSION:{__version__}\nSSHMGR-PORT:{PORT}\nSSHMGR-TOKEN:{TOKEN}")
     sys.exit(0)
 if "--login-url" in sys.argv:
     print(f"http://localhost:{PORT}/login?token={TOKEN}")
     sys.exit(0)
 
-# pythonw (no console) leaves these as None, which crashes uvicorn's logging setup
-if sys.stdout is None or sys.stderr is None:
+# no console (pythonw, or started hidden): keep anything printed in a log instead of losing it
+if sys.stdout is None or sys.stderr is None or "--log-console" in sys.argv:
     sys.stdout = sys.stderr = open(DATA / "console.log", "a", encoding="utf-8", buffering=1)
 
 logging.basicConfig(filename=DATA / "server.log", level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 import uvicorn  # noqa: E402
-from fastapi import FastAPI, Request  # noqa: E402
+from fastapi import FastAPI, HTTPException, Request  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 from sshmgr import plugins  # noqa: E402
 from sshmgr.activity import ActivityLog  # noqa: E402
 from sshmgr.files import client_label, make_router  # noqa: E402
 from sshmgr.monitor import Monitor  # noqa: E402
 from sshmgr.settings import make_router as make_settings_router  # noqa: E402
+from sshmgr.updater import Updater  # noqa: E402
 
 # any local port: the app may forward from a different local port than this server's
 ALLOWED_HOSTNAMES = {"127.0.0.1", "localhost", "[::1]"}
@@ -63,17 +64,20 @@ COOKIE = "sshmgr_token"
 
 activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
+updater = Updater(config, DATA, activity)
 app = FastAPI(title="SSH Manager", docs_url=None, redoc_url=None)
 
 NOT_LOGGED_IN = """<!doctype html><meta charset="utf-8"><title>SSH Manager</title>
 <body style="font:15px system-ui;background:#0d1117;color:#e6edf3;display:grid;place-items:center;height:100vh;margin:0">
 <div style="max-width:460px;line-height:1.5"><h2>SSH Manager</h2>
-<p>Open it with the SSH Manager app, or on this PC run <code>start.bat</code>, which logs you in.</p></div>"""
+<p>Open it with the SSH Manager app.</p></div>"""
 
 
 def authorized(request: Request) -> bool:
-    supplied = request.cookies.get(COOKIE) or request.headers.get("x-sshmgr-token") or ""
-    return hmac.compare_digest(supplied.encode(), TOKEN.encode())
+    # one cookie per local port (the app may show several PCs, all on "localhost"), or a header
+    supplied = [v for k, v in request.cookies.items() if k.startswith(COOKIE)]
+    supplied.append(request.headers.get("x-sshmgr-token") or "")
+    return any(hmac.compare_digest(s.encode(), TOKEN.encode()) for s in supplied if s)
 
 
 @app.middleware("http")
@@ -93,21 +97,22 @@ async def guard(request: Request, call_next):
 
 @app.get("/api/ping")
 def ping():
-    return {"app": "ssh-manager"}
+    return {"app": "ssh-manager", "version": __version__}
 
 
 @app.get("/login")
-def login(token: str = ""):
+def login(request: Request, token: str = ""):
     if not hmac.compare_digest(token.encode(), TOKEN.encode()):
         return HTMLResponse(NOT_LOGGED_IN, status_code=401)
+    port = request.headers.get("host", "").rsplit(":", 1)[-1]
     response = RedirectResponse("/", status_code=303)
-    response.set_cookie(COOKIE, TOKEN, httponly=True, samesite="strict", max_age=400 * 24 * 3600)
+    response.set_cookie(f"{COOKIE}_{port}", TOKEN, httponly=True, samesite="strict", max_age=400 * 24 * 3600)
     return response
 
 
 @app.get("/api/status")
 def status():
-    return {**monitor.status(), "plugins": loaded_plugins}
+    return {**monitor.status(), "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot()}
 
 
 def who(request: Request) -> str:
@@ -116,7 +121,7 @@ def who(request: Request) -> str:
 
 @app.get("/api/whoami")
 def whoami(request: Request):
-    return {"viewer": who(request), "host": monitor.host_name}
+    return {"viewer": who(request), "host": monitor.host_name, "version": __version__}
 
 
 @app.get("/api/activity")
@@ -124,15 +129,51 @@ def get_activity(after: int = 0, limit: int = 500, kind: str | None = None):
     return {"items": activity.list(after, limit, kind)}
 
 
+class ClientStats(BaseModel):
+    machine: str = Field(min_length=1, max_length=64)
+    cpu: float | None = None
+    ram_total: int | None = None
+    ram_used: int | None = None
+    disks: list[dict] = []
+    battery: int | None = None
+    charging: bool | None = None
+    uptime_s: int | None = None
+    app_version: str = ""
+
+
+@app.post("/api/clients/report")
+def client_report(request: Request, body: ClientStats):
+    monitor.report_client(body.model_dump(), who(request))
+    return {"ok": True}
+
+
+@app.get("/api/update")
+def update_state():
+    return updater.snapshot()
+
+
+@app.post("/api/update/check")
+def update_check():
+    return updater.check()
+
+
+@app.post("/api/update/install")
+def update_install(request: Request):
+    try:
+        return updater.install(reason=f"started by {who(request)}")
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+
 app.include_router(make_router(config, activity, monitor))
 app.include_router(make_settings_router(config, CONFIG_PATH, DATA, activity, monitor, who))
 loaded_plugins = plugins.load(plugins.PluginContext(config, HOME, monitor, activity, app))
-app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+app.mount("/static", StaticFiles(directory=RES / "static"), name="static")
 
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-store"})
+    return FileResponse(RES / "static" / "index.html", headers={"Cache-Control": "no-store"})
 
 
 def port_in_use() -> bool:
@@ -144,6 +185,7 @@ if __name__ == "__main__":
     if port_in_use():
         print(f"SSH Manager is already running on http://localhost:{PORT}")
         sys.exit(0)
-    logging.getLogger("sshmgr").info("starting; home = %s", HOME)
+    logging.getLogger("sshmgr").info("starting %s; home = %s", __version__, HOME)
     monitor.start()
-    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
+    updater.start()
+    uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning", log_config=None)

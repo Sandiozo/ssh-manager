@@ -80,6 +80,18 @@ let last = null, viewer = null, hostName = "";
 function dot(state) { return `<span class="dot ${state}"></span>`; }
 function meter(pct) { return `<div class="meter"><i class="${pct > 85 ? "hot" : ""}" style="width:${Math.min(100, pct)}%"></i></div>`; }
 
+// CPU / RAM / disks / battery that the SSH Manager app on another computer reports about itself
+function clientStats(c) {
+  if (!c) return "";
+  const rows = [];
+  if (c.cpu != null) rows.push(`<div class="row"><span>CPU</span><span>${Math.round(c.cpu)}%</span></div>${meter(c.cpu)}`);
+  if (c.ram_total) rows.push(`<div class="row"><span>RAM</span><span>${fmtBytes(c.ram_used)} / ${fmtBytes(c.ram_total)}</span></div>${meter(c.ram_used / c.ram_total * 100)}`);
+  for (const d of (c.disks || []).slice(0, 2)) rows.push(`<div class="row"><span>${esc(d.mount)}</span><span>${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</span></div>${meter((1 - d.free / d.total) * 100)}`);
+  if (c.battery != null) rows.push(`<div class="row"><span>Battery</span><span>${c.battery}%${c.charging ? " · charging" : ""}</span></div>`);
+  if (c.uptime_s != null) rows.push(`<div class="row"><span>Up</span><span>${fmtDur(c.uptime_s)}</span></div>`);
+  return rows.join("");
+}
+
 function renderStatus(s) {
   last = s;
   hostName = s.host.name;
@@ -96,10 +108,15 @@ function renderStatus(s) {
     pills.push(`<span class="pill">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)} ${p.connected ? "connected" : p.online ? "online, idle" : "offline"}</span>`);
   if (dc.installed) pills.push(`<span class="pill">${dot(dc.online ? "ok" : "")}Desktop Commander ${dc.state}</span>`);
   $("#pills").innerHTML = pills.join("");
-  $("#notice").innerHTML = s.elevated ? "" : `<div class="alert warnish"><b>Running without admin rights.</b>
+  const u = s.update || {};
+  const upd = u.status && u.status !== "idle" ? `<div class="alert update"><span>${u.status === "downloading" ? "Downloading" : "Installing"} SSH Manager ${esc(u.latest)}… the page reconnects by itself.</span></div>`
+    : u.available ? `<div class="alert update"><span><b>SSH Manager ${esc(u.latest)} is available</b> on ${esc(s.host.name)} (it has ${esc(u.current)}).
+        ${u.installable ? "" : "This copy runs from source: update it with <code>git pull</code>."}</span>
+        ${u.installable ? `<button class="primary" data-update-now>Install now</button>` : ""}</div>` : "";
+  $("#notice").innerHTML = upd + (s.elevated ? "" : `<div class="alert warnish"><b>Running without admin rights.</b>
     SSH commands from an admin account run elevated, so their contents show as "hidden", and SSH keys can't be managed,
     until SSH Manager runs as admin. Opening the SSH Manager app on another computer starts it with admin rights,
-    or run <code>Setup.cmd</code> on this PC once.</div>`;
+    or reinstall SSH Manager on this PC with "Let other PCs manage this PC".</div>`);
 
   const ram = s.host.ram;
   const disks = s.host.disks.map(d => `<div class="row"><span>${esc(d.mount)}</span><span>${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</span></div>${meter(d.percent)}`).join("");
@@ -114,11 +131,14 @@ function renderStatus(s) {
       <div class="row"><span>CPU</span><span>${s.host.cpu.toFixed(0)}%</span></div>${meter(s.host.cpu)}
       <div class="row"><span>RAM</span><span>${fmtBytes(ram.used)} / ${fmtBytes(ram.total)}</span></div>${meter(ram.percent)}
       ${disks}</div>`,
-    ...s.peers.map(p => `<div class="card"><div class="head">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)}</div>
+    ...s.peers.map(p => `<div class="card"><div class="head">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)}${p.stats ? `<span class="tag green" style="margin-left:auto">app</span>` : ""}</div>
       <div class="big">${p.connected ? "Connected" : p.online ? "Online · not connected" : "Offline"}</div>
+      ${clientStats(p.stats)}
       <div class="row"><span>Address</span><span>${esc(p.resolved_ip || p.ip || "—")}${p.host ? " (" + esc(p.host) + ")" : ""}</span></div>
       <div class="row"><span>Ping</span><span>${p.online ? (p.latency_ms ?? "<1") + " ms" : p.online === false ? "no reply" : "checking…"}</span></div>
       <div class="row"><span>Last SSH login</span><span title="${esc(p.last_login || "")}">${ago(p.last_login)}</span></div></div>`),
+    ...(s.other_apps || []).map(c => `<div class="card"><div class="head">${dot("ok")}${esc(c.machine)}<span class="tag green" style="margin-left:auto">app</span></div>
+      ${clientStats(c)}<div class="muted small">Not in this PC's computer list (Settings → Computers).</div></div>`),
     !dc.installed ? "" : `<div class="card"><div class="head">${dot(dc.online ? "ok" : "")}Desktop Commander</div>
       <div class="big">${dc.online ? "Online" : dc.installed ? "Offline" : "Not set up"}</div>
       <div class="row"><span>Status since</span><span>${dc.since ? fmtTime(dc.since, true) : "—"}</span></div>
@@ -581,7 +601,8 @@ const settingsUi = {
   async save(next) {
     const body = next || this.draft;
     this.saved = await api("/api/settings", { method: "PUT", json: {
-      name: body.name, peers: body.peers, keys: body.keys, bookmarks: body.bookmarks, default_upload: body.default_upload } });
+      name: body.name, peers: body.peers, keys: body.keys, bookmarks: body.bookmarks, default_upload: body.default_upload,
+      auto_update: body.auto_update !== false } });
     this.draft = structuredClone(this.saved);
     this.touch();
     if (!$("#tab-settings").hidden) this.render();
@@ -591,6 +612,8 @@ const settingsUi = {
     const d = this.draft; if (!d) return;
     $("#set-name").value = d.name; $("#set-name").placeholder = d.computer_name;
     $("#set-upload").value = d.default_upload;
+    $("#set-autoupdate").checked = d.auto_update !== false;
+    renderUpdate();
     this.renderPeers(true);
     this.renderKeys();
     $("#set-shortcuts").innerHTML = d.bookmarks.map((b, i) => `<tr data-i="${i}">
@@ -708,6 +731,8 @@ hostHandlers["app-settings"] = m => {
   $$("[data-app]").forEach(i => i.checked = !!appSettings[i.dataset.app]);
   $("#app-conn").value = appSettings.Connection || "";
   $("#app-dl").value = appSettings.DownloadFolder || "";
+  $("#app-where").textContent = `on ${m.machine} · app version ${appSettings.AppVersion}`;
+  $("#app-autoupdate-row").hidden = !!appSettings.ServerUpdatesApp;
 };
 $("#app-panel").addEventListener("change", e => {
   const el = e.target;
@@ -715,6 +740,35 @@ $("#app-panel").addEventListener("change", e => {
 });
 $("#app-dl-pick").onclick = () => toHost("pick-download-folder");
 $("#app-conn-change").onclick = () => toHost("open-setup");
+
+// ---------- updates ----------
+async function installUpdate() {
+  if (!confirm(`Install the SSH Manager update on ${hostName}? Its server restarts; this window reconnects by itself.`)) return;
+  try { await api("/api/update/install", { method: "POST" }); toast("Update started"); } catch (e) { toast(e.message, true); }
+}
+document.addEventListener("click", e => { if (e.target.closest("[data-update-now]")) installUpdate(); });
+function renderUpdate() {
+  const u = last?.update; if (!u) return;
+  $("#upd-version").textContent = `${hostName}: version ${u.current}`;
+  $("#upd-state").innerHTML = u.status !== "idle" ? `${u.status === "downloading" ? "Downloading" : "Installing"} ${esc(u.latest)}…`
+    : u.available ? `<b>Version ${esc(u.latest)} is available.</b>` + (u.installable ? "" : " This copy runs from source; update it with <code>git pull</code>.")
+    : u.error ? esc(u.error) : u.checked ? `Up to date (checked ${ago(u.checked)}).` : "Not checked yet.";
+  $("#upd-install").hidden = !(u.available && u.installable && u.status === "idle");
+}
+$("#upd-check").onclick = async () => { try { last.update = await api("/api/update/check", { method: "POST" }); renderUpdate(); } catch (e) { toast(e.message, true); } };
+$("#upd-install").onclick = installUpdate;
+$("#set-autoupdate").onchange = e => { settingsUi.draft.auto_update = e.target.checked; settingsUi.touch(); };
+
+// ---------- PC switcher (inside the app) ----------
+hostHandlers.pcs = m => {
+  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all">▦ All PCs</button>` : "") +
+    m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}">${dot(p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad")}${esc(p.name)}</button>`).join("") +
+    `<button class="add" data-pc="add">+ Add PC</button>`;
+};
+$("#pcbar").onclick = e => {
+  const b = e.target.closest("[data-pc]"); if (!b) return;
+  toHost(b.dataset.pc === "add" ? "add-pc" : "switch-pc", { id: b.dataset.pc });
+};
 
 // ---------- start ----------
 (async function whoami() {

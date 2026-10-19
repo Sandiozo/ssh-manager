@@ -254,3 +254,15 @@ button.icon:hover:not(:disabled) { color: var(--text); border-color: var(--line)
 .xf a { color: var(--accent); cursor: pointer; }
 .mono { font-family: var(--mono); font-size: 12.5px; }
 .row-line { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+
+/* PC switcher (filled by the SSH Manager app) */
+.pcbar { display: flex; gap: 4px; align-items: center; padding: 6px 12px; background: var(--bg); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.pcbar:empty { display: none; }
+.pcbar button { display: inline-flex; align-items: center; gap: 7px; border: none; background: none; padding: 5px 11px; border-radius: 6px; white-space: nowrap; color: var(--muted); }
+.pcbar button.on { background: var(--panel-2); color: var(--text); }
+.pcbar button:hover { color: var(--text); }
+.pcbar .add { margin-left: 4px; color: var(--accent); }
+.alert.update { border-color: color-mix(in srgb, var(--accent) 50%, transparent); background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  display: flex; align-items: center; gap: 12px; font-size: 13px; }
+.alert.update span { flex: 1; }
+.tag.green { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }

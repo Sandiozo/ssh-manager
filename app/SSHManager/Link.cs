@@ -5,44 +5,50 @@ using System.Text.RegularExpressions;
 
 namespace SSHManager;
 
-internal enum LinkState { Connecting, Connected, Disconnected, NeedsSetup }
+internal enum LinkState { Connecting, Connected, Disconnected }
 
 /// <summary>
-/// Keeps a connection to the SSH Manager server. Normally that is an `ssh -L` port forward to the PC
+/// Keeps a connection to the SSH Manager server on one PC. Normally that is an `ssh -L` port forward
 /// (started hidden, restarted with backoff when it drops) whose remote command starts the server if
-/// needed and prints its port and access token. When this computer is the server itself it talks to
-/// the local server directly.
+/// needed and prints its version, port and access token. For this computer's own server
+/// (<see cref="PcEntry.LocalId"/>) it talks to the local server directly.
 /// </summary>
 internal sealed partial class Link : IDisposable
 {
-    static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(3) };
+    public static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
 
     const string RemoteScript = """
         $f = Join-Path $env:ProgramData 'SSHManager\install-path.txt'
-        if (-not (Test-Path $f)) { 'SSHMGR-ERROR:SSH Manager is not installed on this PC yet. Run Setup.cmd on it first.'; exit 3 }
+        if (-not (Test-Path $f)) { 'SSHMGR-ERROR:SSH Manager is not installed on this PC yet. Install it there and choose "Let other PCs manage this PC".'; exit 3 }
         & (Join-Path (Get-Content $f -Raw).Trim() 'ensure-running.ps1')
         """;
 
-    readonly AppSettings settings;
+    readonly Action save;
+    readonly int preferredPort;
     readonly CancellationTokenSource stop = new();
     readonly SemaphoreSlim retryNow = new(0);
     Process? ssh;
     readonly List<string> sshOutput = [];
-    string? remoteToken, remoteError;
+    string? remoteToken, remoteError, remoteVersion;
     int? remotePort;
 
-    public event Action<LinkState, string>? Changed;
+    public PcEntry Pc { get; }
+    public event Action<Link, LinkState, string>? Changed;
     public LinkState State { get; private set; } = LinkState.Connecting;
     public string Message { get; private set; } = "";
     public int Port { get; private set; }
     public string Token { get; private set; } = "";
+    public string Version { get; private set; } = "";
     public string Url => $"http://localhost:{Port}/";
-    public bool IsLocal { get; private set; }
+    /// <summary>Latest /api/status from this PC (refreshed by the main window).</summary>
+    public JsonElement? Status { get; set; }
 
-    public Link(AppSettings settings)
+    public Link(PcEntry pc, int preferredPort, Action save)
     {
-        this.settings = settings;
-        Port = settings.LocalPort;
+        Pc = pc;
+        this.preferredPort = preferredPort;
+        this.save = save;
+        Port = preferredPort;
     }
 
     public void Start() => _ = Task.Run(() => RunAsync(stop.Token));
@@ -58,7 +64,7 @@ internal sealed partial class Link : IDisposable
     {
         State = state;
         Message = message;
-        Changed?.Invoke(state, message);
+        Changed?.Invoke(this, state, message);
     }
 
     async Task RunAsync(CancellationToken ct)
@@ -66,20 +72,11 @@ internal sealed partial class Link : IDisposable
         var attempt = 0;
         while (!ct.IsCancellationRequested)
         {
-            var local = Ssh.LocalInstallFolder();
-            IsLocal = local is not null && !settings.IsConfigured;
-            if (!IsLocal && !settings.IsConfigured)
-            {
-                Set(LinkState.NeedsSetup, "");
-                try { await retryNow.WaitAsync(ct); } catch (OperationCanceledException) { break; }
-                continue;
-            }
-
-            Set(LinkState.Connecting, attempt == 0 ? $"Connecting to {settings.DisplayName}…" : $"Reconnecting to {settings.DisplayName} (attempt {attempt + 1})…");
+            Set(LinkState.Connecting, attempt == 0 ? $"Connecting to {Pc.DisplayName}…" : $"Reconnecting to {Pc.DisplayName} (attempt {attempt + 1})…");
             string reason;
             try
             {
-                reason = await (IsLocal ? RunLocalAsync(local!, ct) : RunTunnelAsync(ct, () => attempt = 0));
+                reason = await (Pc.IsLocal ? RunLocalAsync(ct) : RunTunnelAsync(ct, () => attempt = 0));
             }
             catch (OperationCanceledException) { break; }
             catch (Exception e) { reason = e.Message; }
@@ -103,21 +100,29 @@ internal sealed partial class Link : IDisposable
         catch (Exception) when (!ct.IsCancellationRequested) { return false; }
     }
 
-    /// <summary>Asks the server for its name (also proves the token works).</summary>
+    /// <summary>A request to this PC's server with the access token.</summary>
+    public HttpRequestMessage Request(HttpMethod method, string path, HttpContent? body = null)
+    {
+        var req = new HttpRequestMessage(method, $"http://localhost:{Port}{path}") { Content = body };
+        req.Headers.Add("X-SSHMgr-Token", Token);
+        req.Headers.Add("X-SSHMgr", "1");
+        return req;
+    }
+
+    /// <summary>Asks the server for its name and version (also proves the token works).</summary>
     async Task<bool> LearnNameAsync(CancellationToken ct)
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, $"http://localhost:{Port}/api/whoami");
-            req.Headers.Add("X-SSHMgr-Token", Token);
-            using var r = await Http.SendAsync(req, ct);
+            using var r = await Http.SendAsync(Request(HttpMethod.Get, "/api/whoami"), ct);
             if (r.StatusCode != HttpStatusCode.OK) return false;
             using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync(ct));
             var name = doc.RootElement.GetProperty("host").GetString() ?? "";
-            if (name != "" && name != settings.PcName)
+            Version = doc.RootElement.TryGetProperty("version", out var v) ? v.GetString() ?? "" : remoteVersion ?? "";
+            if (name != "" && name != Pc.PcName)
             {
-                settings.PcName = name;
-                settings.Save();
+                Pc.PcName = name;
+                save();
             }
             return true;
         }
@@ -136,15 +141,19 @@ internal sealed partial class Link : IDisposable
         }
     }
 
-    async Task<string> RunLocalAsync(string folder, CancellationToken ct)
+    async Task<string> RunLocalAsync(CancellationToken ct)
     {
-        var python = Path.Combine(folder, @".venv\Scripts\python.exe");
-        var (code, output) = await Ssh.RunAsync(python, [Path.Combine(folder, "server.py"), "--client-info"], 20000);
-        remoteToken = remoteError = null;
+        var folder = Ssh.LocalInstallFolder();
+        if (folder is null) return "SSH Manager's server isn't installed on this PC.";
+        var exe = Path.Combine(folder, "SSHManagerServer.exe");
+        var (code, output) = File.Exists(exe)
+            ? await Ssh.RunAsync(exe, ["--client-info"], 20000)
+            : await Ssh.RunAsync(Path.Combine(folder, @".venv\Scripts\python.exe"), [Path.Combine(folder, "server.py"), "--client-info"], 20000);
+        remoteToken = remoteError = remoteVersion = null;
         remotePort = null;
-        ParseInfo(output);
+        foreach (var line in output.Split('\n')) Keep(line, store: false);
         if (code != 0 || remoteToken is null || remotePort is null)
-            return "Couldn't read the SSH Manager settings on this PC:\n\n" + output.Trim();
+            return "Couldn't read SSH Manager's settings on this PC:\n\n" + output.Trim();
         Port = remotePort.Value;
         Token = remoteToken;
         if (!await AliveAsync(Port, ct))
@@ -153,19 +162,19 @@ internal sealed partial class Link : IDisposable
             var deadline = DateTime.UtcNow.AddSeconds(30);
             while (!await AliveAsync(Port, ct))
             {
-                if (DateTime.UtcNow > deadline) return "The SSH Manager server did not start on this PC.";
+                if (DateTime.UtcNow > deadline) return "SSH Manager's server did not start on this PC.";
                 await Task.Delay(500, ct);
             }
         }
         await LearnNameAsync(ct);
         Set(LinkState.Connected, "Connected (this PC)");
         await WatchAsync(Port, null, ct);
-        return "The SSH Manager server on this PC stopped answering.";
+        return "SSH Manager's server on this PC stopped answering.";
     }
 
     static void StartLocalServer(string folder)
     {
-        // Prefer the logon task Setup.cmd creates (it runs with admin rights); fall back to a plain start.
+        // The logon task the installer creates runs it with admin rights; fall back to a plain start.
         try
         {
             using var schtasks = Process.Start(new ProcessStartInfo("schtasks.exe", "/run /tn \"SSH Manager\"")
@@ -174,13 +183,19 @@ internal sealed partial class Link : IDisposable
             if (schtasks.ExitCode == 0) return;
         }
         catch (Exception) { }
-        Process.Start(new ProcessStartInfo(Path.Combine(folder, @".venv\Scripts\pythonw.exe"), "server.py")
-        { WorkingDirectory = folder, UseShellExecute = false, CreateNoWindow = true });
+        var exe = Path.Combine(folder, "SSHManagerServer.exe");
+        var psi = File.Exists(exe)
+            ? new ProcessStartInfo(exe, "--log-console")
+            : new ProcessStartInfo(Path.Combine(folder, @".venv\Scripts\pythonw.exe"), "server.py");
+        psi.WorkingDirectory = folder;
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        Process.Start(psi);
     }
 
     async Task<string> RunTunnelAsync(CancellationToken ct, Action connected)
     {
-        Port = Ssh.IsPortFree(settings.LocalPort) ? settings.LocalPort : Ssh.FreePort();
+        Port = Ssh.IsPortFree(preferredPort) ? preferredPort : Ssh.FreePort();
         StartSsh();
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (true)
@@ -190,11 +205,11 @@ internal sealed partial class Link : IDisposable
                 KillSsh();
                 return remoteError;
             }
-            if (remotePort is { } rp && rp != settings.RemotePort)
+            if (remotePort is { } rp && rp != Pc.RemotePort)
             {
                 // the server uses another port than we forwarded to: remember it and start over
-                settings.RemotePort = rp;
-                settings.Save();
+                Pc.RemotePort = rp;
+                save();
                 KillSsh();
                 return "";
             }
@@ -203,7 +218,7 @@ internal sealed partial class Link : IDisposable
             if (DateTime.UtcNow > deadline)
             {
                 KillSsh();
-                return $"Connected over SSH, but SSH Manager on {settings.DisplayName} did not answer.";
+                return $"Connected over SSH, but SSH Manager on {Pc.DisplayName} did not answer.";
             }
             await Task.Delay(300, ct);
         }
@@ -211,13 +226,13 @@ internal sealed partial class Link : IDisposable
         if (!await LearnNameAsync(ct))
         {
             KillSsh();
-            return $"SSH Manager on {settings.DisplayName} didn't accept the login.";
+            return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
         }
         Set(LinkState.Connected, "Connected over SSH");
         connected();
         var proc = ssh;
         await WatchAsync(Port, () => proc is null || proc.HasExited, ct);
-        var why = proc is { HasExited: true } ? DescribeSshFailure() : $"{settings.DisplayName} stopped answering.";
+        var why = proc is { HasExited: true } ? DescribeSshFailure() : $"{Pc.DisplayName} stopped answering.";
         KillSsh();
         return why;
     }
@@ -226,33 +241,26 @@ internal sealed partial class Link : IDisposable
     {
         KillSsh();
         lock (sshOutput) sshOutput.Clear();
-        remoteToken = remoteError = null;
+        remoteToken = remoteError = remoteVersion = null;
         remotePort = null;
         var psi = new ProcessStartInfo("ssh.exe")
         {
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
         };
-        foreach (var a in Ssh.Options(settings)) psi.ArgumentList.Add(a);
+        foreach (var a in Ssh.Options(Pc)) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
-                                  "-L", $"{Port}:127.0.0.1:{settings.RemotePort}", settings.Target, Ssh.PowerShell(RemoteScript) })
+                                  "-L", $"{Port}:127.0.0.1:{Pc.RemotePort}", Pc.Target, Ssh.PowerShell(RemoteScript) })
             psi.ArgumentList.Add(a);
 
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        p.OutputDataReceived += (_, e) => Keep(e.Data);
-        p.ErrorDataReceived += (_, e) => Keep(e.Data);
+        p.OutputDataReceived += (_, e) => Keep(e.Data, store: true);
+        p.ErrorDataReceived += (_, e) => Keep(e.Data, store: true);
         p.Start();
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
         ssh = p;
     }
-
-    void ParseInfo(string text)
-    {
-        foreach (var line in text.Split('\n')) Keep(line, store: false);
-    }
-
-    void Keep(string? line) => Keep(line, store: true);
 
     void Keep(string? line, bool store)
     {
@@ -263,6 +271,7 @@ internal sealed partial class Link : IDisposable
             switch (m.Groups[1].Value)
             {
                 case "TOKEN": remoteToken = m.Groups[2].Value; break;
+                case "VERSION": remoteVersion = m.Groups[2].Value; break;
                 case "PORT" when int.TryParse(m.Groups[2].Value, out var port): remotePort = port; break;
                 case "ERROR": remoteError = m.Groups[2].Value; break;
             }
@@ -276,14 +285,14 @@ internal sealed partial class Link : IDisposable
         }
     }
 
-    [GeneratedRegex("^SSHMGR-(TOKEN|PORT|ERROR):(.*)$")]
+    [GeneratedRegex("^SSHMGR-(TOKEN|PORT|ERROR|VERSION):(.*)$")]
     private static partial Regex InfoLine();
 
     string DescribeSshFailure()
     {
         string text;
         lock (sshOutput) text = string.Join("\n", sshOutput);
-        var why = Ssh.Explain(text, settings.DisplayName);
+        var why = Ssh.Explain(text, Pc.DisplayName);
         if (why != "") return why + "\n\n" + text;
         return string.IsNullOrWhiteSpace(text) ? "The SSH connection closed." : "The SSH connection closed:\n\n" + text;
     }

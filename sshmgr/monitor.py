@@ -98,6 +98,7 @@ class Monitor:
         self.running: dict[int, dict] = {}                   # pid -> command record
         self.decoders: list = []                             # plugin hooks, see plugins.py
         self.finish_hooks: list = []
+        self.clients: dict[str, dict] = {}                   # machine name -> stats the SSH Manager app sent
         self.peers: dict[str, dict] = {}
         self.reload_peers()
         self.dashboard_port = config.get("port", 8765)
@@ -356,7 +357,10 @@ class Monitor:
                 ips = {p.get("ip"), p.get("resolved_ip")} - {None}
                 last = next((c for c in reversed(self.conn_list) if c["ip"] in ips), None)
                 peers.append({**p, "connected": any(s["ip"] in ips for s in sessions),
-                              "last_login": last["start"] if last else None})
+                              "last_login": last["start"] if last else None, "stats": self._client_for(p)})
+            known_machines = {(p.get(k) or "").lower() for p in self.peers.values() for k in ("host", "name")}
+            other_clients = [{k: v for k, v in c.items() if k != "ts"} for m, c in self.clients.items()
+                             if m not in known_machines and time.time() - c["ts"] < 30]
             failures = [f for f in self.failures if datetime.fromisoformat(f["ts"]) >= day_ago]
             server_events = list(self.server_events)[-5:]
             # addresses that logged in but aren't in the computer list: offered as "add this computer"
@@ -396,7 +400,21 @@ class Monitor:
             "logins_24h": len(recent), "failures_24h": failures[-50:], "hours": hours,
             "history": history, "server_events": server_events,
             "unknown_clients": sorted(unknown.values(), key=lambda u: u["last"], reverse=True),
+            "other_apps": other_clients,
         }
+
+    def report_client(self, stats: dict, via: str):
+        """Stats an SSH Manager app sends about the computer it runs on."""
+        with self.lock:
+            self.clients[stats["machine"].lower()] = {**stats, "via": via, "ts": time.time()}
+
+    def _client_for(self, peer: dict) -> dict | None:
+        now = time.time()
+        for key in (peer.get("host"), peer.get("name")):
+            c = self.clients.get((key or "").lower())
+            if c and now - c["ts"] < 30:
+                return {k: v for k, v in c.items() if k != "ts"}
+        return None
 
     def label_for_pid(self, pid: int) -> str | None:
         """Name of the SSH client whose session owns process pid (e.g. the sshd end of a tunnel)."""

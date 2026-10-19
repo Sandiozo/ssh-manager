@@ -19,14 +19,15 @@ internal static class Ssh
         try
         {
             var path = File.Exists(f) ? File.ReadAllText(f).Trim() : null;
-            return path is { Length: > 0 } && File.Exists(Path.Combine(path, "server.py")) ? path : null;
+            return path is { Length: > 0 } && (File.Exists(Path.Combine(path, "SSHManagerServer.exe")) || File.Exists(Path.Combine(path, "server.py")))
+                ? path : null;
         }
         catch (Exception) { return null; }
     }
 
     /// <summary>Common options for non-interactive use. New host keys are accepted on first contact
     /// (trust on first use) and checked from then on.</summary>
-    public static List<string> Options(AppSettings s, bool batch = true)
+    public static List<string> Options(PcEntry s, bool batch = true)
     {
         var a = new List<string>();
         if (batch) a.AddRange(["-o", "BatchMode=yes"]);

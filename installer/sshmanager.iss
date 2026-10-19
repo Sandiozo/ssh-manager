@@ -37,6 +37,8 @@ Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=yes
 RestartApplications=yes
+; writes %TEMP%\Setup Log <date> #NNN.txt, for when an install doesn't finish
+SetupLogging=yes
 
 [Types]
 Name: "both"; Description: "Both: use SSH Manager here, and let other PCs manage this PC"

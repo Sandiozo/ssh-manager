@@ -3,6 +3,12 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.5.1] - 2026-10-19
+
+### Fixed
+- `sshmgr` refused to work from an administrator (elevated) window with "belongs to another account".
+  It now checks that the app's connection point belongs to the same Windows account, elevated or not.
+
 ## [1.5.0] - 2026-10-19
 
 ### Added
@@ -202,6 +208,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.5.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.1
 [1.5.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.0
 [1.4.2]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.1

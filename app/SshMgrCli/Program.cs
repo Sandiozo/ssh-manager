@@ -156,9 +156,16 @@ static class Program
     static async Task<JsonNode> AskApp(object request)
     {
         var name = "SSHManager.Cli." + WindowsIdentity.GetCurrent().User!.Value;
-        // CurrentUserOnly: only talk to a pipe owned by this user (no other account can pose as the app)
-        using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.CurrentUserOnly | PipeOptions.Asynchronous);
-        try { await pipe.ConnectAsync(1500); }
+        using var pipe = new NamedPipeClientStream(".", name, PipeDirection.InOut, PipeOptions.Asynchronous);
+        try
+        {
+            await pipe.ConnectAsync(1500);
+            // only talk to a pipe owned by this user account: no other account can make that so it can't
+            // pose as the app. (Not PipeOptions.CurrentUserOnly: it compares with the token's owner, which in
+            // an elevated shell is the Administrators group, and would refuse the user's own app there.)
+            var owner = pipe.GetAccessControl().GetOwner(typeof(SecurityIdentifier));
+            if (owner is null || !owner.Equals(WindowsIdentity.GetCurrent().User)) throw new UnauthorizedAccessException();
+        }
         catch (TimeoutException)
         {
             throw new Failure(System.Diagnostics.Process.GetProcessesByName("SSHManager").Length > 0

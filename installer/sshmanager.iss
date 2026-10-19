@@ -40,6 +40,8 @@ OutputDir={#BuildDir}
 SetupIconFile=..\app\SSHManager\app.ico
 WizardSmallImageFile=wizard-small-58.bmp,wizard-small-73.bmp,wizard-small-87.bmp,wizard-small-116.bmp
 UninstallDisplayIcon={app}\App\SSHManager.exe
+; tells Explorer icons changed, so shortcuts pick up a new app icon after an update
+ChangesAssociations=yes
 UninstallDisplayName=SSH Manager
 #ifndef PreviewOnly
 LicenseFile=..\LICENSE
@@ -76,6 +78,8 @@ Name: "{autodesktop}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Tasks: 
 
 [Run]
 ; the server role is set up from [Code] (RunServerSetup) so its progress can be shown
+; Windows keeps showing a cached icon for shortcuts and taskbar pins: refresh it for the user
+Filename: "{sys}\ie4uinit.exe"; Parameters: "-show"; Check: WantApp; Flags: runhidden nowait runasoriginaluser
 Filename: "{app}\App\SSHManager.exe"; Description: "Open SSH Manager"; Check: WantApp; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]

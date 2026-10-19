@@ -1,14 +1,47 @@
-<p align="center"><img src="docs/banner.jpg" alt="SSH Manager" width="760"></p>
+<p align="center">
+  <img src="docs/banner.jpg" alt="SSH Manager" width="100%">
+</p>
 
-# SSH Manager
+<h3 align="center">See and manage all your Windows PCs from one app</h3>
 
-See and manage all your Windows PCs from one app: who is connected, what they ran, CPU / RAM /
-disks, and drag-and-drop file transfer between them, all over SSH.
+<p align="center">
+  Live status, sessions and activity, file transfer, remote commands, logs and screen preview,
+  all over SSH. No cloud service and no accounts: just Windows' built-in OpenSSH.
+</p>
 
-Useful when you work on one computer but run things on others (a home server, a gaming or build PC,
-a machine your scripts or AI tools reach over SSH) and want to see what's going on there.
+<p align="center">
+  <a href="https://github.com/Sandiozo/ssh-manager/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Sandiozo/ssh-manager?style=flat-square&label=release&color=2f7d6d"></a>
+  <a href="https://github.com/Sandiozo/ssh-manager/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Sandiozo/ssh-manager/total?style=flat-square&color=c8783c"></a>
+  <img alt="Windows 10 and 11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-3b4a45?style=flat-square">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-3b4a45?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/Sandiozo/ssh-manager/releases/latest/download/SSHManager-Setup.exe"><b>⬇ Download for Windows</b></a>
+  &nbsp;·&nbsp; <a href="#install">Install</a>
+  &nbsp;·&nbsp; <a href="#features">Features</a>
+  &nbsp;·&nbsp; <a href="#security">Security</a>
+  &nbsp;·&nbsp; <a href="#troubleshooting">Troubleshooting</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshot.png" alt="SSH Manager: overview of a PC with its computers, live sessions and recent activity" width="100%">
+</p>
+
+## Why
+
+You work on one computer but run things on others: a home server, a gaming or build PC, a machine
+your scripts or AI tools reach over SSH. SSH Manager shows what's going on there (who is connected,
+what they ran, how the machine is doing) and lets you move files, run commands and check logs
+without opening a remote desktop.
+
+Everything goes through Windows' built-in OpenSSH. Each PC runs a small server that only listens on
+`127.0.0.1`; the app reaches it through an SSH tunnel, so the only thing reachable on your network is
+SSH itself, and only on PCs you set up to be managed.
 
 ## Install
+
+**Requirements:** Windows 10 (1809 or later) or Windows 11, 64-bit. Everything else is installed for you.
 
 Download **[SSHManager-Setup.exe](https://github.com/Sandiozo/ssh-manager/releases/latest/download/SSHManager-Setup.exe)**
 and run it on **every PC** you want to use. The installer asks what the PC should do:
@@ -68,8 +101,9 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
   switch it on in the app settings).
 - **Wake-on-LAN:** wake a PC that's asleep or off from its card. The app learns each PC's network
   card while connected; the PC needs Wake-on-LAN enabled in its BIOS and network adapter settings.
-- **Settings:** the computers that connect, the SSH keys allowed to log in (add one to set up a
-  computer by hand, remove one to lock it out), file shortcuts, quick actions, logs, updates.
+- **Settings** (⚙ in the top bar): the computers that connect, the SSH keys allowed to log in (add
+  one to set up a computer by hand, remove one to lock it out), quick actions, logs, file shortcuts,
+  screen preview, updates and the app's own options.
 - **Tray app:** keeps every connection open, reconnects by itself, notifies about lost connections,
   failed logins, unknown computers and finished transfers.
 - **Automatic updates:** each PC updates itself when a new release is out; app-only PCs ask once.
@@ -128,12 +162,12 @@ folder path in `sshmgr-home.txt` in the `Server` folder, or set the `SSHMGR_HOME
 The home folder:
 
 ```
-config.json     computers, key labels, file shortcuts, drop folder, display name, auto_update, port
+config.json     computers, key labels, file shortcuts, quick actions, logs, display name, updates, port
 plugins\        your plugins (*.py)
 data\           activity log, logs, access token, key-file backups, downloaded updates
 ```
 
-Most of `config.json` is editable in the **Settings** tab:
+Most of `config.json` is editable under **Settings** (⚙):
 
 | Key | Meaning |
 |---|---|
@@ -144,6 +178,9 @@ Most of `config.json` is editable in the **Settings** tab:
 | `bookmarks` | file shortcuts: `{ "name", "path" }` (`%USERPROFILE%` etc. work) |
 | `default_upload` | where files dropped outside the Files tab go (default: Desktop) |
 | `auto_update` | install new releases automatically (default `true`) |
+| `actions` | quick actions on the Run page: `{ "name", "group", "script", "confirm", "timeout" }` |
+| `logs` | logs on the Logs page: `{ "name", "path" }` (a file, a folder or a pattern like `logs\app-*.log`) |
+| `screen_preview` | allow other PCs to view this PC's screen (default `true`) |
 
 ## Plugins
 

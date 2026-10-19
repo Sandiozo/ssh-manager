@@ -7,9 +7,11 @@ foreach ($candidate in @($User, "$env:COMPUTERNAME\$short", $short)) {
     try { (New-Object Security.Principal.NTAccount($candidate)).Translate([Security.Principal.SecurityIdentifier]) | Out-Null; $User = $candidate; break } catch { }
 }
 $name = 'SSH Manager app (restart after update)'
-$action = New-ScheduledTaskAction -Execute $Exe -Argument '--tray'
+# refresh the icon cache in that session first (shortcuts keep the old icon otherwise), then start the app
+$action = @((New-ScheduledTaskAction -Execute "$env:WINDIR\System32\ie4uinit.exe" -Argument '-show'),
+            (New-ScheduledTaskAction -Execute $Exe -Argument '--tray'))
 $principal = New-ScheduledTaskPrincipal -UserId $User -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $name -Action $action -Principal $principal -Force | Out-Null
 Start-ScheduledTask -TaskName $name
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 6
 Unregister-ScheduledTask -TaskName $name -Confirm:$false

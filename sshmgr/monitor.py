@@ -316,6 +316,13 @@ class Monitor:
                 "since": changed, "heartbeat": heartbeat, "log": last.name, "last_line": last_line[:200]}
 
     # ---- snapshot -----------------------------------------------------------------------------
+    def _partitions(self):
+        """The drive list. Listing it is slow on Windows (it asks every drive), and it rarely changes."""
+        now = time.monotonic()
+        if now - getattr(self, "_parts_at", -1e9) > 60:
+            self._parts, self._parts_at = psutil.disk_partitions(), now
+        return self._parts
+
     def status(self) -> dict:
         now = datetime.now(timezone.utc)
         with self.lock:
@@ -381,7 +388,7 @@ class Monitor:
                                 for c in psutil.net_connections("tcp"))
         vm = psutil.virtual_memory()
         disks = []
-        for part in psutil.disk_partitions():
+        for part in self._partitions():
             try:
                 u = psutil.disk_usage(part.mountpoint)
                 disks.append({"mount": part.mountpoint, "total": u.total, "free": u.free, "percent": u.percent})

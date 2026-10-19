@@ -47,7 +47,10 @@ WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
 CloseApplications=yes
-RestartApplications=yes
+; not Restart Manager's restart: it reopens the app right after the files are copied, before setup
+; has finished (and can't reach apps in another session). PrepareToInstall closes the app and
+; ReopenApp starts it again at the end of a silent update; interactive installs offer "Open SSH Manager".
+RestartApplications=no
 ; writes %TEMP%\Setup Log <date> #NNN.txt, for when an install doesn't finish
 SetupLogging=yes
 
@@ -64,6 +67,7 @@ Source: "..\ensure-running.ps1"; DestDir: "{app}\Server"; Check: WantServer; Fla
 Source: "{#BuildDir}\tools\HiddenRun.exe"; DestDir: "{app}\Tools"; Check: WantServer; Flags: ignoreversion
 Source: "server-setup.ps1"; DestDir: "{app}\Tools"; Check: WantServer; Flags: ignoreversion
 Source: "server-stop.ps1"; DestDir: "{app}\Tools"; Flags: ignoreversion
+Source: "reopen-app.ps1"; DestDir: "{app}\Tools"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Check: WantApp
@@ -93,6 +97,7 @@ var
   NowLabel, DepsLabel: TNewStaticText;
   AppInstalled, ServerInstalled, RemoveApp: Boolean;
   AppChosen, ServerChosen: Boolean;   { what this run installs; see WantApp / WantServer }
+  AppWasRunning: Boolean;
 
 function InstallingUser(Param: String): String;
 begin
@@ -294,6 +299,7 @@ begin
   Result := ServerChosen;
 end;
 
+
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo,
   MemoGroupInfo, MemoTasksInfo: String): String;
 begin
@@ -388,7 +394,11 @@ var
 begin
   Exec('schtasks.exe', '/end /tn "SSH Manager"', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Exec('taskkill.exe', '/f /im SSHManagerServer.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
-  if RemoveApp then Exec('taskkill.exe', '/f /im SSHManager.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
+  { tasklist prints the image name only when it's running }
+  AppWasRunning := Exec(ExpandConstant('{cmd}'), '/c tasklist /fi "imagename eq SSHManager.exe" | find /i "SSHManager.exe"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+  { close it ourselves: Restart Manager can't close an app in another session (installer started over SSH) }
+  if AppWasRunning then Exec('taskkill.exe', '/f /im SSHManager.exe', '', SW_HIDE, ewWaitUntilTerminated, Code);
   Result := '';
 end;
 
@@ -490,8 +500,11 @@ end;
 
 { After the files are in place: set up the server role, and remove roles that were unticked (the
   installer itself only adds files). }
+procedure ReopenApp; forward;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
+  if (CurStep = ssDone) and WizardSilent and AppChosen and AppWasRunning then ReopenApp;
   if CurStep <> ssPostInstall then Exit;
   if ServerChosen then
     RunServerSetup
@@ -511,6 +524,16 @@ begin
     DeleteFile(ExpandConstant('{autodesktop}\SSH Manager.lnk'));
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'SSH Manager');
   end;
+end;
+
+{ After a silent update, start the app again (in the tray) if it was running before. }
+procedure ReopenApp;
+var
+  Code: Integer;
+begin
+  Exec('powershell.exe', '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\Tools\reopen-app.ps1') +
+    '" -Exe "' + ExpandConstant('{app}\App\SSHManager.exe') + '" -User "' + InstallingUser('') + '"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

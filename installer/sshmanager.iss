@@ -1,10 +1,11 @@
-; SSH Manager installer (Inno Setup 6). Built by build.ps1, which first puts the app, the server and
-; HiddenRun into ..\build\{app,server,tools}.
+; SSH Manager installer (Inno Setup 6). Built by build.ps1, which first puts the app, the server,
+; HiddenRun and the command-line tool into ..\build\{app,server,tools,cli}.
 ;  - "What should this PC do?" page: Client (the app, to manage other PCs) or Client and server (also
 ;    let other PCs manage this one). It shows what is installed now and which dependencies are already
 ;    there or will be downloaded.
 ;  - Downloads and installs the .NET 8 Desktop Runtime and the WebView2 Runtime if the app needs them.
 ;  - The server role turns on Windows' OpenSSH Server and starts SSH Manager at logon (server-setup.ps1).
+;  - The app comes with the command-line tool sshmgr.exe (in Cli, which is added to PATH).
 ;  - Also used for updates: run silently (/VERYSILENT) it keeps the roles chosen before.
 
 #ifndef Version
@@ -42,6 +43,8 @@ WizardSmallImageFile=wizard-small-58.bmp,wizard-small-73.bmp,wizard-small-87.bmp
 UninstallDisplayIcon={app}\App\SSHManager.exe
 ; tells Explorer icons changed, so shortcuts pick up a new app icon after an update
 ChangesAssociations=yes
+; tells running programs that PATH changed (the Cli folder with sshmgr.exe)
+ChangesEnvironment=yes
 UninstallDisplayName=SSH Manager
 #ifndef PreviewOnly
 LicenseFile=..\LICENSE
@@ -65,6 +68,7 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; Check: WantApp
 
 [Files]
 Source: "{#BuildDir}\app\*"; DestDir: "{app}\App"; Check: WantApp; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#BuildDir}\cli\sshmgr.exe"; DestDir: "{app}\Cli"; Check: WantApp; Flags: ignoreversion
 Source: "{#BuildDir}\server\*"; DestDir: "{app}\Server"; Check: WantServer; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\ensure-running.ps1"; DestDir: "{app}\Server"; Check: WantServer; Flags: ignoreversion
 Source: "{#BuildDir}\tools\HiddenRun.exe"; DestDir: "{app}\Tools"; Check: WantServer; Flags: ignoreversion
@@ -469,6 +473,45 @@ begin
       'Details are in ' + ExpandConstant('{app}\Server\setup.log') + '. Run this installer again to retry.', mbError, MB_OK, IDOK);
 end;
 
+{ ---- the command-line tool: its folder on the system PATH ---- }
+
+const
+  EnvKey = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment';
+
+procedure SetCliOnPath(Add: Boolean);
+var
+  Path, Dir, Rest, Item, Kept: String;
+  P: Integer;
+  Found: Boolean;
+begin
+  Dir := ExpandConstant('{app}\Cli');
+  if not RegQueryStringValue(HKLM, EnvKey, 'Path', Path) then Path := '';
+  Kept := '';
+  Found := False;
+  Rest := Path;
+  while Rest <> '' do
+  begin
+    P := Pos(';', Rest);
+    if P = 0 then P := Length(Rest) + 1;
+    Item := Copy(Rest, 1, P - 1);
+    Rest := Copy(Rest, P + 1, Length(Rest));
+    if CompareText(RemoveBackslashUnlessRoot(Trim(Item)), Dir) = 0 then
+      Found := True
+    else if Trim(Item) <> '' then
+    begin
+      if Kept <> '' then Kept := Kept + ';';
+      Kept := Kept + Item;
+    end;
+  end;
+  if Add = Found then Exit;
+  if Add then
+  begin
+    if Kept <> '' then Kept := Kept + ';';
+    Kept := Kept + Dir;
+  end;
+  RegWriteExpandStringValue(HKLM, EnvKey, 'Path', Kept);
+end;
+
 { After the files are in place: set up the server role, and remove roles that were unticked (the
   installer itself only adds files). }
 procedure ReopenApp; forward;
@@ -477,6 +520,7 @@ procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssDone) and WizardSilent and AppChosen and AppWasRunning then ReopenApp;
   if CurStep <> ssPostInstall then Exit;
+  if AppChosen then SetCliOnPath(True);
   if ServerChosen then
     RunServerSetup
   else if DirExists(ExpandConstant('{app}\Server')) then
@@ -491,6 +535,8 @@ begin
   begin
     WizardForm.StatusLabel.Caption := 'Removing the SSH Manager app...';
     DelTree(ExpandConstant('{app}\App'), True, True, True);
+    DelTree(ExpandConstant('{app}\Cli'), True, True, True);
+    SetCliOnPath(False);
     DeleteFile(ExpandConstant('{autoprograms}\SSH Manager.lnk'));
     DeleteFile(ExpandConstant('{autodesktop}\SSH Manager.lnk'));
     RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'SSH Manager');
@@ -511,6 +557,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Code: Integer;
 begin
+  if CurUninstallStep = usPostUninstall then SetCliOnPath(False);
   if (CurUninstallStep = usUninstall) and DirExists(ExpandConstant('{app}\Server')) and not UninstallSilent and
      (MsgBox('Also turn off Windows'' OpenSSH Server on this PC? Choose No if you use SSH to reach this PC for anything else.',
        mbConfirmation, MB_YESNO) = IDYES) then

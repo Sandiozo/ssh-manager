@@ -132,11 +132,40 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
 - **Automatic updates:** each PC updates itself when a new release is published; downloads are checked
   against their SHA-256.
 - **Plugins:** small Python files that add your own command decoders, activity details or API routes.
+- **Command line:** `sshmgr` lets scripts and AI agents run commands, move files, take screenshots and
+  wait for things on your PCs through the app's connections (see [Command line](#command-line)).
+
+## Command line
+
+The app comes with `sshmgr`, a command-line tool for scripts and AI agents. It uses the PCs the app is
+connected to, through the app's own connections: no SSH setup, port forward or access token of its own.
+It asks the running app for a PC's connection over a local pipe that only your Windows account can open,
+and nothing is stored on disk. The installer adds it to `PATH` (open a new terminal after installing).
+
+```
+sshmgr pcs                                          the PCs in the app and whether they are connected
+sshmgr run <pc> "Get-Service sshd" [--cwd <dir>] [--env K=V] [--timeout <s>]
+sshmgr run <pc> -f script.ps1                       a script file (- reads it from standard input)
+sshmgr actions <pc>    /  sshmgr action <pc> <id>   list and run quick actions
+sshmgr shot <pc> screen.png [--window <app>|--monitor <n>]
+sshmgr windows <pc>                                 app windows that can be captured
+sshmgr get <pc> "C:\Logs\app.log" .\               download (a folder comes as a zip)
+sshmgr put <pc> .\build.zip "C:\Deploy\" [--overwrite]
+sshmgr wait <pc> --file "C:\out\done.txt" [--changed-after now] [--timeout <s>]
+sshmgr wait <pc> --process setup [--exited] [--timeout <s>]
+```
+
+`<pc>` is a PC's name, the name or address it was added with, or its id. `run` and `action` stream the
+output as it comes and exit with the script's exit code; Ctrl+C stops the run on the PC. Other exit codes:
+1 failed (or `wait` timed out), 2 wrong usage, 3 the app isn't running or the PC isn't connected. `pcs`,
+`actions`, `windows` and `wait` take `--json`. Screenshots are full size; a `.png` is lossless. Everything
+it does is in that PC's activity log, like anything else done from the app. Run `sshmgr help` for all
+options.
 
 ## Automation API
 
-Scripts and AI agents can use the same API as the dashboard. It is only reachable on `127.0.0.1` of
-each PC, so open an SSH port forward first (`ssh -L 18765:127.0.0.1:8765 <pc>`). Read the access token
+Scripts and AI agents can use the same API as the dashboard (`sshmgr` above is the easy way to). It is
+only reachable on `127.0.0.1` of each PC, so open an SSH port forward first (`ssh -L 18765:127.0.0.1:8765 <pc>`). Read the access token
 once over SSH with `"C:\Program Files\SSH Manager\Server\SSHManagerServer.exe" --client-info` (the
 `SSHMGR-TOKEN:` line) and send it with every request as the `X-SSHMgr-Token` header; requests that
 change something also need `X-SSHMgr: 1`. Everything done through the API is in the activity log.
@@ -198,7 +227,7 @@ Found a security problem? Please report it privately, see [SECURITY.md](SECURITY
 
 | | |
 |---|---|
-| Program | `C:\Program Files\SSH Manager` (`App`, `Server`, `Tools`) |
+| Program | `C:\Program Files\SSH Manager` (`App`, `Cli`, `Server`, `Tools`) |
 | App settings | `%LOCALAPPDATA%\SSHManager\settings.json` |
 | Server settings and data ("home") | `%LOCALAPPDATA%\SSHManager\server` of the user who installed it |
 | Server logs | `<home>\data\server.log`; setup log: `C:\Program Files\SSH Manager\Server\setup.log` |

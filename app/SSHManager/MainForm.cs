@@ -40,6 +40,7 @@ internal sealed class MainForm : Form
     readonly AppUpdater updater;
     readonly SyncManager sync;
     readonly Pairing pairing;
+    readonly CliPipe cliPipe;
     /// <summary>Recent activity of each PC (by PC id), for the combined timeline in All PCs.</summary>
     readonly Dictionary<string, (long last, List<JsonElement> items)> feeds = [];
     readonly HashSet<string> pairSeen = [];
@@ -73,6 +74,7 @@ internal sealed class MainForm : Form
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => links.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(() => Post(sync!.Snapshot())));
+        cliPipe = new CliPipe(() => (List<Link>)Invoke(new Func<List<Link>>(() => links.ToList())));
 
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open SSH Manager", null, (_, _) => ShowWindow());
@@ -144,6 +146,7 @@ internal sealed class MainForm : Form
         updater.Start();
         poll.Start();
         sync.Start();
+        cliPipe.Start();
         AddClipboardFormatListener(Handle);
         clipTimer.Tick += async (_, _) => await PollClipboardAsync();
         clipTimer.Start();
@@ -1089,6 +1092,7 @@ internal sealed class MainForm : Form
         exiting = true;
         SaveWindowBounds();
         poll.Stop();
+        cliPipe.Dispose();
         links.ForEach(l => l.Dispose());
         tray.Visible = false;
         tray.Dispose();

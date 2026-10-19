@@ -17,6 +17,7 @@ Thanks for helping! Bug reports, ideas and pull requests are all welcome.
 | `static/` | The dashboard (plain HTML, CSS and JavaScript, no build step). |
 | `app/SSHManager/` | The Windows app (C#, .NET 8, WinForms + WebView2): tunnels, tray, setup pages, sync, clipboard. |
 | `app/HiddenRun/` | Small helper that starts a program without a window. |
+| `app/SshMgrCli/` | `sshmgr.exe`, the command-line tool: asks the app for a PC's connection over a named pipe (`CliPipe.cs` in the app) and calls that PC's API. |
 | `installer/` | Inno Setup script and the PowerShell scripts it runs (server setup, stop, app restart). |
 | `plugins/` | Example server plugin. |
 | `build.ps1`, `server.spec` | Builds the server (PyInstaller), the app and the installer. |

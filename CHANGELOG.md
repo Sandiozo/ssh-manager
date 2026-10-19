@@ -3,6 +3,16 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.5.0] - 2026-10-19
+
+### Added
+- `sshmgr`, a command-line tool for scripts and AI agents, installed with the app and added to `PATH`.
+  It uses the PCs the app is connected to through the app's own connections, so it needs no SSH
+  setup or access token of its own: list PCs, run PowerShell with streamed output and the script's exit
+  code, run quick actions, take screenshots, download and upload files, and wait for a file or program.
+  The app answers it over a local pipe that only the same Windows account can open. See **Command
+  line** in the README.
+
 ## [1.4.2] - 2026-10-19
 
 ### Fixed
@@ -190,6 +200,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.5.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.0
 [1.4.2]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.1
 [1.4.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.4.0

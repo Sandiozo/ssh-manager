@@ -1,5 +1,5 @@
 # Builds build\SSHManager-Setup.exe (+ .sha256): the server as an exe (PyInstaller), the app (.NET 8),
-# HiddenRun (self-contained), then the installer (Inno Setup 6).
+# HiddenRun (self-contained), the command-line tool sshmgr.exe, then the installer (Inno Setup 6).
 # Needs: Python 3.11+ with requirements.txt + pyinstaller, the .NET 8 SDK, Inno Setup 6 (ISCC.exe).
 param([string]$Python = "$PSScriptRoot\.venv\Scripts\python.exe")
 $ErrorActionPreference = 'Stop'
@@ -7,7 +7,7 @@ $root = $PSScriptRoot
 $build = "$root\build"
 $version = ((Get-Content "$root\sshmgr\__init__.py" -Raw) -replace '(?s).*__version__\s*=\s*"([^"]+)".*', '$1').Trim()
 "Building SSH Manager $version"
-foreach ($d in 'app', 'server', 'tools') { if (Test-Path "$build\$d") { Remove-Item "$build\$d" -Recurse -Force } }
+foreach ($d in 'app', 'server', 'tools', 'cli') { if (Test-Path "$build\$d") { Remove-Item "$build\$d" -Recurse -Force } }
 
 & $Python -m PyInstaller "$root\server.spec" --noconfirm --distpath "$build\dist" --workpath "$build\work" --log-level WARN
 if ($LASTEXITCODE) { throw "PyInstaller failed" }
@@ -20,6 +20,11 @@ Remove-Item "$build\app\*.pdb", "$build\app\*.xml" -ErrorAction SilentlyContinue
 dotnet publish "$root\app\HiddenRun\HiddenRun.csproj" -c Release -r win-x64 --self-contained -p:PublishSingleFile=true `
     -p:PublishTrimmed=true -p:Version=$version -o "$build\tools" --nologo -v quiet
 if ($LASTEXITCODE) { throw "HiddenRun build failed" }
+
+# one small exe that uses the .NET runtime the app installs (set in the project file)
+dotnet publish "$root\app\SshMgrCli\SshMgrCli.csproj" -c Release -r win-x64 -p:Version=$version -o "$build\cli" --nologo -v quiet
+if ($LASTEXITCODE) { throw "sshmgr build failed" }
+Remove-Item "$build\cli\*.pdb" -ErrorAction SilentlyContinue
 
 $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") |
     Where-Object { Test-Path $_ } | Select-Object -First 1

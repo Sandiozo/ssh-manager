@@ -143,6 +143,10 @@ class Monitor:
         for p in self.peers.values():
             if ip in (p.get("ip"), p.get("resolved_ip")):
                 return p["name"]
+        # not in the computer list, but its SSH Manager app reported in from that address: use its name
+        for c in list(self.clients.values()):
+            if c.get("ip") == ip:
+                return c["machine"]
         return ip
 
     def label_key(self, fp: str | None) -> str | None:
@@ -423,8 +427,8 @@ class Monitor:
                 return {k: v for k, v in c.items() if k != "ts"}
         return None
 
-    def label_for_pid(self, pid: int) -> str | None:
-        """Name of the SSH client whose session owns process pid (e.g. the sshd end of a tunnel)."""
+    def _conn_for_pid(self, pid: int) -> dict | None:
+        """The open SSH session that owns process pid (e.g. the sshd end of a tunnel)."""
         with self.lock:
             chain, p = [], pid
             while p and p not in chain:
@@ -433,10 +437,19 @@ class Monitor:
             for attempt in range(2):
                 for conn in reversed(self.conn_list):
                     if conn["pid"] in chain and not conn["end"]:
-                        return self.label_ip(conn["ip"])
+                        return conn
                 if attempt == 0:
                     self._poll_events()   # a brand-new session's login may not be read from the log yet
         return None
+
+    def label_for_pid(self, pid: int) -> str | None:
+        """Name of the SSH client whose session owns process pid."""
+        conn = self._conn_for_pid(pid)
+        return self.label_ip(conn["ip"]) if conn else None
+
+    def ip_for_pid(self, pid: int) -> str | None:
+        conn = self._conn_for_pid(pid)
+        return conn["ip"] if conn else None
 
     def key_usage(self) -> dict[str, dict]:
         """fingerprint -> last login with it, and whether a session using it is open right now."""

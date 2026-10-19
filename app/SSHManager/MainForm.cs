@@ -27,6 +27,8 @@ internal sealed class MainForm : Form
     readonly AppUpdater updater;
     readonly SyncManager sync;
     readonly Pairing pairing;
+    /// <summary>Recent activity of each PC (by PC id), for the combined timeline in All PCs.</summary>
+    readonly Dictionary<string, (long last, List<JsonElement> items)> feeds = [];
     readonly HashSet<string> pairSeen = [];
     bool pairPrompting;
     readonly System.Windows.Forms.Timer poll = new() { Interval = 5000 };
@@ -200,6 +202,7 @@ internal sealed class MainForm : Form
             {
                 shown = All;
                 web.CoreWebView2.NavigateToString(Ui.Overview());
+                _ = PollAsync();   // fetch everyone's activity now rather than at the next poll
             }
             else PushOverview();
             return;
@@ -360,6 +363,7 @@ internal sealed class MainForm : Form
                     link.Status = doc.RootElement.Clone();
                     CheckAlerts(link);
                     if (!link.Pc.IsLocal && !pairPrompting) await CheckPairRequestAsync(link);
+                    if (current == All) await FetchActivityAsync(link);
                 }
                 catch (Exception) { }
             }
@@ -385,6 +389,76 @@ internal sealed class MainForm : Form
                 Balloon("Unknown computer logged in", $"A computer that isn't in {link.Pc.DisplayName}'s list logged in. See Settings → Computers there.", ToolTipIcon.Warning, force: link.Pc.Id != current);
         }
         seen[link.Pc.Id] = (fails, unknown);
+    }
+
+    /// <summary>New activity entries of a PC since the last fetch (the newest 300 the first time).</summary>
+    async Task FetchActivityAsync(Link link)
+    {
+        feeds.TryGetValue(link.Pc.Id, out var f);
+        f.items ??= [];
+        using var r = await Link.Http.SendAsync(link.Request(HttpMethod.Get, $"/api/activity?after={f.last}&limit=300"));
+        if (!r.IsSuccessStatusCode) return;
+        using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
+        foreach (var it in doc.RootElement.GetProperty("items").EnumerateArray())
+        {
+            f.items.Add(it.Clone());
+            if (it.TryGetProperty("id", out var id) && id.TryGetInt64(out var n) && n > f.last) f.last = n;
+        }
+        if (f.items.Count > 400) f.items.RemoveRange(0, f.items.Count - 400);
+        feeds[link.Pc.Id] = f;
+    }
+
+    /// <summary>Totals, logins per hour, live sessions and a merged activity timeline over all connected PCs.</summary>
+    object Combined()
+    {
+        static int N(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+        static long L(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt64() : 0;
+        static int Len(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.Array ? v.GetArrayLength() : 0;
+        static string S(JsonElement e, string n) => e.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+        static JsonElement A(JsonElement s) => s.TryGetProperty("activity_24h", out var a) && a.ValueKind == JsonValueKind.Object ? a : default;
+        static int AN(JsonElement s, string n) => A(s).ValueKind == JsonValueKind.Object ? N(A(s), n) : 0;
+
+        var up = links.Where(l => l.State == LinkState.Connected && l.Status is not null).Select(l => (l, s: l.Status!.Value)).ToList();
+        var summary = new
+        {
+            online = links.Count(l => l.State == LinkState.Connected), total = links.Count,
+            sessions = up.Sum(x => Len(x.s, "sessions")),
+            logins = up.Sum(x => N(x.s, "logins_24h")),
+            failures = up.Sum(x => Len(x.s, "failures_24h")),
+            commands = up.Sum(x => AN(x.s, "commands")),
+            actions = up.Sum(x => AN(x.s, "actions")),
+            files = up.Sum(x => AN(x.s, "files")),
+            bytes = up.Sum(x => A(x.s).ValueKind == JsonValueKind.Object ? L(A(x.s), "bytes") : 0),
+        };
+        var series = up.Where(x => x.s.TryGetProperty("hours", out var h) && h.ValueKind == JsonValueKind.Array)
+            .Select(x => new { name = x.l.Pc.DisplayName, counts = x.s.GetProperty("hours").EnumerateArray().Select(h => N(h, "count")).ToArray() })
+            .ToList();
+        var labels = up.Select(x => x.s).Where(s => s.TryGetProperty("hours", out var h) && h.ValueKind == JsonValueKind.Array)
+            .Select(s => s.GetProperty("hours").EnumerateArray().Select(h => S(h, "hour")).ToArray()).FirstOrDefault() ?? [];
+        var sessions = up.SelectMany(x => x.s.TryGetProperty("sessions", out var ss) && ss.ValueKind == JsonValueKind.Array
+                ? ss.EnumerateArray().Select(se => (object)new
+                {
+                    pc = x.l.Pc.DisplayName, client = S(se, "client"), user = S(se, "user"), ip = S(se, "ip"), start = S(se, "start"),
+                    tunnel = se.TryGetProperty("tunnel", out var t) && t.ValueKind == JsonValueKind.True,
+                    commands = se.TryGetProperty("commands", out var cs) && cs.ValueKind == JsonValueKind.Array
+                        ? cs.EnumerateArray().Where(c => S(c, "kind") != "dashboard")
+                            .Select(c => new { kind = S(c, "kind"), summary = S(c, "summary"), start = S(c, "start") }).ToArray()
+                        : [],
+                })
+                : []).ToList();
+        var activity = links.Where(l => feeds.ContainsKey(l.Pc.Id))
+            .SelectMany(l => feeds[l.Pc.Id].items.Select(it =>
+            {
+                var o = System.Text.Json.Nodes.JsonNode.Parse(it.GetRawText())!.AsObject();
+                foreach (var big in new[] { "script", "output" })
+                    if (o[big] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var text) && text.Length > 4000)
+                        o[big] = text[..4000] + "…";
+                o["pc"] = l.Pc.DisplayName;
+                return o;
+            }))
+            .OrderByDescending(o => DateTimeOffset.TryParse(o["ts"]?.GetValue<string>(), out var t) ? t : DateTimeOffset.MinValue)
+            .Take(250).ToList();
+        return new { summary, hours = new { labels, series }, sessions, activity };
     }
 
     void PushOverview()
@@ -444,7 +518,7 @@ internal sealed class MainForm : Form
             else if (updater.Error is { } err)
                 appUpdate = new { text = err, canInstall = false };
         }
-        Post(new { type = "overview", pcs, appUpdate });
+        Post(new { type = "overview", pcs, appUpdate, combined = Combined() });
     }
 
     // ---- messages from pages ----

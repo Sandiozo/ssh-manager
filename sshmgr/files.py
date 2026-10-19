@@ -107,6 +107,19 @@ def tree_size(paths: list[Path]) -> int:
     return total
 
 
+def tunnel_pid(request: Request, port: int) -> int | None:
+    """The sshd process at the other end of this request's connection, when it came through an SSH tunnel."""
+    cport = request.client.port if request.client else None
+    for c in psutil.net_connections("tcp"):
+        if c.laddr and c.laddr.port == cport and c.raddr and c.raddr.port == port and c.pid:
+            try:
+                if psutil.Process(c.pid).name().lower().startswith("sshd"):
+                    return c.pid
+            except psutil.Error:
+                pass
+    return None
+
+
 def client_label(request: Request, port: int, monitor) -> str:
     """Who is calling: a browser on this PC, or another computer through an SSH tunnel (the client
     socket to this server is then owned by that computer's sshd session process)."""

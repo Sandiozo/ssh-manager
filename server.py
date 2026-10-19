@@ -53,7 +53,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from sshmgr import plugins  # noqa: E402
 from sshmgr.activity import ActivityLog  # noqa: E402
-from sshmgr.files import client_label, make_router  # noqa: E402
+from sshmgr.files import client_label, make_router, tunnel_pid  # noqa: E402
 from sshmgr.monitor import Monitor  # noqa: E402
 from sshmgr.settings import make_router as make_settings_router  # noqa: E402
 from sshmgr.runner import Runner  # noqa: E402
@@ -122,7 +122,8 @@ def login(request: Request, token: str = ""):
 
 @app.get("/api/status")
 def status():
-    return {**monitor.status(), "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot()}
+    return {**monitor.status(), "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot(),
+            "activity_24h": activity.counts_24h()}
 
 
 def who(request: Request) -> str:
@@ -158,7 +159,10 @@ class ClientStats(BaseModel):
 
 @app.post("/api/clients/report")
 def client_report(request: Request, body: ClientStats):
-    monitor.report_client(body.model_dump(), who(request))
+    stats = body.model_dump()
+    if (pid := tunnel_pid(request, PORT)) and (ip := monitor.ip_for_pid(pid)):
+        stats["ip"] = ip   # so sessions from that address get the app's computer name
+    monitor.report_client(stats, who(request))
     return {"ok": True}
 
 

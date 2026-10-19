@@ -168,6 +168,7 @@ section[hidden] { display: none; }
 .kind.job, .kind.ui-job { color: #f472b6; }
 .kind.sftp, .kind.file { color: var(--ok); }
 .kind.setup { color: var(--warn); }
+.kind.run { color: #22d3ee; }
 .kind.dashboard { color: var(--faint); }
 .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: 6px; overflow: hidden; height: 28px; }
 .seg button { border: none; border-radius: 0; background: none; color: var(--muted); height: 26px; }

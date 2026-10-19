@@ -244,6 +244,7 @@ async function pollStatus() {
 let actItems = [], actAfter = 0, actKind = "", actQuery = "";
 function actLabel(a) {
   if (a.kind === "command") return { kind: a.type, text: a.summary };
+  if (a.kind === "action") return { kind: "run", text: `${a.title}${a.status && a.status !== "done" ? ` (${a.status})` : ""}` };
   if (a.kind === "setup") {
     const t = { settings: `Changed settings (${(a.changed || []).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
       "key-removed": `Removed SSH key ${a.label || a.fingerprint}` }[a.action] || a.action;

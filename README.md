@@ -76,9 +76,10 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
 
 ## Features
 
-- **All PCs:** one overview with every PC's status, CPU, RAM, disks and failed logins; switch between
-  PCs in the side bar. Computers that only connect to your PCs (installed as Client) appear there
-  as cards with their CPU, memory, disks and battery.
+- **All PCs:** everything combined: totals over the last 24 hours (logins, failed logins, commands,
+  data transferred), SSH logins per hour for each PC, everyone connected anywhere, and one activity
+  timeline across all PCs that you can filter by PC, type or text. Below that, a card per PC with its
+  CPU, RAM, disks and failed logins; computers installed as Client appear as cards too.
 - **Live sessions:** who is connected over SSH and the command each session is running right now.
 - **Activity log:** every command run over SSH with the full script (`powershell -EncodedCommand`
   scripts are decoded), every file transfer and settings change.

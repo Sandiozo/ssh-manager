@@ -133,9 +133,77 @@ internal static class Ui
         .actions { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; } .actions button { height:26px; padding:2px 10px; font-size:12px; }
         .msg { font-size:12px; color:var(--muted); white-space:pre-wrap; max-height:54px; overflow:hidden; }
         .warn-text { color:var(--bad); }
+        .content { display:flex; flex-direction:column; gap:12px; }
+        .section { font-size:10.5px; font-weight:600; letter-spacing:.06em; text-transform:uppercase; color:var(--faint); margin:4px 2px -4px; }
+        .kpis { display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; }
+        .kpi { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; min-width:0; }
+        .kpi-label { font-size:11px; color:var(--muted); }
+        .kpi-value { font-size:19px; font-weight:600; margin-top:2px; white-space:nowrap; } .kpi-value.bad { color:var(--bad); }
+        .kpi-sub { font-size:11px; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .two { display:grid; grid-template-columns:minmax(300px, 1fr) minmax(0, 1.9fr); gap:12px; align-items:start; }
+        @media (max-width: 1100px) { .two { grid-template-columns:minmax(0, 1fr); } }
+        .col { display:flex; flex-direction:column; gap:12px; min-width:0; }
+        .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px 14px; min-width:0; }
+        .panel-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+        .panel h2 { font-size:12.5px; margin:0; font-weight:600; }
+        .bars { display:flex; align-items:flex-end; gap:2px; height:80px; margin-bottom:16px; }
+        .bars .b { flex:1; height:100%; display:flex; flex-direction:column-reverse; position:relative; }
+        .bars .b i { display:block; min-height:0; opacity:.85; } .bars .b:hover i { opacity:1; }
+        .bars .b i:last-child { border-radius:2px 2px 0 0; }
+        .bars .b span { position:absolute; bottom:-15px; left:50%; transform:translateX(-50%); font-size:9.5px; color:var(--faint); }
+        .legend { display:flex; gap:12px; flex-wrap:wrap; font-size:11.5px; color:var(--muted); margin-top:6px; }
+        .legend i, .pcdot { display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:5px; vertical-align:0; }
+        .sess { padding:5px 2px; border-bottom:1px solid var(--line); font-size:12.5px; } .sess:last-child { border-bottom:none; }
+        .sess .line { display:flex; gap:7px; align-items:center; } .sess .arrow { color:var(--faint); }
+        .sess .when { margin-left:auto; color:var(--muted); font-size:11.5px; }
+        .sess .cmd { margin:3px 0 0 14px; padding:3px 8px; border-radius:5px; background:var(--panel-2); font:11.5px var(--mono);
+                     white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .none { color:var(--muted); font-size:12.5px; padding:4px 0; }
+        .filters { display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+        .filters select, .filters input { height:28px; } .filters input { width:140px; }
+        .seg { display:inline-flex; border:1px solid var(--line-2); border-radius:6px; overflow:hidden; height:28px; }
+        .seg button { border:none; border-radius:0; background:none; color:var(--muted); height:26px; padding:2px 9px; font-size:12px; }
+        .seg button.on { background:var(--accent-soft); color:var(--text); }
+        #acts { max-height:560px; overflow-y:auto; }
+        .act { display:grid; grid-template-columns:44px minmax(90px, 150px) 78px minmax(70px, 110px) minmax(0, 1fr); gap:8px; align-items:center; height:30px; padding:0 6px;
+               border-bottom:1px solid var(--line); border-radius:4px; cursor:pointer; font-size:12.5px; }
+        .act:hover { background:var(--hover); } .act:last-child { border-bottom:none; }
+        .act .t { color:var(--muted); font-size:11.5px; font-variant-numeric:tabular-nums; }
+        .act .pc, .act .who { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .act .who { color:var(--muted); font-size:11.5px; }
+        .act .what { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:12px var(--mono); }
+        .kind { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+        .kind.command, .kind.powershell, .kind.shell { color:#a78bfa; } .kind.job, .kind.ui-job { color:#f472b6; }
+        .kind.file, .kind.sftp { color:var(--ok); } .kind.setup { color:var(--warn); } .kind.run { color:#22d3ee; }
+        @media (max-width: 800px) { .act { grid-template-columns:62px 100px minmax(0, 1fr); } .act .kind, .act .who { display:none; } }
+        dialog { background:var(--panel); color:var(--text); border:1px solid var(--line-2); border-radius:10px; width:min(860px, 94vw); padding:14px; }
+        dialog::backdrop { background:rgba(0, 0, 0, .55); }
+        .dlg-head { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:4px; }
+        dialog pre { background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:10px; max-height:60vh; overflow:auto;
+                     white-space:pre-wrap; word-break:break-all; font:12px var(--mono); }
         """, """
         <div class="banner" id="banner" hidden><span id="banner-text"></span><button class="primary" id="banner-btn">Install update</button></div>
+        <div class="kpis" id="kpis"></div>
+        <div class="section">Computers</div>
         <div class="grid" id="grid"></div>
+        <div class="two">
+          <div class="col">
+            <div class="panel"><div class="panel-head"><h2>SSH logins · 24 h</h2><span class="muted small" id="login-total"></span></div>
+              <div class="bars" id="bars"></div><div class="legend" id="legend"></div></div>
+            <div class="panel"><div class="panel-head"><h2>Live sessions</h2><span class="muted small" id="sess-count"></span></div>
+              <div id="sessions"><div class="none">Loading…</div></div></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Activity on all PCs</h2>
+              <div class="filters">
+                <select id="f-pc"><option value="">All PCs</option></select>
+                <div class="seg" id="f-kind"><button data-k="" class="on">All</button><button data-k="command">Commands</button><button data-k="action">Runs</button><button data-k="file">Files</button><button data-k="setup">Setup</button></div>
+                <input id="f-q" placeholder="Search" spellcheck="false">
+              </div></div>
+            <div id="acts"><div class="none">Loading…</div></div>
+          </div>
+        </div>
+        <dialog id="dlg"><div class="dlg-head"><b id="dlg-title"></b><button onclick="document.getElementById('dlg').close()">Close</button></div>
+          <div class="muted small" id="dlg-meta"></div><pre id="dlg-body"></pre></dialog>
         """, """
         const bytes = n => { if (n == null) return ""; const u = ["B","KB","MB","GB","TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i]; };
         const dur = s => s == null ? "" : s < 3600 ? Math.round(s / 60) + " min" : s < 86400 ? Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min" : Math.floor(s / 86400) + " d " + Math.floor(s % 86400 / 3600) + " h";
@@ -165,9 +233,97 @@ internal static class Ui
           return `<div class="card"><div class="head"><span class="dot ${p.kind === "this" ? "ok" : p.kind === "client" && p.state === "Online" ? "" : st}"></span>${esc(p.name)}${tag ? `<span class="tag">${tag}</span>` : ""}</div>
             ${p.state !== "Connected" && p.kind === "pc" ? `<div class="msg">${esc(p.message)}</div>` : ""}${rows.join("")}${acts}</div>`;
         }
+        // ---- combined: totals, logins per hour, live sessions, activity on all PCs ----
+        const $ = id => document.getElementById(id);
+        const palette = ["#4f8cff", "#34c77b", "#c8783c", "#a78bfa", "#f472b6", "#22d3ee", "#e8a317"];
+        const colorOf = {};
+        const color = name => colorOf[name] ??= palette[Object.keys(colorOf).length % palette.length];
+        const hm = d => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const when = iso => { const d = new Date(iso); return d.toDateString() === new Date().toDateString() ? hm(d) : d.toLocaleDateString([], { day: "numeric", month: "short" }); };
+        const ago = iso => { if (!iso) return ""; const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? "just now" : dur(s) + " ago"; };
+        let acts = [], fKind = "";
+        function kpis(sm) {
+          const k = (label, value, sub, cls = "") => `<div class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value ${cls}">${value}</div><div class="kpi-sub">${sub}</div></div>`;
+          $("kpis").innerHTML = [
+            k("PCs online", `${sm.online} / ${sm.total}`, sm.online < sm.total ? `${sm.total - sm.online} not connected` : "all connected", sm.online < sm.total ? "bad" : ""),
+            k("Sessions now", sm.sessions, "across all PCs"),
+            k("Logins · 24 h", sm.logins, "on all PCs"),
+            k("Failed logins · 24 h", sm.failures, sm.failures ? "see Connections" : "none", sm.failures ? "bad" : ""),
+            k("Commands · 24 h", sm.commands + sm.actions, sm.actions ? `${sm.actions} from Run` : "over SSH"),
+            k("Transferred · 24 h", sm.bytes ? bytes(sm.bytes) : "0 B", `${sm.files} file${sm.files === 1 ? "" : "s"}`),
+          ].join("");
+        }
+        function chart(h) {
+          const n = Math.max(0, ...h.series.map(s => s.counts.length));
+          const totals = Array.from({ length: n }, (_, i) => h.series.reduce((a, s) => a + (s.counts[i] || 0), 0));
+          const max = Math.max(1, ...totals);
+          $("login-total").textContent = `${totals.reduce((a, b) => a + b, 0)} logins`;
+          $("bars").innerHTML = totals.map((t, i) => {
+            const d = h.labels[i] ? new Date(h.labels[i]) : null;
+            const tip = (d ? `${d.getHours()}:00` : "") + ` · ${t} logins` + h.series.filter(s => s.counts[i]).map(s => `\n${s.name}: ${s.counts[i]}`).join("");
+            return `<div class="b" title="${esc(tip)}">${h.series.map(s => s.counts[i] ? `<i style="height:${s.counts[i] / max * 100}%;background:${color(s.name)}"></i>` : "").join("")}${d && i % 3 === 0 ? `<span>${d.getHours()}</span>` : ""}</div>`;
+          }).join("");
+          $("legend").innerHTML = h.series.map(s => `<span><i style="background:${color(s.name)}"></i>${esc(s.name)}</span>`).join("");
+        }
+        function sessions(list) {
+          $("sess-count").textContent = list.length ? `${list.length} open` : "";
+          $("sessions").innerHTML = list.length ? list.map(x => `<div class="sess">
+              <div class="line"><span class="dot ok"></span><b>${esc(x.client || x.ip)}</b><span class="arrow">→</span>
+                <span><span class="pcdot" style="background:${color(x.pc)}"></span>${esc(x.pc)}</span>
+                ${x.tunnel ? `<span class="tag">app</span>` : ""}<span class="when">${ago(x.start)}</span></div>
+              ${x.commands.map(c => `<div class="cmd" title="${esc(c.summary)}"><span class="kind ${esc(c.kind)}">${esc(c.kind)}</span> ${esc(c.summary)}</div>`).join("")}
+            </div>`).join("") : `<div class="none">No one is connected over SSH to any PC right now.</div>`;
+        }
+        function label(a) {
+          if (a.kind === "command") return { kind: a.type || "command", text: a.summary || "" };
+          if (a.kind === "action") return { kind: "run", text: (a.title || "") + (a.status && a.status !== "done" ? ` (${a.status})` : "") };
+          if (a.kind === "setup") {
+            const t = { settings: `Changed settings (${(a.changed || []).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
+              "key-removed": `Removed SSH key ${a.label || a.fingerprint}`, "pair-requested": `Asked ${a.target} for access`,
+              "pair-allowed": `${a.target} allowed access`, "pair-denied": `${a.target} denied access`, "screen-viewed": "Viewed the screen" }[a.action] || a.action;
+            return { kind: "setup", text: t };
+          }
+          const p = a.path || (a.paths || []).join(", ");
+          const verbs = { upload: "Received", download: "Sent", "download-zip": "Sent (zip)", mkdir: "Created folder", rename: "Renamed", delete: "Deleted" };
+          return { kind: "file", text: `${verbs[a.action] || a.action || ""} ${p}${a.to ? " → " + a.to : ""}${a.size != null ? " (" + bytes(a.size) + ")" : ""}` };
+        }
+        function renderActs() {
+          const pc = $("f-pc").value, q = $("f-q").value.trim().toLowerCase();
+          const list = acts.filter(a => (!pc || a.pc === pc) && (!fKind || a.kind === fKind) && (!q || JSON.stringify(a).toLowerCase().includes(q)));
+          $("acts").innerHTML = list.length ? list.map((a, i) => {
+            const l = label(a);
+            return `<div class="act" data-i="${acts.indexOf(a)}"><span class="t">${when(a.ts)}</span>
+              <span class="pc"><span class="pcdot" style="background:${color(a.pc)}"></span>${esc(a.pc)}</span>
+              <span class="kind ${esc(l.kind)}">${esc(l.kind)}</span><span class="who">${esc(a.client || "")}</span>
+              <span class="what" title="${esc(l.text)}">${esc(l.text)}</span></div>`;
+          }).join("") : `<div class="none">${acts.length ? "Nothing matches the filter." : "No activity recorded on the connected PCs yet."}</div>`;
+        }
+        $("f-pc").onchange = renderActs;
+        $("f-q").oninput = renderActs;
+        $("f-kind").onclick = e => { const b = e.target.closest("[data-k]"); if (!b) return; fKind = b.dataset.k;
+          document.querySelectorAll("#f-kind button").forEach(x => x.classList.toggle("on", x === b)); renderActs(); };
+        $("acts").onclick = e => {
+          const r = e.target.closest("[data-i]"); if (!r) return;
+          const a = acts[+r.dataset.i], l = label(a);
+          $("dlg-title").textContent = l.text;
+          $("dlg-meta").textContent = `${a.pc} · ${l.kind}${a.client ? " · by " + a.client : ""} · ${new Date(a.ts).toLocaleString()}${a.duration_s != null ? " · " + a.duration_s + " s" : ""}`;
+          $("dlg-body").textContent = [a.script, a.output].filter(Boolean).join("\n\n--- output ---\n") || JSON.stringify(a, null, 2);
+          $("dlg").showModal();
+        };
+        function combined(c) {
+          kpis(c.summary);
+          chart(c.hours);
+          sessions(c.sessions);
+          const sel = $("f-pc"), keep = sel.value, names = [...new Set(c.hours.series.map(s => s.name).concat(c.activity.map(a => a.pc)))];
+          sel.innerHTML = `<option value="">All PCs</option>` + names.map(n => `<option>${esc(n)}</option>`).join("");
+          sel.value = names.includes(keep) ? keep : "";
+          acts = c.activity;
+          if (!document.getElementById("dlg").open) renderActs();
+        }
         chrome.webview.addEventListener("message", e => {
           const m = e.data;
           if (!m || m.type !== "overview") return;
+          if (m.combined) combined(m.combined);
           document.getElementById("grid").innerHTML = m.pcs.map(card).join("") + `<div class="card add" onclick="send('add-pc',{})">+ Add a PC</div>`;
           const b = document.getElementById("banner");
           b.hidden = !m.appUpdate;

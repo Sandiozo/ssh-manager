@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SSH Manager</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%2322c55e'/><path d='M4 5l3 3-3 3M8 11h4' stroke='%23052e16' stroke-width='1.8' fill='none' stroke-linecap='round'/></svg>">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <span class="logo">&gt;_</span>
+    <div>
+      <div class="title" id="title">SSH Manager</div>
+      <div class="sub" id="hostline">connecting…</div>
+    </div>
+  </div>
+  <div class="pills" id="pills"></div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="files">Files</button>
+  <button data-tab="activity">Activity</button>
+  <button data-tab="connections">Connections</button>
+  <button data-tab="settings">Settings</button>
+</nav>
+
+<main>
+  <!-- Overview -->
+  <section id="tab-overview">
+    <div id="notice"></div>
+    <div class="cards" id="cards"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Live sessions</h2><span class="muted" id="session-count"></span></div>
+      <div id="sessions"></div>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <div class="panel-head"><h2>SSH logins · last 24 hours</h2><span class="muted" id="login-total"></span></div>
+        <div class="bars" id="hours"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Recent activity</h2><button class="link" data-goto="activity">View all</button></div>
+        <div id="recent"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Files -->
+  <section id="tab-files" hidden>
+    <div class="files">
+      <aside class="side">
+        <h3>Shortcuts</h3>
+        <div id="bookmarks"></div>
+        <h3>Drives</h3>
+        <div id="drives"></div>
+      </aside>
+      <div class="browser" id="browser">
+        <div class="toolbar">
+          <button id="fs-up" title="Up one folder (Backspace)">↑</button>
+          <button id="fs-refresh" title="Refresh">⟳</button>
+          <input id="fs-path" spellcheck="false" placeholder="C:\path\to\folder">
+          <button id="fs-star" title="Add this folder to Shortcuts">☆</button>
+          <label class="check"><input type="checkbox" id="fs-hidden"> hidden</label>
+        </div>
+        <div class="toolbar actions">
+          <button id="fs-upload-files" class="primary">Send files</button>
+          <button id="fs-upload-folder">Send folder</button>
+          <button id="fs-download" disabled>Download</button>
+          <button id="fs-mkdir">New folder</button>
+          <button id="fs-rename" disabled>Rename</button>
+          <button id="fs-delete" class="danger" disabled>Delete</button>
+          <span class="muted" id="fs-selinfo"></span>
+          <input type="file" id="pick-files" multiple hidden>
+          <input type="file" id="pick-folder" webkitdirectory hidden>
+        </div>
+        <div class="table-wrap">
+          <table class="fs">
+            <thead><tr><th class="cb"><input type="checkbox" id="fs-all"></th><th>Name</th><th class="num">Size</th><th>Modified</th></tr></thead>
+            <tbody id="fs-body"></tbody>
+          </table>
+          <div class="empty" id="fs-empty" hidden>This folder is empty. Drop files anywhere to send them here.</div>
+        </div>
+        <div class="hint muted small">Drop files or folders anywhere in the window to send them to this folder, or onto a folder in the list. Drag files from the list to your desktop to download them.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Activity -->
+  <section id="tab-activity" hidden>
+    <div class="panel">
+      <div class="panel-head">
+        <div class="seg" id="act-filter">
+          <button data-kind="" class="active">All</button>
+          <button data-kind="command">Commands</button>
+          <button data-kind="file">Files</button>
+          <button data-kind="setup">Setup</button>
+        </div>
+        <input id="act-search" placeholder="Search…" spellcheck="false">
+      </div>
+      <div id="activity"></div>
+      <p class="muted small">Commands are picked up by watching processes started by the SSH server, about twice a second.
+        Commands shorter than that can be missed. Scripts sent as <code>powershell -EncodedCommand</code> are decoded so you see the actual script.</p>
+    </div>
+  </section>
+
+  <!-- Connections -->
+  <section id="tab-connections" hidden>
+    <div id="failures"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Connection history</h2><span class="muted">from the OpenSSH event log, newest first</span></div>
+      <div class="table-wrap"><table class="list">
+        <thead><tr><th>Computer</th><th>User</th><th>Key</th><th>Connected</th><th>Duration</th><th>Ended</th></tr></thead>
+        <tbody id="history"></tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <!-- Settings -->
+  <section id="tab-settings" hidden>
+    <div class="savebar" id="savebar" hidden>
+      <span>You have unsaved changes.</span>
+      <button id="set-discard">Discard</button>
+      <button id="set-save" class="primary">Save changes</button>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>This PC</h2></div>
+      <div class="form">
+        <label>Display name <input id="set-name" spellcheck="false"></label>
+        <label>Folder for dropped files <span class="muted small">(used when the Files tab hasn't been opened)</span>
+          <input id="set-upload" spellcheck="false" placeholder="%USERPROFILE%\Desktop"></label>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Computers</h2><span class="muted small">Computers that connect to this PC. They get a status card, and their logins and commands are labelled with their name.</span></div>
+      <div class="table-wrap"><table class="edit">
+        <thead><tr><th></th><th>Name</th><th>Computer name</th><th>IP address</th><th>Last SSH login</th><th></th></tr></thead>
+        <tbody id="set-peers"></tbody>
+      </table></div>
+      <div class="row-actions"><button id="set-add-peer">+ Add computer</button></div>
+      <div id="set-unknown"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>SSH keys</h2><span class="muted small">Keys allowed to log in to this PC. A computer needs one of these to connect.</span></div>
+      <div id="keys-note"></div>
+      <div class="table-wrap"><table class="edit">
+        <thead><tr><th>Label</th><th>Type</th><th>Fingerprint</th><th>Comment</th><th>Last used</th><th></th></tr></thead>
+        <tbody id="set-keys"></tbody>
+      </table></div>
+      <details class="addkey" id="addkey">
+        <summary>+ Allow a new key (set up another computer)</summary>
+        <ol class="small muted">
+          <li>Easiest: install the SSH Manager app on the new computer; its setup adds its key here for you.</li>
+          <li>By hand: on the new computer run <code>ssh-keygen -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519_sshmanager</code>
+            and paste the contents of <code>id_ed25519_sshmanager.pub</code> below.</li>
+        </ol>
+        <textarea id="key-text" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@computer"></textarea>
+        <div class="row-actions"><input id="key-label" placeholder="Label, e.g. Work laptop"><button id="key-add" class="primary">Allow this key</button></div>
+      </details>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>File shortcuts</h2><span class="muted small">Shown in the Files tab. Tip: use ☆ in the Files toolbar to add the folder you're in.</span></div>
+      <div class="table-wrap"><table class="edit">
+        <thead><tr><th>Name</th><th>Folder</th><th></th></tr></thead>
+        <tbody id="set-shortcuts"></tbody>
+      </table></div>
+      <div class="row-actions"><button id="set-add-shortcut">+ Add shortcut</button></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head"><h2>Plugins</h2><span class="muted small">Extra features loaded from the <code>plugins</code> folder of the home folder.</span></div>
+      <div id="plugins"></div>
+    </div>
+
+    <div class="panel" id="app-panel" hidden>
+      <div class="panel-head"><h2>This app</h2><span class="muted small" id="app-where"></span></div>
+      <div class="form">
+        <label class="switch"><input type="checkbox" data-app="StartWithWindows"> Start with Windows (in the tray)</label>
+        <div class="sub-head">Notifications</div>
+        <label class="switch"><input type="checkbox" data-app="NotifyConnection"> Connection to the PC lost or restored</label>
+        <label class="switch"><input type="checkbox" data-app="NotifyFailedLogin"> Failed login attempts</label>
+        <label class="switch"><input type="checkbox" data-app="NotifyUnknown"> A computer that isn't in the list logs in</label>
+        <label class="switch"><input type="checkbox" data-app="NotifyTransfers"> Transfers finished (while the window is in the background)</label>
+        <div class="sub-head">Downloads</div>
+        <div class="inline"><input id="app-dl" readonly><button id="app-dl-pick">Change…</button></div>
+        <label class="switch"><input type="checkbox" data-app="AskWhereToSave"> Ask where to save each download</label>
+        <div class="sub-head">Connection</div>
+        <div class="inline"><input id="app-conn" readonly><button id="app-conn-change">Change connection…</button></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- drop anywhere -->
+<div class="dropzone" id="dropzone">
+  <div class="drop-card">
+    <div class="drop-icon">⇪</div>
+    <div>Drop to send to <b id="drop-host"></b></div>
+    <div class="drop-path" id="drop-path"></div>
+  </div>
+</div>
+
+<!-- transfers -->
+<div class="dock" id="dock" hidden>
+  <div class="dock-head">
+    <span id="dock-title">Transfers</span>
+    <span class="grow"></span>
+    <button class="icon" id="dock-more" title="Show files">▤</button>
+    <button class="icon" id="dock-close" title="Hide">✕</button>
+  </div>
+  <div class="lane" id="lane">
+    <div class="dev"><svg viewBox="0 0 40 30"><rect x="6" y="3" width="28" height="18" rx="2"/><path d="M2 25h36l-3 3H5z"/></svg><span id="lane-left">This computer</span></div>
+    <div class="track">
+      <div class="flow up" id="flow-up"><i></i><i></i><i></i><i></i></div>
+      <div class="flow down" id="flow-down"><i></i><i></i><i></i><i></i></div>
+      <div class="done-mark" id="done-mark">✓</div>
+    </div>
+    <div class="dev"><svg viewBox="0 0 40 30"><rect x="3" y="2" width="34" height="20" rx="2"/><path d="M16 22h8l1 5h-10z"/><path d="M11 27h18v2H11z"/></svg><span id="lane-right">PC</span></div>
+  </div>
+  <div class="dock-file" id="dock-file"></div>
+  <div class="meter big"><i id="dock-bar"></i></div>
+  <div class="dock-stats" id="dock-stats"></div>
+  <div class="dock-list" id="dock-list" hidden></div>
+</div>
+
+<dialog id="detail">
+  <div class="dlg-head"><h3 id="detail-title"></h3><button id="detail-close" class="link">Close</button></div>
+  <div class="muted" id="detail-meta"></div>
+  <pre id="detail-body"></pre>
+</dialog>
+<div id="toast"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

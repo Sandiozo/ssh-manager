@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# this installation's settings and data (see "Configuration" in the README)
+home/
+data/
+config.json
+sshmgr-home.txt
+
+# build output
+app/dist/
+bin/
+obj/
+app/**/bin/
+app/**/obj/
+*.zip
+
+# editors / tools
+.vs/
+.vscode/
+.idea/
+*.user

@@ -46,8 +46,9 @@ sign-in, turn off "Only allow Windows Hello sign-in" there first (Settings → A
   last 50 runs stay on the page. Everything run here is also in the activity log.
 - **Logs:** follow any log file live, like `tail -f`: a file, the newest file in a folder, or the
   newest match of a pattern such as `C:\Logs\app-*.log`. Filter lines as you type.
-- **Screen:** a live preview of a PC's screen (view only), one monitor at a time, refreshing every
-  1–10 seconds. Can be switched off per PC; every viewing is logged.
+- **Screen:** a live preview of a PC's screen (view only): a whole monitor or a single app window
+  (shown even when other windows cover it, not when it's minimized), refreshing every 1–10 seconds.
+  Can be switched off per PC; every viewing is logged.
 - **Folder sync:** keep a folder on this computer and a folder on a PC the same: this computer → PC,
   PC → this computer, or both ways. Changes are sent a few seconds after they happen. Sync never
   deletes files; `.git`, `node_modules` and the like are skipped by default.

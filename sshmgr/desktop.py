@@ -53,12 +53,140 @@ def capture(monitor: int = 1, width: int = 1280, quality: int = 70) -> bytes:
         mons = sct.monitors
         mon = mons[monitor] if 0 <= monitor < len(mons) else mons[1]
         shot = sct.grab(mon)
-    img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    return _jpeg(Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX"), width, quality)
+
+
+def _jpeg(img, width: int, quality: int) -> bytes:
+    from PIL import Image
     if width and img.width > width:
         img = img.resize((width, round(img.height * width / img.width)), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, "JPEG", quality=quality, optimize=True)
     return buf.getvalue()
+
+
+# ---- single app windows ----
+
+class WindowGone(RuntimeError):
+    pass
+
+
+GW_OWNER = 4
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x80
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+DWMWA_CLOAKED = 14
+PW_RENDERFULLCONTENT = 2
+# own library handles with exact argument types (64-bit handles; mss sets its own on ctypes.windll)
+_u32 = ctypes.WinDLL("user32")
+_gdi = ctypes.WinDLL("gdi32")
+_dwm = ctypes.WinDLL("dwmapi")
+for f, args, res in (
+    (_u32.IsWindowVisible, [wt.HWND], wt.BOOL), (_u32.GetWindow, [wt.HWND, wt.UINT], wt.HWND),
+    (_u32.GetWindowLongPtrW, [wt.HWND, ctypes.c_int], ctypes.c_ssize_t),
+    (_u32.GetWindowTextLengthW, [wt.HWND], ctypes.c_int), (_u32.GetWindowTextW, [wt.HWND, wt.LPWSTR, ctypes.c_int], ctypes.c_int),
+    (_u32.GetWindowThreadProcessId, [wt.HWND, ctypes.POINTER(wt.DWORD)], wt.DWORD),
+    (_u32.IsIconic, [wt.HWND], wt.BOOL), (_u32.IsWindow, [wt.HWND], wt.BOOL),
+    (_u32.GetWindowRect, [wt.HWND, ctypes.POINTER(wt.RECT)], wt.BOOL),
+    (_u32.GetWindowDC, [wt.HWND], wt.HDC), (_u32.ReleaseDC, [wt.HWND, wt.HDC], ctypes.c_int),
+    (_u32.PrintWindow, [wt.HWND, wt.HDC, wt.UINT], wt.BOOL),
+    (_gdi.CreateCompatibleDC, [wt.HDC], wt.HDC), (_gdi.CreateCompatibleBitmap, [wt.HDC, ctypes.c_int, ctypes.c_int], wt.HBITMAP),
+    (_gdi.SelectObject, [wt.HDC, wt.HGDIOBJ], wt.HGDIOBJ), (_gdi.DeleteObject, [wt.HGDIOBJ], wt.BOOL),
+    (_gdi.DeleteDC, [wt.HDC], wt.BOOL),
+    (_gdi.GetDIBits, [wt.HDC, wt.HBITMAP, wt.UINT, wt.UINT, ctypes.c_void_p, ctypes.c_void_p, wt.UINT], ctypes.c_int),
+    (_dwm.DwmGetWindowAttribute, [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD], ctypes.c_long),
+):
+    f.argtypes, f.restype = args, res
+try:   # real pixel sizes for windows on scaled monitors
+    _u32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+except Exception:
+    pass
+
+
+def _frame(hwnd) -> tuple[int, int, int, int]:
+    """Window rectangle without the invisible resize border."""
+    r = wt.RECT()
+    if _dwm.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(r), ctypes.sizeof(r)) != 0:
+        _u32.GetWindowRect(hwnd, ctypes.byref(r))
+    return r.left, r.top, r.right, r.bottom
+
+
+def windows() -> list[dict]:
+    """The app windows on the taskbar: visible, titled, not owned by another window."""
+    _require_desktop()
+    import psutil
+    found = []
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def each(hwnd, _):
+        if not _u32.IsWindowVisible(hwnd) or _u32.GetWindow(hwnd, GW_OWNER):
+            return True
+        if _u32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW:
+            return True
+        cloaked = wt.DWORD()
+        _dwm.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked), ctypes.sizeof(cloaked))
+        if cloaked.value:
+            return True
+        n = _u32.GetWindowTextLengthW(hwnd)
+        if n == 0:
+            return True
+        title = ctypes.create_unicode_buffer(n + 1)
+        _u32.GetWindowTextW(hwnd, title, n + 1)
+        pid = wt.DWORD()
+        _u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        try:
+            app = psutil.Process(pid.value).name().removesuffix(".exe")
+        except Exception:
+            app = ""
+        if app.lower() == "sshmanagerserver":
+            return True
+        l, t, r, b = _frame(hwnd)
+        found.append({"id": int(hwnd), "title": title.value, "app": app, "minimized": bool(_u32.IsIconic(hwnd)),
+                      "width": r - l, "height": b - t})
+        return True
+
+    _u32.EnumWindows(each, 0)
+    return found
+
+
+def capture_window(hwnd: int, width: int = 1280, quality: int = 70) -> bytes:
+    """One app window, also when other windows cover it (not when it's minimized)."""
+    _require_desktop()
+    from PIL import Image
+    hwnd = wt.HWND(hwnd)
+    if not _u32.IsWindow(hwnd):
+        raise WindowGone("That window was closed.")
+    if _u32.IsIconic(hwnd):
+        raise WindowGone("That window is minimized. Restore it on the PC to see it.")
+    win = wt.RECT()
+    _u32.GetWindowRect(hwnd, ctypes.byref(win))
+    w, h = win.right - win.left, win.bottom - win.top
+    if w <= 0 or h <= 0:
+        raise WindowGone("That window has no size.")
+    wdc = _u32.GetWindowDC(hwnd)
+    mdc = _gdi.CreateCompatibleDC(wdc)
+    bmp = _gdi.CreateCompatibleBitmap(wdc, w, h)
+    old = _gdi.SelectObject(mdc, bmp)
+    try:
+        ok = _u32.PrintWindow(hwnd, mdc, PW_RENDERFULLCONTENT)
+        header = (ctypes.c_uint32 * 10)(40, w, ctypes.c_uint32(-h).value, 1 | (32 << 16), 0, 0, 0, 0, 0, 0)
+        pixels = ctypes.create_string_buffer(w * h * 4)
+        _gdi.GetDIBits(mdc, bmp, 0, h, pixels, header, 0)
+    finally:
+        _gdi.SelectObject(mdc, old)
+        _gdi.DeleteObject(bmp)
+        _gdi.DeleteDC(mdc)
+        _u32.ReleaseDC(hwnd, wdc)
+    img = Image.frombuffer("RGB", (w, h), pixels.raw, "raw", "BGRX", 0, 1)
+    l, t, r, b = _frame(hwnd)
+    img = img.crop((l - win.left, t - win.top, r - win.left, b - win.top))
+    if not ok or not img.getbbox():
+        # some apps (games, video) draw nothing into PrintWindow: copy the window's area of the screen instead
+        import mss
+        with mss.mss() as sct:
+            shot = sct.grab({"left": l, "top": t, "width": r - l, "height": b - t})
+        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+    return _jpeg(img, width, quality)
 
 
 # ---- clipboard (text) ----

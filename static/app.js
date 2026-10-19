@@ -947,18 +947,38 @@ $("#fs-log").onclick = () => { const p = [...files.sel][0]; if (!p) return; $("#
 // ---------- Screen preview ----------
 const screenUi = {
   timer: null, url: null, busy: false,
+  // what to show: "m:<monitor>" (a whole screen) or "w:<window id>" (one app); apps are re-found by name after a restart
   async open() {
     $("#scr-wrap").classList.toggle("fit", $("#scr-fit").checked);
+    await this.loadSources();
+    this.tick(true);
+  },
+  async loadSources() {
     try {
-      const r = await api("/api/screen/monitors");
-      $("#scr-monitor").innerHTML = r.monitors.map(m => `<option value="${m.index}">Screen ${m.index} · ${m.width}×${m.height}</option>`).join("");
-      $("#scr-monitor").value = String(store.get("scrMonitor", 1));
-      if (!$("#scr-monitor").value) $("#scr-monitor").value = "1";
-      this.tick(true);
+      const [m, w] = await Promise.all([api("/api/screen/monitors"), api("/api/screen/windows").catch(() => ({ windows: [] }))]);
+      const short = t => t.length > 60 ? t.slice(0, 58) + "…" : t;
+      $("#scr-monitor").innerHTML =
+        `<optgroup label="Screens">${m.monitors.map(x => `<option value="m:${x.index}">Screen ${x.index} · ${x.width}×${x.height}</option>`).join("")}</optgroup>` +
+        (w.windows.length ? `<optgroup label="Apps">${w.windows.map(x =>
+          `<option value="w:${x.id}" data-app="${esc(x.app)}">${esc(x.app || "App")} · ${esc(short(x.title))}${x.minimized ? " (minimized)" : ""}</option>`).join("")}</optgroup>` : "");
+      const want = String(store.get("scrSource", "m:1"));
+      const sel = $("#scr-monitor");
+      sel.value = want;
+      if (!sel.value && want.startsWith("w:")) {
+        const app = store.get("scrApp", "");
+        const same = [...sel.options].find(o => o.dataset.app && o.dataset.app === app);
+        sel.value = same ? same.value : "m:1";
+      }
+      if (!sel.value) sel.value = "m:1";
     } catch (e) { this.message(e.message); }
   },
+  remember() {
+    const o = $("#scr-monitor").selectedOptions[0];
+    store.set("scrSource", $("#scr-monitor").value);
+    store.set("scrApp", o?.dataset.app || "");
+  },
   stop() { clearTimeout(this.timer); },
-  message(text) { $("#scr-msg").hidden = !text; $("#scr-msg").textContent = text || ""; },
+  message(text) { $("#scr-msg").hidden = !text; $("#scr-msg").textContent = text || ""; if (text) $("#scr-img").removeAttribute("src"); },
   async tick(force) {
     clearTimeout(this.timer);
     if ($("#tab-screen").hidden) return;
@@ -966,7 +986,9 @@ const screenUi = {
     if ((force || rate) && !this.busy) {
       this.busy = true;
       try {
-        const r = await fetch(`/api/screen?monitor=${$("#scr-monitor").value || 1}&width=${$("#scr-size").value}&t=${Date.now()}`);
+        const [kind, id] = ($("#scr-monitor").value || "m:1").split(":");
+        const what = kind === "w" ? `window=${id}` : `monitor=${id}`;
+        const r = await fetch(`/api/screen?${what}&width=${$("#scr-size").value}&t=${Date.now()}`);
         if (!r.ok) {
           let m = r.statusText; try { m = (await r.json()).detail; } catch { }
           this.message(m);
@@ -985,10 +1007,10 @@ const screenUi = {
     if (rate && !$("#tab-screen").hidden) this.timer = setTimeout(() => this.tick(), rate);
   },
 };
-$("#scr-monitor").onchange = e => { store.set("scrMonitor", +e.target.value); screenUi.tick(true); };
+$("#scr-monitor").onchange = () => { screenUi.remember(); screenUi.tick(true); };
 $("#scr-size").onchange = () => screenUi.tick(true);
 $("#scr-rate").onchange = () => screenUi.tick(true);
-$("#scr-now").onclick = () => screenUi.tick(true);
+$("#scr-now").onclick = async () => { await screenUi.loadSources(); screenUi.tick(true); };
 $("#scr-fit").onchange = e => $("#scr-wrap").classList.toggle("fit", e.target.checked);
 
 // ---------- Folder sync (runs in the app; this page shows and edits it) ----------

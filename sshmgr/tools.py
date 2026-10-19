@@ -102,13 +102,25 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who) -> API
         except desktop.NotInDesktopSession as e:
             raise HTTPException(409, str(e))
 
-    @r.get("/screen")
-    def screen(request: Request, monitor: int = 1, width: int = Query(1280, ge=160, le=7680), quality: int = Query(70, ge=20, le=95)):
+    @r.get("/screen/windows")
+    def screen_windows():
         screen_allowed()
         try:
-            jpeg = desktop.capture(monitor, width, quality)
+            return {"windows": desktop.windows()}
         except desktop.NotInDesktopSession as e:
             raise HTTPException(409, str(e))
+
+    @r.get("/screen")
+    def screen(request: Request, monitor: int = 1, window: int = 0, width: int = Query(1280, ge=160, le=7680),
+               quality: int = Query(70, ge=20, le=95)):
+        """A whole screen (monitor), or one app window when `window` is given."""
+        screen_allowed()
+        try:
+            jpeg = desktop.capture_window(window, width, quality) if window else desktop.capture(monitor, width, quality)
+        except desktop.NotInDesktopSession as e:
+            raise HTTPException(409, str(e))
+        except desktop.WindowGone as e:
+            raise HTTPException(404, str(e))
         viewer = who(request)
         if time.time() - last_screen_view.get(viewer, 0) > 300:   # log a viewing session, not every frame
             activity.add("setup", action="screen-viewed", client=viewer)

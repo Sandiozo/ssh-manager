@@ -25,8 +25,7 @@
     <button data-tab="logs"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h6"/></svg><span>Logs</span></button>
     <button data-tab="screen" id="nav-screen"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></svg><span>Screen</span></button>
     <button data-tab="sync" hidden id="nav-sync"><svg viewBox="0 0 24 24"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg><span>Sync</span></button>
-    <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg><span>Settings</span></button>
-    </nav>
+        </nav>
     <div class="rail-foot" id="pills"></div>
   </aside>
 
@@ -36,7 +35,7 @@
       <h1 id="title">SSH Manager</h1>
       <span class="sub" id="hostline">connecting…</span>
     </div>
-    <div class="topbar-right" id="viewer-chip"></div>
+    <div class="topbar-right"><span id="viewer-chip"></span><button class="icon-btn" id="open-settings" title="Settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button></div>
   </header>
 
 <main>
@@ -215,106 +214,140 @@
 
   <!-- Settings -->
   <section id="tab-settings" hidden>
-    <div class="savebar" id="savebar" hidden>
-      <span>You have unsaved changes.</span>
-      <button id="set-discard">Discard</button>
-      <button id="set-save" class="primary">Save changes</button>
-    </div>
+    <div class="settings">
+      <nav class="set-nav" id="set-nav">
+        <button data-sec="general" class="active">General</button>
+        <button data-sec="computers">Computers</button>
+        <button data-sec="keys">SSH keys</button>
+        <button data-sec="actions">Quick actions</button>
+        <button data-sec="logs">Logs</button>
+        <button data-sec="shortcuts">File shortcuts</button>
+        <button data-sec="updates">Updates</button>
+        <button data-sec="plugins">Plugins</button>
+        <button data-sec="app" id="set-nav-app" hidden>This app</button>
+      </nav>
 
-    <div class="panel">
-      <div class="panel-head"><h2>This PC</h2></div>
-      <div class="form">
-        <label>Display name <input id="set-name" spellcheck="false"></label>
-        <label>Folder for dropped files <span class="muted small">(used when the Files tab hasn't been opened)</span>
-          <input id="set-upload" spellcheck="false" placeholder="%USERPROFILE%\Desktop"></label>
-        <label class="switch"><input type="checkbox" id="set-screen"> Allow screen preview of this PC</label>
-      </div>
-    </div>
+      <div class="set-body">
+        <div class="savebar" id="savebar" hidden>
+          <span>Unsaved changes</span>
+          <button id="set-discard">Discard</button>
+          <button id="set-save" class="primary">Save</button>
+        </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>Computers</h2><span class="muted small">Computers that connect to this PC. They get a status card, and their logins and commands are labelled with their name.</span></div>
-      <div class="table-wrap"><table class="edit">
-        <thead><tr><th></th><th>Name</th><th>Computer name</th><th>IP address</th><th>MAC (for waking it)</th><th>Last SSH login</th><th></th></tr></thead>
-        <tbody id="set-peers"></tbody>
-      </table></div>
-      <div class="row-actions"><button id="set-add-peer">+ Add computer</button></div>
-      <div id="set-unknown"></div>
-    </div>
+        <div class="set-sec on" data-sec="general">
+          <div class="set-head"><h2>General</h2><p>How this PC appears to others and what they may do.</p></div>
+          <div class="set-group">
+            <div class="set-row"><div class="set-label">Display name<small>Shown in the app and on other PCs.</small></div>
+              <input id="set-name" spellcheck="false"></div>
+            <div class="set-row"><div class="set-label">Folder for dropped files<small>Used until a folder is opened on the Files page.</small></div>
+              <input id="set-upload" spellcheck="false" placeholder="%USERPROFILE%\Desktop"></div>
+            <div class="set-row"><div class="set-label">Screen preview<small>Lets connected PCs view this PC's screen.</small></div>
+              <label class="switch"><input type="checkbox" id="set-screen"></label></div>
+          </div>
+        </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>SSH keys</h2><span class="muted small">Keys allowed to log in to this PC. A computer needs one of these to connect.</span></div>
-      <div id="keys-note"></div>
-      <div class="table-wrap"><table class="edit">
-        <thead><tr><th>Label</th><th>Type</th><th>Fingerprint</th><th>Comment</th><th>Last used</th><th></th></tr></thead>
-        <tbody id="set-keys"></tbody>
-      </table></div>
-      <details class="addkey" id="addkey">
-        <summary>+ Allow a new key (set up another computer)</summary>
-        <ol class="small muted">
-          <li>Easiest: install the SSH Manager app on the new computer; its setup adds its key here for you.</li>
-          <li>By hand: on the new computer run <code>ssh-keygen -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519_sshmanager</code>
-            and paste the contents of <code>id_ed25519_sshmanager.pub</code> below.</li>
-        </ol>
-        <textarea id="key-text" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@computer"></textarea>
-        <div class="row-actions"><input id="key-label" placeholder="Label, e.g. Work laptop"><button id="key-add" class="primary">Allow this key</button></div>
-      </details>
-    </div>
+        <div class="set-sec" data-sec="computers">
+          <div class="set-head"><h2>Computers</h2><p>Computers that connect to this PC. Their logins and commands are labelled with these names.</p></div>
+          <div class="set-group flush">
+            <div class="table-wrap"><table class="edit">
+              <thead><tr><th></th><th>Name</th><th>Computer name</th><th>IP address</th><th>MAC (for waking it)</th><th>Last SSH login</th><th></th></tr></thead>
+              <tbody id="set-peers"></tbody>
+            </table></div>
+          </div>
+          <div class="row-actions"><button id="set-add-peer">+ Add computer</button></div>
+          <div id="set-unknown"></div>
+        </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>Quick actions</h2><span class="muted small">Buttons on the Run tab. Each runs a PowerShell script on this PC, with admin rights.</span></div>
-      <div id="set-actions"></div>
-      <div class="row-actions"><button id="set-add-action">+ Add action</button></div>
-    </div>
+        <div class="set-sec" data-sec="keys">
+          <div class="set-head"><h2>SSH keys</h2><p>Keys allowed to log in to this PC. A computer needs one of them to connect.</p></div>
+          <div id="keys-note"></div>
+          <div class="set-group flush">
+            <div class="table-wrap"><table class="edit">
+              <thead><tr><th>Label</th><th>Type</th><th>Fingerprint</th><th>Comment</th><th>Last used</th><th></th></tr></thead>
+              <tbody id="set-keys"></tbody>
+            </table></div>
+          </div>
+          <details class="addkey" id="addkey">
+            <summary>+ Allow a new key</summary>
+            <ol class="small muted">
+              <li>Recommended: install SSH Manager on the other computer. Its setup adds its key here.</li>
+              <li>Manually: on the other computer run <code>ssh-keygen -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519_sshmanager</code>
+                and paste the contents of <code>id_ed25519_sshmanager.pub</code> below.</li>
+            </ol>
+            <textarea id="key-text" rows="3" spellcheck="false" placeholder="ssh-ed25519 AAAA… user@computer"></textarea>
+            <div class="row-actions"><input id="key-label" placeholder="Label, e.g. Work laptop"><button id="key-add" class="primary">Allow key</button></div>
+          </details>
+        </div>
 
-    <div class="panel" id="logs-settings">
-      <div class="panel-head"><h2>Logs</h2><span class="muted small">Files on the Logs tab. A pattern like logs\app-*.log follows the newest match.</span></div>
-      <div class="table-wrap"><table class="edit">
-        <thead><tr><th>Name</th><th>File or pattern</th><th></th></tr></thead>
-        <tbody id="set-logs"></tbody>
-      </table></div>
-      <div class="row-actions"><button id="set-add-log">+ Add log</button></div>
-    </div>
+        <div class="set-sec" data-sec="actions">
+          <div class="set-head"><h2>Quick actions</h2><p>Buttons on the Run page. Each one runs a PowerShell script on this PC with administrator rights.</p></div>
+          <div id="set-actions"></div>
+          <div class="row-actions"><button id="set-add-action">+ Add action</button></div>
+        </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>File shortcuts</h2><span class="muted small">Shown in the Files tab. Tip: use ☆ in the Files toolbar to add the folder you're in.</span></div>
-      <div class="table-wrap"><table class="edit">
-        <thead><tr><th>Name</th><th>Folder</th><th></th></tr></thead>
-        <tbody id="set-shortcuts"></tbody>
-      </table></div>
-      <div class="row-actions"><button id="set-add-shortcut">+ Add shortcut</button></div>
-    </div>
+        <div class="set-sec" data-sec="logs" id="logs-settings">
+          <div class="set-head"><h2>Logs</h2><p>Files listed on the Logs page. A pattern such as <code>logs\app-*.log</code> follows the newest match.</p></div>
+          <div class="set-group flush">
+            <div class="table-wrap"><table class="edit">
+              <thead><tr><th>Name</th><th>File or pattern</th><th></th></tr></thead>
+              <tbody id="set-logs"></tbody>
+            </table></div>
+          </div>
+          <div class="row-actions"><button id="set-add-log">+ Add log</button></div>
+        </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>Updates</h2><span class="muted small" id="upd-version"></span></div>
-      <div class="form">
-        <div id="upd-state" class="small"></div>
-        <label class="switch"><input type="checkbox" id="set-autoupdate"> Install updates automatically on this PC</label>
-        <div class="inline"><button id="upd-check">Check now</button><button id="upd-install" class="primary" hidden>Install update</button></div>
-      </div>
-    </div>
+        <div class="set-sec" data-sec="shortcuts">
+          <div class="set-head"><h2>File shortcuts</h2><p>Folders listed on the Files page. The ☆ button in the Files toolbar adds the current folder.</p></div>
+          <div class="set-group flush">
+            <div class="table-wrap"><table class="edit">
+              <thead><tr><th>Name</th><th>Folder</th><th></th></tr></thead>
+              <tbody id="set-shortcuts"></tbody>
+            </table></div>
+          </div>
+          <div class="row-actions"><button id="set-add-shortcut">+ Add shortcut</button></div>
+        </div>
 
-    <div class="panel">
-      <div class="panel-head"><h2>Plugins</h2><span class="muted small">Extra features loaded from the <code>plugins</code> folder of the home folder.</span></div>
-      <div id="plugins"></div>
-    </div>
+        <div class="set-sec" data-sec="updates">
+          <div class="set-head"><h2>Updates</h2><p id="upd-version"></p></div>
+          <div class="set-group">
+            <div class="set-row"><div class="set-label">Status<small id="upd-state"></small></div>
+              <div class="inline"><button id="upd-check">Check now</button><button id="upd-install" class="primary" hidden>Install update</button></div></div>
+            <div class="set-row"><div class="set-label">Automatic updates<small>Install new versions on this PC as soon as they are released.</small></div>
+              <label class="switch"><input type="checkbox" id="set-autoupdate"></label></div>
+          </div>
+        </div>
 
-    <div class="panel" id="app-panel" hidden>
-      <div class="panel-head"><h2>This app</h2><span class="muted small" id="app-where"></span></div>
-      <div class="form">
-        <label class="switch"><input type="checkbox" data-app="StartWithWindows"> Start with Windows (in the tray)</label>
-        <label class="switch" id="app-autoupdate-row"><input type="checkbox" data-app="AutoUpdate"> Install app updates automatically</label>
-        <div class="sub-head">Notifications</div>
-        <label class="switch"><input type="checkbox" data-app="NotifyConnection"> Connection to the PC lost or restored</label>
-        <label class="switch"><input type="checkbox" data-app="NotifyFailedLogin"> Failed login attempts</label>
-        <label class="switch"><input type="checkbox" data-app="NotifyUnknown"> A computer that isn't in the list logs in</label>
-        <label class="switch"><input type="checkbox" data-app="NotifyTransfers"> Transfers finished (while the window is in the background)</label>
-        <div class="sub-head">Downloads</div>
-        <div class="inline"><input id="app-dl" readonly><button id="app-dl-pick">Change…</button></div>
-        <label class="switch"><input type="checkbox" data-app="AskWhereToSave"> Ask where to save each download</label>
-        <div class="sub-head">Clipboard</div>
-        <label class="switch"><input type="checkbox" data-app="ShareClipboard"> Share the clipboard (text) with the PCs this app is connected to</label>
-        <div class="sub-head">Connection</div>
-        <div class="inline"><input id="app-conn" readonly><button id="app-conn-change">Change connection…</button></div>
+        <div class="set-sec" data-sec="plugins">
+          <div class="set-head"><h2>Plugins</h2><p>Extra features loaded from the <code>plugins</code> folder in the home folder.</p></div>
+          <div class="set-group pad"><div id="plugins"></div></div>
+        </div>
+
+        <div class="set-sec" data-sec="app" id="app-panel" hidden>
+          <div class="set-head"><h2>This app</h2><p id="app-where"></p></div>
+          <div class="set-group">
+            <div class="set-row"><div class="set-label">Start with Windows<small>Starts in the notification area.</small></div>
+              <label class="switch"><input type="checkbox" data-app="StartWithWindows"></label></div>
+            <div class="set-row" id="app-autoupdate-row"><div class="set-label">Automatic app updates<small>Install new versions of the app automatically.</small></div>
+              <label class="switch"><input type="checkbox" data-app="AutoUpdate"></label></div>
+            <div class="set-row"><div class="set-label">Shared clipboard<small>Copied text is available on the PCs this app is connected to.</small></div>
+              <label class="switch"><input type="checkbox" data-app="ShareClipboard"></label></div>
+          </div>
+          <div class="set-sub">Notifications</div>
+          <div class="set-group">
+            <div class="set-row"><div class="set-label">Connection lost or restored</div><label class="switch"><input type="checkbox" data-app="NotifyConnection"></label></div>
+            <div class="set-row"><div class="set-label">Failed login attempts</div><label class="switch"><input type="checkbox" data-app="NotifyFailedLogin"></label></div>
+            <div class="set-row"><div class="set-label">Login from a computer that is not in the list</div><label class="switch"><input type="checkbox" data-app="NotifyUnknown"></label></div>
+            <div class="set-row"><div class="set-label">Transfer finished<small>Only while the window is in the background.</small></div><label class="switch"><input type="checkbox" data-app="NotifyTransfers"></label></div>
+          </div>
+          <div class="set-sub">Downloads and connection</div>
+          <div class="set-group">
+            <div class="set-row"><div class="set-label">Download folder</div>
+              <div class="inline wide"><input id="app-dl" readonly><button id="app-dl-pick">Change…</button></div></div>
+            <div class="set-row"><div class="set-label">Ask where to save each download</div><label class="switch"><input type="checkbox" data-app="AskWhereToSave"></label></div>
+            <div class="set-row"><div class="set-label">Connection to this PC</div>
+              <div class="inline wide"><input id="app-conn" readonly><button id="app-conn-change">Change…</button></div></div>
+          </div>
+        </div>
       </div>
     </div>
   </section>

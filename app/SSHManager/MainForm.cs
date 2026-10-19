@@ -188,6 +188,7 @@ internal sealed class MainForm : Form
             OpenWizard(null);
             return;
         }
+        if (current == All && links.Count < 2) current = links[0].Pc.Id;   // "All PCs" needs two PCs
         if (current == All)
         {
             Text = "SSH Manager · All PCs";
@@ -267,25 +268,16 @@ internal sealed class MainForm : Form
         if (webReady) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(message));
     }
 
-    void PushPcs()
+    void PushPcs() => Post(new
     {
-        var clients = Clients();
-        lastClientsKey = ClientsKey(clients);
-        Post(new
-        {
-            type = "pcs",
-            current = wizardOpen ? "" : current,
-            pcs = links.Select(l => new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() }),
-            clients = clients.Count,   // computers without a server: shown as cards in All PCs, not in the list
-        });
-    }
+        type = "pcs",
+        current = wizardOpen ? "" : current,
+        pcs = links.Select(l => new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() }),
+    });
 
     /// <summary>A computer that connects to one of the PCs here but has no server of its own (a client),
-    /// as that PC reports it: it can't be opened, but its status and stats can be shown.</summary>
+    /// as that PC reports it: it can't be opened, but All PCs shows its status and stats.</summary>
     sealed record ClientPc(string Name, string State, string Via, JsonElement? Stats, string Mac, string Ip, string Version);
-
-    string lastClientsKey = "";
-    static string ClientsKey(List<ClientPc> clients) => string.Join("|", clients.Select(c => c.Name + ":" + c.State));
 
     List<ClientPc> Clients()
     {
@@ -346,7 +338,6 @@ internal sealed class MainForm : Form
                 }
                 catch (Exception) { }
             }
-            if (ClientsKey(Clients()) != lastClientsKey) PushPcs();
             if (current == All) PushOverview();
         }
         finally { polling = false; }

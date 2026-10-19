@@ -54,7 +54,7 @@ internal static class Ui
           if (!m || m.type !== "pcs") return;
           const st = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
           document.getElementById("pcbar").innerHTML =
-            (m.pcs.length > 1 || m.clients ? `<button data-pc="all" class="${m.current === "all" ? "on" : ""}"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
+            (m.pcs.length > 1 ? `<button data-pc="all" class="${m.current === "all" ? "on" : ""}"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
             m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}"><span class="dot ${st(p)}"></span><span class="name">${esc(p.name)}</span></button>`).join("") +
             `<button class="add" data-pc="add"><span class="dot" style="background:var(--accent)"></span><span class="name">Add PC</span></button>`;
           if (window.onPcs) window.onPcs(m);

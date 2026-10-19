@@ -67,16 +67,27 @@ function notify(kind, title, text) { toHost("notify", { kind, title, text }); }
 // ---------- tabs ----------
 function showTab(name) {
   $$("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  $("#open-settings").classList.toggle("active", name === "settings");
   $$("main > section").forEach(s => s.hidden = s.id !== "tab-" + name);
   store.set("tab", name);
   if (name === "files" && !files.loaded) files.open(store.get("path", null));
-  if (name === "settings") settingsUi.open();
+  if (name === "settings") { settingsUi.open(); showSettingsSection(store.get("setSec", "general")); }
   if (name === "run") runUi.load();
   if (name === "logs") logUi.load();
   if (name === "screen") screenUi.open(); else screenUi.stop();
   if (name === "sync") toHost("sync-get");
 }
-$("#tabs").onclick = e => { if (e.target.dataset.tab) showTab(e.target.dataset.tab); };
+$("#tabs").onclick = e => { const b = e.target.closest("[data-tab]"); if (b) showTab(b.dataset.tab); };
+$("#open-settings").onclick = () => showTab("settings");
+
+// settings: one section at a time
+function showSettingsSection(name) {
+  if (!$(`#set-nav [data-sec="${name}"]`) || $(`#set-nav [data-sec="${name}"]`).hidden) name = "general";
+  $$("#set-nav button").forEach(b => b.classList.toggle("active", b.dataset.sec === name));
+  $$(".set-sec").forEach(s => s.classList.toggle("on", s.dataset.sec === name));
+  store.set("setSec", name);
+}
+$("#set-nav").onclick = e => { const b = e.target.closest("[data-sec]"); if (b) showSettingsSection(b.dataset.sec); };
 document.addEventListener("click", e => { const g = e.target.closest("[data-goto]"); if (g) showTab(g.dataset.goto); });
 
 // ---------- status ----------
@@ -786,7 +797,7 @@ hostHandlers.pcs = m => {
   const own = m.current === "local";
   $("#nav-screen").hidden = own;
   if (own && !$("#tab-screen").hidden) showTab("overview");
-  $("#pcbar").innerHTML = (m.pcs.length > 1 || m.clients ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
+  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
     m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}">${dot(state(p))}<span class="name">${esc(p.name)}</span></button>`).join("") +
     `<button class="add" data-pc="add" title="Add a PC"><span class="dot" style="background:none;color:var(--accent)">+</span><span class="name">Add PC</span></button>`;
 };
@@ -883,7 +894,7 @@ $("#cmd-save").onclick = async () => {
   next.actions = [...(next.actions || []), { name, script, group: "", confirm: false }];
   try { await settingsUi.save(next); toast("Saved as a quick action"); runUi.load(); } catch (e) { toast(e.message, true); }
 };
-$("#actions-edit").onclick = () => { showTab("settings"); setTimeout(() => $("#set-actions").scrollIntoView({ block: "center" }), 300); };
+$("#actions-edit").onclick = () => { showTab("settings"); showSettingsSection("actions"); };
 
 // ---------- Logs ----------
 const logUi = {
@@ -1124,7 +1135,7 @@ document.addEventListener("click", async e => {
   if (!viewer || viewer === "SSH tunnel" || viewer === "unknown") setTimeout(whoami, 3000);   // login not logged yet
 })();
 settingsUi.load().then(() => files.markActive()).catch(() => { });
-if (host) { $("#app-panel").hidden = false; $("#nav-sync").hidden = false; }
+if (host) { $("#app-panel").hidden = false; $("#set-nav-app").hidden = false; $("#nav-sync").hidden = false; }
 pollStatus();
 pollActivity();
 showTab(store.get("tab", "overview"));

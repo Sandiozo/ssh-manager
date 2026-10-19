@@ -17,6 +17,7 @@ internal static class LocalStats
         return new
         {
             machine = Environment.MachineName,
+            user = Environment.UserName,
             cpu = CpuPercent(),
             ram_total = (long)mem.TotalPhys,
             ram_used = (long)(mem.TotalPhys - mem.AvailPhys),

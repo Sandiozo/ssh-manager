@@ -7,6 +7,15 @@ internal static class Program
     [STAThread]
     static void Main(string[] args)
     {
+        // Started by ssh as its SSH_ASKPASS helper while the setup page logs in with a password:
+        // hand ssh the password the page passed down, nothing else.
+        if (Environment.GetEnvironmentVariable("SSHMGR_ASKPASS") is { Length: > 0 } secret)
+        {
+            using var stdout = Console.OpenStandardOutput();
+            stdout.Write(System.Text.Encoding.UTF8.GetBytes(secret + "\n"));
+            return;
+        }
+
         // One copy per user: a second launch just brings the existing window forward.
         using var mutex = new Mutex(true, @"Local\SSHManager.App", out var first);
         using var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SSHManager.Show");

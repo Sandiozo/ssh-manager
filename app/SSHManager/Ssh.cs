@@ -52,7 +52,8 @@ internal static class Ssh
         Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference = 'SilentlyContinue'\n" + script));
 
     /// <summary>Runs ssh (or another tool) without a window; returns exit code and combined output.</summary>
-    public static async Task<(int code, string output)> RunAsync(string exe, IEnumerable<string> args, int timeoutMs = 30000)
+    public static async Task<(int code, string output)> RunAsync(string exe, IEnumerable<string> args, int timeoutMs = 30000,
+        IDictionary<string, string>? env = null)
     {
         var psi = new ProcessStartInfo(exe)
         {
@@ -60,6 +61,7 @@ internal static class Ssh
             RedirectStandardError = true, RedirectStandardInput = true,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
+        if (env is not null) foreach (var (k, v) in env) psi.Environment[k] = v;
         using var p = Process.Start(psi)!;
         p.StandardInput.Close();
         var stdout = p.StandardOutput.ReadToEndAsync();

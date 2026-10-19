@@ -150,6 +150,7 @@ class ClientStats(BaseModel):
     uptime_s: int | None = None
     app_version: str = ""
     macs: list[str] = []
+    user: str = ""
 
 
 @app.post("/api/clients/report")

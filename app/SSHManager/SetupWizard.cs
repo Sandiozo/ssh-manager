@@ -9,7 +9,7 @@ namespace SSHManager;
 /// with a one-time password prompt if needed), and check that SSH Manager is installed there. Runs as a
 /// page in the app window; talks to MainForm through page messages.
 /// </summary>
-internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
+internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Func<string, string?> knownUser)
 {
     PcEntry? editing;
     string host = "", user = Environment.UserName, alias = "", error = "", step = "pick", working = "";
@@ -46,12 +46,14 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
                 break;
             case "setup-pick":
                 host = field("host");
+                if ((knownUser(host) ?? knownUser(field("address"))) is { } u) user = u;
                 alias = "";
                 step = "pick";
                 Render();
                 break;
             case "setup-install-key":
-                await InstallKeyAsync();
+                user = field("user").Trim();
+                await InstallKeyAsync(field("password"));
                 break;
             case "setup-back":
                 step = "pick";
@@ -96,6 +98,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
             Render();
             return;
         }
+        if (alias == "" && user == Environment.UserName && knownUser(host) is { } known) user = known;
         busy = true;
         error = "";
         step = "working";
@@ -136,13 +139,20 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
         finally { busy = false; }
     }
 
-    /// <summary>Opens a console window where the user types their Windows password for the PC once;
-    /// the remote script adds this computer's public key where sshd looks for it.</summary>
-    async Task InstallKeyAsync()
+    /// <summary>Logs in once with the Windows password typed on the page (ssh gets it from this app through
+    /// SSH_ASKPASS, it is not stored) and adds this computer's public key where sshd looks for it.</summary>
+    async Task InstallKeyAsync(string password)
     {
+        if (user == "" || password == "")
+        {
+            error = "Enter the user name and the password.";
+            Render();
+            return;
+        }
         busy = true;
+        error = "";
         step = "working";
-        working = $"Waiting for the password window… (type {user}'s Windows password for {host} there)";
+        working = $"Logging in to {host} as {user}…";
         Render();
         try
         {
@@ -154,14 +164,27 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
                 else { New-Item -ItemType Directory -Force "$HOME\.ssh" | Out-Null; $f = "$HOME\.ssh\authorized_keys" }
                 if (-not ((Test-Path $f) -and (Select-String -Path $f -SimpleMatch $key -Quiet))) { Add-Content -Path $f -Value $key -Encoding ascii }
                 if ($admin) { icacls $f /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null }
-                'Key added. This window closes in a moment.'
-                Start-Sleep 2
+                'SSHMGR-KEY-ADDED'
                 """;
             var c = new PcEntry { Host = host, User = user };
-            var args = string.Join(" ", Ssh.Options(c, batch: false).Select(Quote)) + $" {Quote(c.Target)} {Ssh.PowerShell(script)}";
-            var psi = new ProcessStartInfo("cmd.exe", $"/c title SSH Manager: log in to {host} & ssh.exe {args} || pause")
-            { UseShellExecute = true };
-            using (var p = Process.Start(psi)!) await p.WaitForExitAsync();
+            var env = new Dictionary<string, string>
+            {
+                ["SSH_ASKPASS"] = Environment.ProcessPath ?? Application.ExecutablePath,
+                ["SSH_ASKPASS_REQUIRE"] = "force",
+                ["SSHMGR_ASKPASS"] = password,
+            };
+            string[] once = ["-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
+                             "-o", "PreferredAuthentications=password,keyboard-interactive"];
+            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c, batch: false), .. once, c.Target, Ssh.PowerShell(script)], 30000, env);
+            if (!output.Contains("SSHMGR-KEY-ADDED"))
+            {
+                step = "key";
+                error = output.Contains("Permission denied", StringComparison.OrdinalIgnoreCase)
+                    ? $"{host} did not accept user name \"{user}\" with that password. Check both and try again."
+                    : (Ssh.Explain(output, host) is { Length: > 0 } why ? why + "\n\n" : "") + output.Trim();
+                Render();
+                return;
+            }
             busy = false;
             await ConnectAsync();
         }
@@ -182,7 +205,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
         var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), c.Target, check], 20000);
         if (!output.Contains("SSHMGR-INSTALLED"))
             throw new InvalidOperationException($"This computer can log in to {c.Host}, but SSH Manager isn't set up there yet. " +
-                $"Install SSH Manager on {c.Host} and choose \"Let other PCs manage this PC\", then press Add again.");
+                $"Install SSH Manager on {c.Host} and choose \"Client and server\", then press Add again.");
         done(c);
     }
 
@@ -196,26 +219,27 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
         var foundHtml = found is null ? "" : found.Count == 0
             ? "<div class='found'><p class='small'>No PCs accepting SSH were found on your network.</p></div>"
             : "<div class='found'>" + string.Join("", found.Select(f =>
-                $"<button class='pick' onclick=\"send('setup-pick', {{host: '{Esc(f.Name != "" ? f.Name : f.Address)}'}})\"><b>{Esc(f.Name != "" ? f.Name : f.Address)}</b> <span>{Esc(f.Address)}</span></button>")) + "</div>";
+                $"<button class='pick' onclick=\"send('setup-pick', {{host: '{Esc(f.Name != "" ? f.Name : f.Address)}', address: '{Esc(f.Address)}'}})\"><b>{Esc(f.Name != "" ? f.Name : f.Address)}</b> <span>{Esc(f.Address)}</span></button>")) + "</div>";
         var body = step switch
         {
             "working" => $"""<div class="center"><span class="spin"></span>{Esc(working)}</div>""",
             "key" => $$"""
-                <h2>Allow this computer on {{Esc(host)}}</h2>
-                <p>{{Esc(host)}} answered, but doesn't know this computer yet. SSH Manager made a key for this computer and
-                will add it to {{Esc(host)}} for you. A window opens where you type <b>{{Esc(user)}}</b>'s Windows password
-                for {{Esc(host)}}. This is needed only once; after that it logs in with the key.</p>
-                <p class="small">Sign in to Windows on that PC with a Microsoft account? Use that account's password. If the PC
-                only allows PIN / Windows Hello sign-in, turn off "Only allow Windows Hello sign-in" there first
-                (Settings → Accounts → Sign-in options).</p>
+                <h2>Sign in to {{Esc(host)}}</h2>
+                <p>{{Esc(host)}} doesn't know this computer yet. Sign in once with a Windows account on {{Esc(host)}};
+                SSH Manager then adds this computer's key there and uses it from now on. The password is not stored.</p>
                 {{(error != "" ? $"<div class='err'>{Esc(error)}</div>" : "")}}
+                <label>Windows user name on {{Esc(host)}} <input id="user" value="{{Esc(user)}}" spellcheck="false"></label>
+                <label>Password <input id="password" type="password" autofocus></label>
+                <p class="small">The user name is the folder name under <code>C:\Users</code> on that PC. For a Microsoft account,
+                use the account's password, not the PIN. If that PC only allows Windows Hello sign-in, turn that off first
+                (Settings → Accounts → Sign-in options).</p>
                 <div class="buttons"><button onclick="send('setup-back')">Back</button>
-                <button class="primary" onclick="send('setup-install-key')">Open the password window</button></div>
+                <button class="primary" onclick="send('setup-install-key', {user: v('user'), password: v('password')})">Sign in</button></div>
                 """,
             _ => $$"""
                 <h2>{{title}}</h2>
                 <p>SSH Manager connects to Windows PCs over SSH. Install SSH Manager on that PC first and choose
-                <b>Let other PCs manage this PC</b>; then enter it here.</p>
+                <b>Client and server</b>; then enter it here.</p>
                 {{(error != "" ? $"<div class='err'>{Esc(error)}</div>" : "")}}
                 <label>PC name or IP address
                   <span class="row"><input id="host" value="{{Esc(host)}}" placeholder="e.g. DESKTOP-1234 or 192.168.1.20" autofocus>
@@ -249,7 +273,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done)
         const string script = """
             const v = id => (document.getElementById(id) || {}).value || "";
             function send(type, data) { chrome.webview.postMessage({ type, ...(data || {}) }); }
-            document.addEventListener("keydown", e => { if (e.key === "Enter" && e.target.id === "host") document.querySelector(".primary").click(); });
+            document.addEventListener("keydown", e => { if (e.key === "Enter" && (e.target.id === "host" || e.target.id === "password")) document.querySelector(".primary").click(); });
             """;
         show(Ui.Shell(editing is null ? "Add a PC" : editing.DisplayName, css, $"<div class=\"box\">{body}</div>", script, center: true));
     }

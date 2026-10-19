@@ -50,7 +50,7 @@ internal sealed class MainForm : Form
         RestoreWindowBounds();
         Controls.Add(web);
 
-        wizard = new SetupWizard(html => { if (webReady) { shown = "wizard"; web.CoreWebView2.NavigateToString(html); } }, OnWizardDone);
+        wizard = new SetupWizard(html => { if (webReady) { shown = "wizard"; web.CoreWebView2.NavigateToString(html); } }, OnWizardDone, KnownUser);
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => links.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(() => Post(sync!.Snapshot())));
@@ -277,7 +277,18 @@ internal sealed class MainForm : Form
 
     /// <summary>A computer that connects to one of the PCs here but has no server of its own (a client),
     /// as that PC reports it: it can't be opened, but All PCs shows its status and stats.</summary>
-    sealed record ClientPc(string Name, string State, string Via, JsonElement? Stats, string Mac, string Ip, string Version);
+    sealed record ClientPc(string Name, string State, string Via, JsonElement? Stats, string Mac, string Ip, string Version,
+        string Host = "", string Machine = "", string User = "");
+
+    /// <summary>The Windows user name a computer that connects here reported (by name, computer name or address).</summary>
+    string? KnownUser(string hostOrIp)
+    {
+        var key = hostOrIp.Trim();
+        if (key == "") return null;
+        bool Is(string s) => s != "" && (s.Equals(key, StringComparison.OrdinalIgnoreCase)
+                                         || s.Split('.')[0].Equals(key.Split('.')[0], StringComparison.OrdinalIgnoreCase) && !char.IsDigit(key[0]));
+        return Clients().FirstOrDefault(c => c.User != "" && (Is(c.Name) || Is(c.Host) || Is(c.Machine) || c.Ip == key))?.User;
+    }
 
     List<ClientPc> Clients()
     {
@@ -303,14 +314,15 @@ internal sealed class MainForm : Form
                     if (name == "" || Seen(name, st is { } x ? S(x, "machine") : "")) continue;
                     var state = B(p, "connected") ? "Connected" : B(p, "online") ? "Online" : "Offline";
                     var ip = S(p, "resolved_ip") is { Length: > 0 } r ? r : S(p, "ip");
-                    list.Add(new(name, state, l.Pc.DisplayName, st, FirstMac(st), ip, st is { } y ? S(y, "app_version") : ""));
+                    list.Add(new(name, state, l.Pc.DisplayName, st, FirstMac(st), ip, st is { } y ? S(y, "app_version") : "",
+                        S(p, "host"), st is { } z ? S(z, "machine") : "", st is { } u ? S(u, "user") : ""));
                 }
             if (s.TryGetProperty("other_apps", out var others) && others.ValueKind == JsonValueKind.Array)
                 foreach (var c in others.EnumerateArray())
                 {
                     var name = S(c, "machine");
                     if (name == "" || Seen(name, name)) continue;
-                    list.Add(new(name, "Connected", l.Pc.DisplayName, c, FirstMac(c), "", S(c, "app_version")));
+                    list.Add(new(name, "Connected", l.Pc.DisplayName, c, FirstMac(c), "", S(c, "app_version"), "", name, S(c, "user")));
                 }
         }
         return list;

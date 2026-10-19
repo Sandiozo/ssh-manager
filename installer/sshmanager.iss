@@ -65,7 +65,7 @@ Name: "{autodesktop}\SSH Manager"; Filename: "{app}\App\SSHManager.exe"; Tasks: 
 
 [Run]
 Filename: "powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\Tools\server-setup.ps1"" -InstallDir ""{app}"" -User ""{code:InstallingUser}"""; \
-  StatusMsg: "Setting up the SSH server (the first time this can take a few minutes)..."; Components: server; Flags: runhidden waituntilterminated
+  StatusMsg: "Setting up the SSH server. The first time, Windows downloads OpenSSH Server, which can take 5-15 minutes..."; Components: server; Flags: runhidden waituntilterminated
 Filename: "{app}\App\SSHManager.exe"; Description: "Open SSH Manager"; Components: app; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [UninstallRun]

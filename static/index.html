@@ -43,8 +43,13 @@
   <section id="tab-overview">
     <div id="notice"></div>
     <div class="kpis" id="kpis"></div>
-    <div class="section-title">Computers</div>
-    <div class="cards" id="cards"></div>
+    <div class="panel">
+      <div class="panel-head"><h2>Computers</h2><span class="muted small">this PC and the computers that connect to it</span></div>
+      <div class="table-wrap"><table class="machines">
+        <thead><tr><th>Computer</th><th>CPU</th><th>Memory</th><th>Disks</th><th>Address</th><th>Last login</th><th></th></tr></thead>
+        <tbody id="machines"></tbody>
+      </table></div>
+    </div>
     <div class="grid2">
       <div class="panel">
         <div class="panel-head"><h2>Live sessions</h2><span class="muted small" id="session-count"></span></div>
@@ -226,7 +231,7 @@
         <button data-sec="shortcuts">File shortcuts</button>
         <button data-sec="updates">Updates</button>
         <button data-sec="plugins">Plugins</button>
-        <button data-sec="app" id="set-nav-app" hidden>This app</button>
+        <button id="set-nav-app" hidden title="Opens the app's own settings">App settings ↗</button>
       </nav>
 
       <div class="set-body">
@@ -342,32 +347,6 @@
           <div class="set-group pad"><div id="plugins"></div></div>
         </div>
 
-        <div class="set-sec" data-sec="app" id="app-panel" hidden>
-          <div class="set-head"><h2>This app</h2><p id="app-where"></p></div>
-          <div class="set-group">
-            <div class="set-row"><div class="set-label">Start with Windows<small>Starts in the notification area.</small></div>
-              <label class="switch"><input type="checkbox" data-app="StartWithWindows"></label></div>
-            <div class="set-row" id="app-autoupdate-row"><div class="set-label">Automatic app updates<small>Install new versions of the app automatically.</small></div>
-              <label class="switch"><input type="checkbox" data-app="AutoUpdate"></label></div>
-            <div class="set-row"><div class="set-label">Shared clipboard<small>Copied text is available on the PCs this app is connected to.</small></div>
-              <label class="switch"><input type="checkbox" data-app="ShareClipboard"></label></div>
-          </div>
-          <div class="set-sub">Notifications</div>
-          <div class="set-group">
-            <div class="set-row"><div class="set-label">Connection lost or restored</div><label class="switch"><input type="checkbox" data-app="NotifyConnection"></label></div>
-            <div class="set-row"><div class="set-label">Failed login attempts</div><label class="switch"><input type="checkbox" data-app="NotifyFailedLogin"></label></div>
-            <div class="set-row"><div class="set-label">Login from a computer that is not in the list</div><label class="switch"><input type="checkbox" data-app="NotifyUnknown"></label></div>
-            <div class="set-row"><div class="set-label">Transfer finished<small>Only while the window is in the background.</small></div><label class="switch"><input type="checkbox" data-app="NotifyTransfers"></label></div>
-          </div>
-          <div class="set-sub">Downloads and connection</div>
-          <div class="set-group">
-            <div class="set-row"><div class="set-label">Download folder</div>
-              <div class="inline wide"><input id="app-dl" readonly><button id="app-dl-pick">Change…</button></div></div>
-            <div class="set-row"><div class="set-label">Ask where to save each download</div><label class="switch"><input type="checkbox" data-app="AskWhereToSave"></label></div>
-            <div class="set-row"><div class="set-label">Connection to this PC</div>
-              <div class="inline wide"><input id="app-conn" readonly><button id="app-conn-change">Change…</button></div></div>
-          </div>
-        </div>
       </div>
     </div>
   </section>
@@ -413,6 +392,7 @@
   <pre id="detail-body"></pre>
 </dialog>
 <div id="toast"></div>
+<div class="viz-tip" id="viz-tip"></div>
 
 <script src="/static/app.js"></script>
 </body>

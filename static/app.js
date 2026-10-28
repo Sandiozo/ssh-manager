@@ -64,6 +64,24 @@ function toHost(type, data = {}) { host?.postMessage({ type, ...data }); }
 host?.addEventListener("message", e => { const m = e.data; if (m && hostHandlers[m.type]) hostHandlers[m.type](m); });
 function notify(kind, title, text) { toHost("notify", { kind, title, text }); }
 
+// hover details for chart marks (any element with data-tip)
+document.addEventListener("mousemove", e => {
+  const t = e.target.closest?.("[data-tip]"), tip = $("#viz-tip");
+  if (!t) { tip.style.display = "none"; return; }
+  tip.textContent = t.dataset.tip; tip.style.display = "block";
+  const w = tip.offsetWidth;
+  tip.style.left = Math.min(innerWidth - w - 8, e.clientX + 12) + "px"; tip.style.top = (e.clientY - 34) + "px";
+});
+
+// light/dark: follows Windows unless the app picks one
+function applyTheme(t) {
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+  else delete document.documentElement.dataset.theme;
+  store.set("theme", t || "system");
+}
+applyTheme(store.get("theme", "system"));
+hostHandlers.theme = m => applyTheme(m.theme);
+
 // ---------- tabs ----------
 function showTab(name) {
   $$("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
@@ -93,7 +111,9 @@ document.addEventListener("click", e => { const g = e.target.closest("[data-goto
 // ---------- status ----------
 let last = null, viewer = null, hostName = "";
 function dot(state) { return `<span class="dot ${state}"></span>`; }
-function meter(pct) { return `<div class="meter"><i class="${pct > 85 ? "hot" : ""}" style="width:${Math.min(100, pct)}%"></i></div>`; }
+function meter(pct) { return `<div class="meter"><i class="${pct > 90 ? "crit" : pct > 75 ? "hot" : ""}" style="width:${Math.min(100, pct)}%"></i></div>`; }
+// a round axis maximum whose half is a whole number too: 2, 4, 10, 20, 40, 100 ...
+function niceMax(v) { const p = 10 ** Math.floor(Math.log10(v)); return [2, 4, 10].map(m => m * p).find(m => m >= v); }
 
 // CPU / RAM / disks / battery that the SSH Manager app on another computer reports about itself
 function clientStats(c) {
@@ -149,23 +169,33 @@ function renderStatus(s) {
   ].join("");
 
   // computers: this PC, the computers that connect to it, and Desktop Commander if installed
-  const disks = s.host.disks.map(d => `<div class="row"><span>${esc(d.mount)}</span><span>${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</span></div>${meter(d.percent)}`).join("");
-  const cards = [
-    `<div class="card"><div class="head">${dot("ok")}${esc(s.host.name)}<span class="tag blue">this PC · server</span></div>
-      <div class="row"><span>Uptime</span><span>${fmtDur(s.host.uptime_s)}</span></div>${disks}</div>`,
-    ...s.peers.map(p => `<div class="card"><div class="head">${dot(p.connected ? "ok" : p.online ? "warn" : "bad")}${esc(p.name)}${p.stats ? `<span class="tag green">app</span>` : ""}</div>
-      <div class="big">${p.connected ? "Connected" : p.online ? "Online · not connected" : "Offline"}</div>
-      ${clientStats(p.stats)}
-      <div class="row"><span>Address</span><span>${esc(p.resolved_ip || p.ip || "—")}</span></div>
-      <div class="row"><span>Ping · last login</span><span>${p.online ? (p.latency_ms ?? "<1") + " ms" : p.online === false ? "no reply" : "…"} · ${ago(p.last_login)}</span></div>
-      ${!p.online && (p.mac || p.stats?.macs?.[0]) ? `<div><button data-wake="${esc(p.mac || p.stats.macs[0])}" data-ip="${esc(p.ip || "")}">Wake up</button></div>` : ""}</div>`),
-    ...(s.other_apps || []).map(c => `<div class="card"><div class="head">${dot("ok")}${esc(c.machine)}<span class="tag green">app</span></div>
-      ${clientStats(c)}<div class="muted small">Not in this PC's computer list (Settings → Computers).</div></div>`),
-    !dc.installed ? "" : `<div class="card"><div class="head">${dot(dc.online ? "ok" : "")}Desktop Commander<span class="tag">${dc.online ? "online" : "offline"}</span></div>
-      <div class="row"><span>Last heartbeat</span><span>${dc.heartbeat ? ago(dc.heartbeat) : "—"}</span></div>
-      <div class="muted small">A second way in that doesn't go through SSH. Its commands don't show up here.</div></div>`,
+  const mini = pct => pct == null ? `<span class="dim">—</span>` : `<div class="mini"><span class="num">${Math.round(pct)}%</span>${meter(pct)}</div>`;
+  const diskCell = list => (list || []).slice(0, 2).map((d, i) =>
+    `${i ? `<br><span class="dim">` : "<span>"}${esc(d.mount)} ${fmtBytes(d.free)} free</span>`).join("") || `<span class="dim">—</span>`;
+  const who = (state, name, sub, tag = "") =>
+    `<div class="who">${dot(state)}<div><b>${esc(name)}</b><small>${sub}</small></div>${tag}</div>`;
+  const rows = [
+    `<tr><td>${who("ok", s.host.name, `this PC · up ${fmtDur(s.host.uptime_s)}`, `<span class="tag accent">server</span>`)}</td>
+      <td>${mini(s.host.cpu)}</td><td>${mini(ram.percent)}</td>
+      <td class="num">${diskCell(s.host.disks)}</td><td class="mono dim">${esc(s.host.ips[0] || "—")}</td><td class="dim">—</td><td></td></tr>`,
+    ...s.peers.map(p => {
+      const c = p.stats, mac = p.mac || c?.macs?.[0];
+      const state = p.connected ? "Connected" : p.online ? "Online · not connected" : p.online === false ? "Offline" : "Checking…";
+      const extra = [state.toLowerCase(), c?.battery != null ? `battery ${c.battery}%${c.charging ? " charging" : ""}` : "",
+        p.online ? `ping ${p.latency_ms ?? "<1"} ms` : ""].filter(Boolean).join(" · ");
+      return `<tr><td>${who(p.connected ? "ok" : p.online ? "warn" : "bad", p.name, esc(extra), c ? `<span class="tag">app</span>` : "")}</td>
+        <td>${mini(c?.cpu)}</td><td>${mini(c?.ram_total ? c.ram_used / c.ram_total * 100 : null)}</td>
+        <td class="num">${diskCell(c?.disks)}</td><td class="mono dim">${esc(p.resolved_ip || p.ip || "—")}</td>
+        <td class="dim num">${p.last_login ? ago(p.last_login) : "—"}</td>
+        <td>${!p.online && mac ? `<button data-wake="${esc(mac)}" data-ip="${esc(p.ip || "")}">Wake up</button>` : ""}</td></tr>`;
+    }),
+    ...(s.other_apps || []).map(c => `<tr><td>${who("ok", c.machine, "not in this PC's computer list", `<span class="tag">app</span>`)}</td>
+      <td>${mini(c.cpu)}</td><td>${mini(c.ram_total ? c.ram_used / c.ram_total * 100 : null)}</td>
+      <td class="num">${diskCell(c.disks)}</td><td class="dim">—</td><td class="dim">—</td><td></td></tr>`),
+    !dc.installed ? "" : `<tr><td>${who(dc.online ? "ok" : "", "Desktop Commander", `${dc.online ? "online" : "offline"} · last heartbeat ${dc.heartbeat ? ago(dc.heartbeat) : "—"}`)}</td>
+      <td colspan="6" class="note">A second way in that doesn't go through SSH. Its commands don't show up here.</td></tr>`,
   ];
-  $("#cards").innerHTML = cards.filter(Boolean).join("");
+  $("#machines").innerHTML = rows.filter(Boolean).join("");
 
   // sessions
   $("#session-count").textContent = s.sessions.length ? `${s.sessions.length} open` : "";
@@ -194,13 +224,14 @@ function renderStatus(s) {
       <span class="what">on this PC</span><span class="muted small">${ago(a.last)}</span></div></div>`).join("");
   if (!$("#tab-settings").hidden) renderAgents(s);
 
-  // hourly bars
-  const max = Math.max(1, ...s.hours.map(h => h.count));
+  // logins per hour: thin columns on hairline gridlines, details on hover
+  const max = niceMax(Math.max(1, ...s.hours.map(h => h.count)));
   $("#login-total").textContent = `${s.logins_24h} logins`;
-  $("#hours").innerHTML = s.hours.map((h, i) => {
-    const d = new Date(h.hour);
-    return `<div class="b" title="${d.getHours()}:00 — ${h.count} logins"><i style="height:${h.count / max * 100}%"></i>${i % 3 === 0 ? `<span>${d.getHours()}</span>` : ""}</div>`;
-  }).join("");
+  $("#hours").innerHTML = [0, max / 2, max].map(v => `<div class="gl" style="bottom:${v / max * 100}%"><span>${v}</span></div>`).join("") +
+    s.hours.map((h, i) => {
+      const d = new Date(h.hour), hr = d.getHours();
+      return `<div class="b" data-tip="${hr}:00–${hr}:59 · ${h.count} login${h.count === 1 ? "" : "s"}"><i style="height:${h.count / max * 100}%"></i>${i % 3 === 0 ? `<span>${hr}</span>` : ""}</div>`;
+    }).join("");
 
   // connection history
   $("#history").innerHTML = s.history.slice().reverse().map(c => {
@@ -263,7 +294,7 @@ async function pollStatus() {
 }
 
 // ---------- activity ----------
-let actItems = [], actAfter = 0, actKind = "", actQuery = "";
+let actItems = [], actAfter = 0, actKind = "", actQuery = "", actShown = false;
 function actLabel(a) {
   if (a.kind === "command") return { kind: a.type, text: a.summary };
   if (a.kind === "action") return { kind: "run", text: `${a.title}${a.status && a.status !== "done" ? ` (${a.status})` : ""}` };
@@ -294,7 +325,8 @@ function renderActivity() {
 async function pollActivity() {
   try {
     const { items } = await api(`/api/activity?after=${actAfter}&limit=2000`);
-    if (items.length) { actItems.push(...items); actAfter = items.at(-1).id; actItems = actItems.slice(-3000); renderActivity(); }
+    if (items.length) { actItems.push(...items); actAfter = items.at(-1).id; actItems = actItems.slice(-3000); }
+    if (items.length || !actShown) { actShown = true; renderActivity(); }
   } catch { }
   setTimeout(pollActivity, 3000);
 }
@@ -642,7 +674,6 @@ const settingsUi = {
     try { if (!this.saved || !this.dirty()) await this.load(); } catch (e) { toast(e.message, true); }
     this.render();
     this.loadKeys();
-    if (host) toHost("get-app-settings");
   },
   dirty() { return JSON.stringify(this.saved) !== JSON.stringify(this.draft); },
   touch() { $("#savebar").hidden = !this.dirty(); },
@@ -783,24 +814,8 @@ $("#set-save").onclick = async () => {
 };
 $("#set-discard").onclick = () => { settingsUi.draft = structuredClone(settingsUi.saved); settingsUi.render(); };
 
-// app settings (only inside the desktop app)
-let appSettings = null;
-hostHandlers["app-settings"] = m => {
-  appSettings = m.settings;
-  $("#app-panel").hidden = false;
-  $("#app-where").textContent = `on ${m.machine}`;
-  $$("[data-app]").forEach(i => i.checked = !!appSettings[i.dataset.app]);
-  $("#app-conn").value = appSettings.Connection || "";
-  $("#app-dl").value = appSettings.DownloadFolder || "";
-  $("#app-where").textContent = `on ${m.machine} · app version ${appSettings.AppVersion}`;
-  $("#app-autoupdate-row").hidden = !!appSettings.ServerUpdatesApp;
-};
-$("#app-panel").addEventListener("change", e => {
-  const el = e.target;
-  if (el.dataset.app) toHost("set-app-settings", { settings: { [el.dataset.app]: el.checked } });
-});
-$("#app-dl-pick").onclick = () => toHost("pick-download-folder");
-$("#app-conn-change").onclick = () => toHost("open-setup");
+// the app's own settings live on a page the app draws itself
+$("#set-nav-app").onclick = e => { e.stopPropagation(); toHost("open-app-settings"); };
 
 // ---------- updates ----------
 async function installUpdate() {
@@ -1203,7 +1218,7 @@ document.addEventListener("click", async e => {
   if (!viewer || viewer === "SSH tunnel" || viewer === "unknown") setTimeout(whoami, 3000);   // login not logged yet
 })();
 settingsUi.load().then(() => files.markActive()).catch(() => { });
-if (host) { $("#app-panel").hidden = false; $("#set-nav-app").hidden = false; $("#nav-sync").hidden = false; }
+if (host) { $("#set-nav-app").hidden = false; $("#nav-sync").hidden = false; }
 pollStatus();
 pollActivity();
 showTab(store.get("tab", "overview"));

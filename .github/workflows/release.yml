@@ -37,7 +37,7 @@ env:
   # app/SSHManager/AppUpdater.cs
   ALLOWED_SIGNERS: |
     sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r
-    sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc
+    sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKAaGIE8KESxqOVKe9VK88FTHud6/7Q19/KngCUQBemG
   # built from source, see "Install build tools"
   PYINSTALLER_VERSION: "6.22.3"
 

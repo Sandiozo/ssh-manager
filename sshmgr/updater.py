@@ -50,7 +50,7 @@ NAMESPACE = "sshmanager-release"
 ALLOWED_SIGNERS = ("sshmanager-release ssh-ed25519 "
                    "AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r\n"
                    "sshmanager-release ssh-ed25519 "
-                   "AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc\n")
+                   "AAAAC3NzaC1lZDI1NTE5AAAAIKAaGIE8KESxqOVKe9VK88FTHud6/7Q19/KngCUQBemG\n")
 
 
 class UpdateError(Exception):

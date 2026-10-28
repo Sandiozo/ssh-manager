@@ -5,8 +5,7 @@ a = Analysis(
     ["server.py"],
     pathex=["."],
     datas=[("static", "static"), ("config.example.json", ".")],
-    hiddenimports=["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
-                   "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on"],
+    hiddenimports=["uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.h11_impl", "uvicorn.lifespan.on"],
     excludes=["tkinter", "test", "unittest", "pydoc_data"],
 )
 pyz = PYZ(a.pure)

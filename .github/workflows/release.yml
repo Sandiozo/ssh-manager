@@ -113,12 +113,21 @@ jobs:
           $dir = "$env:ProgramFiles\SSH Manager"
           $v = ((Get-Content sshmgr/__init__.py -Raw) -replace '(?s).*__version__\s*=\s*"([^"]+)".*', '$1').Trim()
 
+          # an update over an older build: a package that build had and this one doesn't must not break the server
+          foreach ($pkg in 'httptools', 'websockets') {
+            New-Item -ItemType Directory -Force "$dir\Server\_internal\$pkg" | Out-Null
+            Set-Content "$dir\Server\_internal\$pkg\leftover.pyd" 'left by an older build'
+          }
+
           "== install (roles app,server)"
           $p = Start-Process build\SSHManager-Setup.exe -Wait -PassThru -ArgumentList `
             '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/ROLES=app,server', "/LOG=$logs\install.log"
           if ($p.ExitCode) { throw "Setup exited with code $($p.ExitCode)" }
           foreach ($f in 'App\SSHManager.exe', 'Cli\sshmgr.exe', 'Server\SSHManagerServer.exe', 'Server\ensure-running.ps1', 'Tools\HiddenRun.exe') {
             if (-not (Test-Path "$dir\$f")) { throw "Missing after install: $f" }
+          }
+          foreach ($pkg in 'httptools', 'websockets') {
+            if (Test-Path "$dir\Server\_internal\$pkg") { throw "An older build's $pkg folder is still there after installing" }
           }
           Copy-Item "$dir\Server\setup.log" $logs -ErrorAction SilentlyContinue
           Get-Content "$dir\Server\setup.log" -ErrorAction SilentlyContinue | Select-String 'WARNING|FAILED|OpenSSH' | ForEach-Object { "setup.log: $_" }

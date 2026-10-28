@@ -78,6 +78,11 @@ SetupLogging=yes
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Check: WantApp
 
+; The server's files are replaced as a whole: a file that only an older build had (a package it no longer
+; includes) would stay behind, and Python would find half a package. PrepareToInstall stops the server first.
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\Server\_internal"; Check: WantServer
+
 [Files]
 ; first, so PrepareToInstall can extract them quickly (solid compression)
 Source: "server-stop.ps1"; DestDir: "{app}\Tools"; Flags: ignoreversion

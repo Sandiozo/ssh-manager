@@ -568,7 +568,10 @@ class Server(uvicorn.Server):
 
 def serve():
     loop = asyncio.SelectorEventLoop if sys.platform == "win32" else "auto"
-    Server(uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning", log_config=None, loop=loop)).run()
+    # protocols named instead of "auto": uvicorn would otherwise pick httptools or websockets whenever a
+    # package of that name can be imported, even a leftover piece of one, and fail on every connection
+    Server(uvicorn.Config(app, host="127.0.0.1", port=PORT, log_level="warning", log_config=None, loop=loop,
+                          http="h11", ws="none")).run()
 
 
 if __name__ == "__main__":

@@ -9,6 +9,11 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - The offline backup release key was replaced with a new one.
 
 ### Fixed
+- An update could leave files of the previous version's server behind; when a package was among them, the
+  server failed to start or dropped every connection, and no PC could connect to it. Updates now replace
+  the server's files completely, and the server no longer picks optional packages up by itself.
+- The "program folder can be changed by NT SERVICE\TrustedInstaller" warning no longer shows: Windows' own
+  installer service is trusted, as intended.
 - All PCs: the Computers table no longer scrolls sideways in a window about 1400 pixels wide; a computer's
   details line shows in full on hover.
 - Activity lists: the type ("POWERSHELL") no longer runs into the computer name.

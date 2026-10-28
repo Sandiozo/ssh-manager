@@ -12,18 +12,63 @@ internal static class Ssh
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
     public static readonly string AppKey = Path.Combine(SshFolder, "id_ed25519_sshmanager");
 
-    /// <summary>Where Setup.cmd installed the server on this computer, if it did.</summary>
+    /// <summary>Where Setup.cmd installed the server on this computer, if it did. The record is only trusted
+    /// when an administrator (or Windows) wrote it: a standard user could otherwise point it elsewhere.</summary>
     public static string? LocalInstallFolder()
     {
         var f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SSHManager", "install-path.txt");
         try
         {
-            var path = File.Exists(f) ? File.ReadAllText(f).Trim() : null;
-            return path is { Length: > 0 } && (File.Exists(Path.Combine(path, "SSHManagerServer.exe")) || File.Exists(Path.Combine(path, "server.py")))
-                ? path : null;
+            if (!File.Exists(f) || !OwnedByAdmins(f)) return null;
+            var path = File.ReadAllText(f).Trim();
+            if (path == "" || path.StartsWith(@"\\") || !Path.IsPathFullyQualified(path)) return null;
+            path = Path.GetFullPath(path);
+            return File.Exists(Path.Combine(path, "SSHManagerServer.exe")) || File.Exists(Path.Combine(path, "server.py")) ? path : null;
         }
         catch (Exception) { return null; }
     }
+
+    /// <summary>The file's owner is Administrators or SYSTEM.</summary>
+    public static bool OwnedByAdmins(string path)
+    {
+        try
+        {
+            var owner = new FileInfo(path).GetAccessControl().GetOwner(typeof(System.Security.Principal.SecurityIdentifier))?.Value;
+            return owner is "S-1-5-32-544" or "S-1-5-18";
+        }
+        catch (Exception) { return false; }
+    }
+
+    /// <summary>A host, alias, computer name or user name that is safe to hand to ssh: no leading '-'
+    /// (it would be read as an option), no spaces or control characters.</summary>
+    public static bool SafeName(string s, bool allowSpaces = false) =>
+        s.Length is > 0 and <= 255 && s[0] != '-'
+        && !s.Any(c => char.IsControl(c) || (!allowSpaces && char.IsWhiteSpace(c)))
+        && !(allowSpaces && (s != s.Trim() || s.Contains('@')));
+
+    /// <summary>A real IPv4/IPv6 address in its normal form, or null.</summary>
+    public static string? CleanIp(string s) =>
+        IPAddress.TryParse(s.Trim(), out var ip) && s.Trim() == ip.ToString() ? ip.ToString() : null;
+
+    /// <summary>ssh.exe / ssh-keygen.exe from Windows' OpenSSH Client; a clear message when it's missing.</summary>
+    public static string Tool(string exe)
+    {
+        var system = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", exe);
+        if (File.Exists(system)) return system;
+        foreach (var dir in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                var p = Path.Combine(dir.Trim().Trim('"'), exe);
+                if (Path.IsPathFullyQualified(p) && File.Exists(p)) return p;
+            }
+            catch (Exception) { }
+        }
+        throw new InvalidOperationException(MissingClient);
+    }
+
+    public const string MissingClient = "Windows' OpenSSH Client isn't installed on this computer. Install it in Settings → System → " +
+                                        "Optional features → Add a feature → \"OpenSSH Client\", then try again.";
 
     /// <summary>Common options for non-interactive use. New host keys are accepted on first contact
     /// (trust on first use) and checked from then on.</summary>
@@ -55,6 +100,7 @@ internal static class Ssh
     public static async Task<(int code, string output)> RunAsync(string exe, IEnumerable<string> args, int timeoutMs = 30000,
         IDictionary<string, string>? env = null)
     {
+        if (exe.StartsWith("ssh", StringComparison.OrdinalIgnoreCase) && !Path.IsPathRooted(exe)) exe = Tool(exe);
         var psi = new ProcessStartInfo(exe)
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
@@ -63,6 +109,7 @@ internal static class Ssh
         foreach (var a in args) psi.ArgumentList.Add(a);
         if (env is not null) foreach (var (k, v) in env) psi.Environment[k] = v;
         using var p = Process.Start(psi)!;
+        ProcessJob.Add(p);
         p.StandardInput.Close();
         var stdout = p.StandardOutput.ReadToEndAsync();
         var stderr = p.StandardError.ReadToEndAsync();
@@ -112,11 +159,51 @@ internal static class Ssh
         return "";
     }
 
+    /// <summary>Lines of known_hosts for this host (with fingerprints), empty when ssh has never seen it.</summary>
+    public static async Task<List<string>> KnownFingerprintsAsync(string host)
+    {
+        var known = Path.Combine(SshFolder, "known_hosts");
+        if (!File.Exists(known)) return [];
+        var (code, output) = await RunAsync("ssh-keygen.exe", ["-l", "-F", host, "-f", known], 10000);
+        if (code != 0) return [];
+        return output.Split('\n').Select(l => l.Trim()).Where(l => l != "" && !l.StartsWith('#'))
+            .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            .Where(p => p.Length >= 3 && p[^1].StartsWith("SHA256:"))
+            .Select(p => $"{p[^2]} {p[^1]}").Distinct().ToList();   // "ED25519 SHA256:…"
+    }
+
+    /// <summary>Forgets a host key (when the user doesn't trust it).</summary>
+    public static Task ForgetHostAsync(string host) =>
+        RunAsync("ssh-keygen.exe", ["-R", host, "-f", Path.Combine(SshFolder, "known_hosts")], 10000);
+
+    /// <summary>Free on both 127.0.0.1 and ::1, so nobody else can answer for "localhost" on that port.</summary>
     public static bool IsPortFree(int port)
     {
         try
         {
             var l = new TcpListener(IPAddress.Loopback, port);
+            l.Start();
+            l.Stop();
+        }
+        catch (SocketException) { return false; }
+        if (!Ipv6Loopback()) return true;
+        try
+        {
+            var l6 = new TcpListener(IPAddress.IPv6Loopback, port);
+            l6.Start();
+            l6.Stop();
+            return true;
+        }
+        catch (SocketException) { return false; }
+    }
+
+    /// <summary>This computer has an IPv6 loopback address (::1) programs can listen on.</summary>
+    public static bool Ipv6Loopback()
+    {
+        if (!Socket.OSSupportsIPv6) return false;
+        try
+        {
+            var l = new TcpListener(IPAddress.IPv6Loopback, 0);
             l.Start();
             l.Stop();
             return true;

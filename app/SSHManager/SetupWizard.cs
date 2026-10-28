@@ -124,6 +124,20 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             Render();
             return;
         }
+        if (alias != "" ? !Ssh.SafeName(alias) || !Ssh.ConfigHosts().Contains(alias) : !Ssh.SafeName(host))
+        {
+            error = "That name or address isn't valid: it can't start with \"-\" or contain spaces.";
+            step = "pick";
+            Render();
+            return;
+        }
+        if (alias == "" && user != "" && !Ssh.SafeName(user, allowSpaces: true))
+        {
+            error = "That user name isn't valid.";
+            step = "pick";
+            Render();
+            return;
+        }
         if (alias == "" && IsThisPc(host))
         {
             error = "That is the PC this app runs on. It is already in the list when SSH Manager's server is installed here.";
@@ -149,12 +163,14 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
                 if (kc != 0) throw new InvalidOperationException("Couldn't create an SSH key:\n" + ko);
             }
             var c = Candidate();
-            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), c.Target, "echo SSHMGR-OK"], 20000);
+            // whether ssh knew this PC before (its first contact below records the host key)
+            if (alias == "" && !hostKeyChecked.Contains(host) && (await Ssh.KnownFingerprintsAsync(host)).Count > 0) hostKeyChecked.Add(host);
+            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), "--", c.Target, "echo SSHMGR-OK"], 20000);
             if (!output.Contains("SSHMGR-OK") && alias == "" && Denied(output))
             {
                 // maybe one of the user's own keys (~/.ssh, ssh config) is already allowed there
                 var own = new PcEntry { Id = c.Id, Host = host, User = user };
-                var (_, output2) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(own), own.Target, "echo SSHMGR-OK"], 20000);
+                var (_, output2) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(own), "--", own.Target, "echo SSHMGR-OK"], 20000);
                 if (output2.Contains("SSHMGR-OK")) (c, output) = (own, output2);
             }
             if (!output.Contains("SSHMGR-OK"))
@@ -234,6 +250,24 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             Render();
             return;
         }
+        if (!Ssh.SafeName(user, allowSpaces: true) || !Ssh.SafeName(host))
+        {
+            error = "That user name or PC name isn't valid.";
+            Render();
+            return;
+        }
+        busy = true;   // no second click while the identity question is open
+        bool trusted;
+        try { trusted = await ConfirmHostKeyAsync(); }
+        catch (Exception e) { error = e.Message; trusted = false; }
+        finally { busy = false; }
+        if (!trusted)
+        {
+            if (error == "") error = $"The password was not sent. Check {host}'s identity first, then try again.";
+            step = "key";
+            Render();
+            return;
+        }
         busy = true;
         error = "";
         step = "working";
@@ -260,7 +294,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             };
             string[] once = ["-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
                              "-o", "PreferredAuthentications=password,keyboard-interactive"];
-            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c, batch: false), .. once, c.Target, Ssh.PowerShell(script)], 30000, env);
+            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c, batch: false), .. once, "--", c.Target, Ssh.PowerShell(script)], 30000, env);
             if (!output.Contains("SSHMGR-KEY-ADDED"))
             {
                 step = "key";
@@ -282,12 +316,52 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
         finally { busy = false; }
     }
 
+    /// <summary>Host names whose key ssh already knew, or whose key the user confirmed in this app.</summary>
+    readonly HashSet<string> hostKeyChecked = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Before a password goes to a PC that ssh met for the first time just now (its key was accepted
+    /// on that first contact), the user compares its host key fingerprint: a wrong one means another computer
+    /// answers under that name and would receive the password.</summary>
+    async Task<bool> ConfirmHostKeyAsync()
+    {
+        error = "";
+        if (hostKeyChecked.Contains(host)) return true;
+        var fingerprints = await Ssh.KnownFingerprintsAsync(host);
+        if (fingerprints.Count == 0)
+        {
+            // not met yet (e.g. the first try timed out): one contact without a password records the key
+            var probe = new PcEntry { Host = host, User = user };
+            await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(probe), "-o", "PreferredAuthentications=none", "--", probe.Target, "exit"], 20000);
+            fingerprints = await Ssh.KnownFingerprintsAsync(host);
+        }
+        if (fingerprints.Count == 0)
+        {
+            error = $"Couldn't read {host}'s identity (host key), so the password was not sent.";
+            return false;
+        }
+        var owner = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
+        var answer = MessageBox.Show(owner,
+            $"This is the first time this computer connects to {host}. Before your password is sent, make sure it is really that PC.\n\n" +
+            $"{host} identifies itself with:\n{string.Join("\n", fingerprints)}\n\n" +
+            $"On {host}, run this in PowerShell to see its fingerprints:\n" +
+            "Get-ChildItem $env:ProgramData\\ssh\\ssh_host_*_key.pub | ForEach-Object { ssh-keygen -lf $_ }\n\n" +
+            "Send the password only if one of them matches. (On your own home network this is usually fine.)",
+            "SSH Manager: check the PC's identity", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
+        if (answer != DialogResult.Yes)
+        {
+            await Ssh.ForgetHostAsync(host);   // not trusted: asked again next time
+            return false;
+        }
+        hostKeyChecked.Add(host);
+        return true;
+    }
+
     async Task FinishAsync(PcEntry c)
     {
         working = "Checking SSH Manager on the PC…";
         Render();
         var check = Ssh.PowerShell("if (Test-Path (Join-Path $env:ProgramData 'SSHManager\\install-path.txt')) { 'SSHMGR-INSTALLED' } else { 'SSHMGR-MISSING' }");
-        var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), c.Target, check], 20000);
+        var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), "--", c.Target, check], 20000);
         if (!output.Contains("SSHMGR-INSTALLED"))
             throw new InvalidOperationException($"This computer can sign in to {c.Host}, but SSH Manager's server isn't installed there. " +
                 $"Install SSH Manager on {c.Host}, choose \"Client and server\", then click Add PC again.");

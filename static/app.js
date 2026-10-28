@@ -514,6 +514,8 @@ const xfer = {
     }
     const finished = !pending.length;
     const failed = b.filter(t => t.status === "error").length;
+    // the app keeps a hidden page running while it transfers files
+    if (this.busy !== !finished) { this.busy = !finished; toHost("busy", { busy: this.busy }); }
     $("#flow-up").classList.toggle("on", active.some(t => t.dir === "up"));
     $("#flow-down").classList.toggle("on", active.some(t => t.dir === "down"));
     $("#done-mark").className = "done-mark" + (finished ? " on" + (failed ? " bad" : "") : "");
@@ -855,7 +857,7 @@ $("#set-autoupdate").onchange = e => { settingsUi.draft.auto_update = e.target.c
 // ---------- PC switcher (inside the app) ----------
 hostHandlers.pcs = m => {
   $("#pc-section").hidden = false;
-  appPcs = m.pcs; fillSyncPcs();
+  appPcs = m.pcs; appCurrent = m.current; fillSyncPcs();
   const state = p => p.state === "Connected" ? "ok" : p.state === "Connecting" ? "warn" : "bad";
   // the Screen page would show the screen this app runs on: hide it for this PC
   const own = m.current === "local";
@@ -1097,14 +1099,14 @@ $("#scr-now").onclick = async () => { await screenUi.loadSources(); screenUi.tic
 $("#scr-fit").onchange = e => $("#scr-wrap").classList.toggle("fit", e.target.checked);
 
 // ---------- Folder sync (runs in the app; this page shows and edits it) ----------
-let appPcs = [];
+let appPcs = [], appCurrent = "";
 const modeArrow = { "to-pc": "→", "from-pc": "←", "two-way": "⇄" };
 hostHandlers["sync-state"] = m => {
   $("#sync-list").innerHTML = m.pairs.length ? m.pairs.map(p => `<div class="sync-row">
       ${dot(!p.enabled ? "" : p.state === "error" ? "bad" : p.state === "syncing" ? "warn" : "ok")}
       <span class="p" title="${esc(p.local)}">${esc(p.local)}</span><span class="arrow">${modeArrow[p.mode] || "→"}</span>
       <span class="p" title="${esc(p.pcName)}: ${esc(p.remote)}">${esc(p.pcName)}: ${esc(p.remote)}</span>
-      <span class="st" title="${esc(p.message || "")}">${p.enabled ? esc(p.message || "") : "paused"}</span>
+      <span class="st" title="${esc(p.message || "")}">${p.removed ? "PC removed from the app" : p.enabled ? esc(p.message || "") : "paused"}</span>
       <span class="btns"><button class="icon" data-sync="now" data-id="${p.id}" title="Sync now">⟳</button>
         <button class="icon" data-sync="toggle" data-id="${p.id}" title="${p.enabled ? "Pause" : "Resume"}">${p.enabled ? "❚❚" : "▶"}</button>
         <button class="icon" data-sync="remove" data-id="${p.id}" title="Remove">✕</button></span></div>`).join("")
@@ -1128,6 +1130,8 @@ function fillSyncPcs() {
   const sel = $("#sync-pc"), keep = sel.value;
   sel.innerHTML = appPcs.filter(p => p.id !== "local").map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
   if (keep) sel.value = keep;
+  // a PC's page can only add folder pairs for that PC
+  if (appPcs.some(p => p.id === appCurrent && p.id !== "local")) { sel.value = appCurrent; sel.disabled = true; }
   if (!$("#sync-remote").value && files.path) $("#sync-remote").placeholder = files.path;
 }
 

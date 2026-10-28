@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Net.NetworkInformation;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
@@ -307,17 +306,8 @@ internal sealed class MainForm : Form
 
     object ThemeMessage() => new { type = "theme", theme = darkNow ? "dark" : "light", setting = settings.Theme };
 
-    /// <summary>Ui.Theme (the theme of pages drawn from now on), when this build's Ui has it.</summary>
-    static void SetUiTheme(string theme)
-    {
-        try
-        {
-            const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-            if (typeof(Ui).GetProperty("Theme", flags) is { CanWrite: true } p) p.SetValue(null, theme);
-            else typeof(Ui).GetField("Theme", flags)?.SetValue(null, theme);
-        }
-        catch (Exception e) { AppLog.Write("Setting the page theme", e); }
-    }
+    /// <summary>The theme of pages the app draws from now on.</summary>
+    static void SetUiTheme(string theme) => Ui.Theme = theme;
 
     void OnUserPreferenceChanged(object? sender, UserPreferenceChangedEventArgs e) => OnUi(() =>
     {
@@ -1310,11 +1300,7 @@ internal sealed class MainForm : Form
     void OpenAppSettings()
     {
         if (!webReady) return;
-        const BindingFlags flags = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static;
-        string? html;
-        try { html = typeof(Ui).GetMethod("AppSettingsPage", flags, Type.EmptyTypes)?.Invoke(null, null) as string; }
-        catch (Exception e) { AppLog.Write("Drawing the app settings page", e); return; }
-        if (html is null) return;   // this build has no settings page
+        var html = Ui.AppSettingsPage();
         wizardOpen = false;
         appSettingsOpen = true;
         Text = "SSH Manager · App settings";

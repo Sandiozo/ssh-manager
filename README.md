@@ -329,7 +329,8 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
   [Use with AI agents](#use-with-ai-agents) for what this does and doesn't protect against.
 - Passwords typed when adding a PC are handed to `ssh` once and never stored.
 - Updates are downloaded from this repository's GitHub releases and installed only when both their SHA-256
-  and their release signature (an SSH signature made with this project's release key) check out. The
+  and their release signature (an SSH signature made with this project's release key, or with a backup key
+  kept offline) check out. The
   server keeps downloaded installers in a folder only administrators can change.
 
 Found a security problem? Please report it privately, see [SECURITY.md](SECURITY.md).

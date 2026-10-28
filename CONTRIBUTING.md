@@ -41,8 +41,9 @@ Thanks for helping! Bug reports, ideas and pull requests are all welcome.
 
 ## Releases
 
-The version lives in `sshmgr/__init__.py`. Pushing a tag `vX.Y.Z` that matches it builds the installer
-with GitHub Actions and publishes a release, using that version's section of
-[CHANGELOG.md](CHANGELOG.md) as the release notes.
+The version lives in `sshmgr/__init__.py`. Pushing a tag `vX.Y.Z` that matches it builds, tests and
+signs the installer with GitHub Actions (after the maintainer approves the run) and creates a draft release,
+using that version's section of [CHANGELOG.md](CHANGELOG.md) as the release notes. The maintainer checks the
+installer (for example with Microsoft Defender) and then publishes the draft.
 
 By contributing you agree that your contributions are licensed under the [MIT license](LICENSE).

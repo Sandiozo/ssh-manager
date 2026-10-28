@@ -151,7 +151,8 @@ function renderStatus(s) {
     : u.available ? `<div class="alert update"><span><b>SSH Manager ${esc(u.latest)} is available</b> on ${esc(s.host.name)} (it has ${esc(u.current)}).
         ${u.installable ? "" : "This copy runs from source: update it with <code>git pull</code>."}</span>
         ${u.installable ? `<button class="primary" data-update-now>Install now</button>` : ""}</div>` : "";
-  $("#notice").innerHTML = upd + (s.elevated ? "" : `<div class="alert warnish"><b>Running without admin rights.</b>
+  const sec = [...(s.security?.warnings || []), ...(s.config_problem ? [s.config_problem] : [])];
+  $("#notice").innerHTML = upd + sec.map(w => `<div class="alert warnish">${esc(w)}</div>`).join("") + (s.elevated ? "" : `<div class="alert warnish"><b>Running without admin rights.</b>
     SSH commands from an admin account run elevated, so their contents show as "hidden", and SSH keys can't be managed,
     until SSH Manager runs as admin. Reinstall SSH Manager on this PC as "Client and server" to fix it.</div>`);
 
@@ -294,7 +295,7 @@ async function pollStatus() {
 }
 
 // ---------- activity ----------
-let actItems = [], actAfter = 0, actKind = "", actQuery = "", actShown = false;
+let actItems = [], actAfter = 0, actKind = "", actQuery = "", actShown = false, actLogId = null;
 function actLabel(a) {
   if (a.kind === "command") return { kind: a.type, text: a.summary };
   if (a.kind === "action") return { kind: "run", text: `${a.title}${a.status && a.status !== "done" ? ` (${a.status})` : ""}` };
@@ -306,8 +307,10 @@ function actLabel(a) {
     return { kind: "setup", text: t };
   }
   const p = a.path || (a.paths || []).join(", ");
-  const verbs = { upload: "Received", download: "Sent", "download-zip": "Sent (zip)", mkdir: "Created folder", rename: "Renamed", delete: "Deleted" };
-  return { kind: "file", text: `${verbs[a.action] || a.action} ${p}${a.to ? " → " + a.to : ""}${a.size != null ? " (" + fmtBytes(a.size) + ")" : ""}` };
+  const verbs = { upload: "Received", download: "Sent", "download-zip": "Sent (zip)", mkdir: "Created folder", rename: "Renamed",
+    delete: a.permanent ? "Deleted permanently" : "Deleted" };
+  const skipped = a.action === "download-zip" && a.skipped ? ` · ${a.skipped} file${a.skipped === 1 ? "" : "s"} not included` : "";
+  return { kind: "file", text: `${verbs[a.action] || a.action} ${p}${a.to ? " → " + a.to : ""}${a.size != null ? " (" + fmtBytes(a.size) + ")" : ""}${skipped}` };
 }
 function actRow(a) {
   const l = actLabel(a);
@@ -324,7 +327,14 @@ function renderActivity() {
 }
 async function pollActivity() {
   try {
-    const { items } = await api(`/api/activity?after=${actAfter}&limit=2000`);
+    let r = await api(`/api/activity?after=${actAfter}&limit=2000`);
+    // the log was reset or replaced on the PC: start over
+    if (r.log_id != null && (actLogId != null && r.log_id !== actLogId || r.last_id < actAfter)) {
+      actItems = []; actAfter = 0; actShown = false;
+      r = await api(`/api/activity?after=0&limit=2000`);
+    }
+    if (r.log_id != null) actLogId = r.log_id;
+    const { items } = r;
     if (items.length) { actItems.push(...items); actAfter = items.at(-1).id; actItems = actItems.slice(-3000); }
     if (items.length || !actShown) { actShown = true; renderActivity(); }
   } catch { }
@@ -467,8 +477,13 @@ $("#fs-rename").onclick = async () => {
 };
 $("#fs-delete").onclick = async () => {
   const paths = [...files.sel];
-  if (!confirm(`Move ${paths.length} item(s) to the Recycle Bin on ${hostName || "the PC"}?\n\n` + paths.map(baseName).join("\n"))) return;
-  try { await api("/api/fs/delete", { method: "POST", json: { paths } }); toast("Moved to Recycle Bin"); files.open(files.path); }
+  if (!confirm(`Delete ${paths.length} item(s) on ${hostName || "the PC"}? They go to the Recycle Bin where the drive has one.\n\n` + paths.map(baseName).join("\n"))) return;
+  try {
+    const r = await api("/api/fs/delete", { method: "POST", json: { paths } });
+    const gone = r?.permanent?.length || 0;
+    toast(gone ? `Deleted permanently (no Recycle Bin on that drive): ${gone}` : "Moved to Recycle Bin");
+    files.open(files.path);
+  }
   catch (e) { toast(e.message, true); }
 };
 document.addEventListener("keydown", e => {

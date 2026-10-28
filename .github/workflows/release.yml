@@ -38,6 +38,8 @@ env:
   ALLOWED_SIGNERS: |
     sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r
     sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc
+  # built from source, see "Install build tools"
+  PYINSTALLER_VERSION: "6.22.3"
 
 jobs:
   build:
@@ -76,7 +78,23 @@ jobs:
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
+          python -m pip install -r requirements.txt
+          # PyInstaller with a launcher (bootloader) compiled here instead of the prebuilt one in its wheel:
+          # the prebuilt launcher is shared with a lot of malware, which makes antivirus guess wrong
+          python -m pip download --no-binary :all: --no-deps "pyinstaller==$env:PYINSTALLER_VERSION" -d $env:RUNNER_TEMP
+          if ($LASTEXITCODE) { throw "Downloading PyInstaller's source failed" }
+          tar -xzf "$env:RUNNER_TEMP/pyinstaller-$env:PYINSTALLER_VERSION.tar.gz" -C $env:RUNNER_TEMP
+          $src = "$env:RUNNER_TEMP/pyinstaller-$env:PYINSTALLER_VERSION"
+          Push-Location "$src/bootloader"
+          python ./waf all --target-arch=64bit
+          if ($LASTEXITCODE) { throw "Compiling PyInstaller's launcher failed" }
+          Pop-Location
+          python -m pip install $src
+          if ($LASTEXITCODE) { throw "Installing PyInstaller failed" }
+          $built = (Get-FileHash "$src/PyInstaller/bootloader/Windows-64bit-intel/run.exe").Hash
+          $used = python -c "import PyInstaller, pathlib; print(pathlib.Path(PyInstaller.__file__).parent / 'bootloader/Windows-64bit-intel/run.exe')"
+          if ((Get-FileHash $used).Hash -ne $built) { throw "PyInstaller isn't using the launcher compiled here" }
+          "PyInstaller $env:PYINSTALLER_VERSION with its launcher compiled here"
           # the installer script needs Inno Setup 6.5 or newer
           choco upgrade innosetup -y --no-progress
           if ($LASTEXITCODE) { throw "Installing Inno Setup failed" }

@@ -8,7 +8,7 @@ internal static class LocalStats
 {
     static long lastIdle, lastTotal;
 
-    public static object Collect()
+    public static object Collect(string machineId = "")
     {
         var mem = new MemoryStatus { Length = (uint)Marshal.SizeOf<MemoryStatus>() };
         GlobalMemoryStatusEx(ref mem);
@@ -17,6 +17,7 @@ internal static class LocalStats
         return new
         {
             machine = Environment.MachineName,
+            machine_id = machineId,   // tells two computers with the same name apart
             user = Environment.UserName,
             features = new[] { "pair" },   // this app can approve pairing requests (see Pairing.cs)
             cpu = CpuPercent(),

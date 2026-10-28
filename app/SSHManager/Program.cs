@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 
 namespace SSHManager;
 
@@ -16,14 +17,29 @@ internal static class Program
             return;
         }
 
-        // One copy per user: a second launch just brings the existing window forward.
-        using var mutex = new Mutex(true, @"Local\SSHManager.App", out var first);
+        // One copy per Windows user, also across sign-ins (console + remote desktop): a second launch in
+        // the same session brings the existing window forward; one in another session says where it runs.
+        var sid = WindowsIdentity.GetCurrent().User?.Value ?? Environment.UserName;
+        using var mutex = new Mutex(true, @"Global\SSHManager.App." + sid, out var first);
+        using var sessionMutex = new Mutex(true, @"Local\SSHManager.App", out var firstHere);
         using var showSignal = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SSHManager.Show");
         if (!first)
         {
-            showSignal.Set();
+            if (!firstHere) showSignal.Set();
+            else MessageBox.Show("SSH Manager is already running in another Windows sign-in of yours (for example a remote desktop session). " +
+                                 "Close it there first.", "SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+
+        // Nothing the app does should end in an error dialog or a silent exit: log and carry on.
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        Application.ThreadException += (_, e) => AppLog.Write("Unhandled error on the window thread", e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => AppLog.Write("Unhandled error" + (e.IsTerminating ? " (closing)" : ""), e.ExceptionObject as Exception);
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            AppLog.Write("Unobserved task error", e.Exception);
+            e.SetObserved();
+        };
 
         // Lets Windows start the app again after the installer closed it for an update.
         RegisterApplicationRestart(null, 0);

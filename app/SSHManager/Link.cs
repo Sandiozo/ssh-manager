@@ -17,34 +17,56 @@ internal sealed partial class Link : IDisposable
 {
     public static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(5) };
 
+    /// <summary>Runs ensure-running.ps1 from where the installer recorded it, but only when that record
+    /// was written by an administrator and points into Program Files (or a source checkout of the server):
+    /// a standard user could otherwise plant a record that makes an administrator's SSH login run their script.</summary>
     const string RemoteScript = """
         $f = Join-Path $env:ProgramData 'SSHManager\install-path.txt'
         if (-not (Test-Path $f)) { 'SSHMGR-ERROR:SSH Manager is not installed on this PC yet. Install it there and choose "Let other PCs manage this PC".'; exit 3 }
-        & (Join-Path (Get-Content $f -Raw).Trim() 'ensure-running.ps1')
+        $owner = try { (Get-Acl $f).GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { '' }
+        if ($owner -notin 'S-1-5-32-544', 'S-1-5-18') { 'SSHMGR-ERROR:SSH Manager''s install record on this PC (' + $f + ') was not written by an administrator, so it is not used. Reinstall SSH Manager on this PC.'; exit 4 }
+        $dir = (Get-Content $f -Raw).Trim()
+        $ok = $dir -and -not $dir.StartsWith('\\') -and [IO.Path]::IsPathRooted($dir)
+        if ($ok) {
+            $dir = [IO.Path]::GetFullPath($dir).TrimEnd('\')
+            $pf = @($env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') + '\' }
+            $ok = [bool]($pf | Where-Object { ($dir + '\').StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) -or (Test-Path (Join-Path $dir 'server.py'))
+        }
+        if (-not $ok) { 'SSHMGR-ERROR:SSH Manager''s install record on this PC points to an unexpected folder (' + $dir + '). Reinstall SSH Manager on this PC.'; exit 4 }
+        & (Join-Path $dir 'ensure-running.ps1')
         """;
 
     readonly Action save;
     readonly int preferredPort;
     readonly CancellationTokenSource stop = new();
     readonly SemaphoreSlim retryNow = new(0);
+    readonly object sshLock = new();
     Process? ssh;
     readonly List<string> sshOutput = [];
-    string? remoteToken, remoteError, remoteVersion;
-    int? remotePort;
+    volatile string? remoteToken, remoteError, remoteVersion, remoteAppSecret;
+    int remotePortValue = -1;
+    int? RemotePortSeen => Volatile.Read(ref remotePortValue) is var p && p >= 0 ? p : null;
+    volatile bool resetBackoff;
 
     public PcEntry Pc { get; }
     public event Action<Link, LinkState, string>? Changed;
     public LinkState State { get; private set; } = LinkState.Connecting;
     public string Message { get; private set; } = "";
+    /// <summary>The local port the app uses for this PC (assigned once, kept while the app runs).</summary>
+    public int PreferredPort => preferredPort;
     public int Port { get; private set; }
     public string Token { get; private set; } = "";
+    /// <summary>Secret that proves a request comes from the app itself (not a page, not an agent): sent only
+    /// when answering approvals and pairing requests. Empty for servers that don't print one.</summary>
+    public string AppSecret { get; private set; } = "";
     public string Version { get; private set; } = "";
+    /// <summary>The Windows computer name the PC's server reports (empty for older servers).</summary>
+    public string Computer { get; private set; } = "";
     public string Url => $"http://localhost:{Port}/";
     /// <summary>Latest /api/status from this PC (refreshed by the main window).</summary>
     public JsonElement? Status { get; set; }
-    /// <summary>Shared clipboard: the PC's clipboard change counter we've seen, and the text last exchanged.</summary>
+    /// <summary>Shared clipboard: the PC's clipboard change counter we've seen.</summary>
     public int ClipSeq { get; set; } = -1;
-    public string? ClipText { get; set; }
 
     public Link(PcEntry pc, int preferredPort, Action save)
     {
@@ -57,8 +79,9 @@ internal sealed partial class Link : IDisposable
     public void Start() => _ = Task.Run(() => RunAsync(stop.Token));
 
     /// <summary>Drop the current connection (if any) and connect again right away.</summary>
-    public void Reconnect()
+    public void Reconnect(bool resetBackoff = false)
     {
+        if (resetBackoff) this.resetBackoff = true;
         KillSsh();
         retryNow.Release();
     }
@@ -67,7 +90,8 @@ internal sealed partial class Link : IDisposable
     {
         State = state;
         Message = message;
-        Changed?.Invoke(this, state, message);
+        try { Changed?.Invoke(this, state, message); }
+        catch (Exception e) { AppLog.Write("Link change handler", e); }
     }
 
     async Task RunAsync(CancellationToken ct)
@@ -75,14 +99,16 @@ internal sealed partial class Link : IDisposable
         var attempt = 0;
         while (!ct.IsCancellationRequested)
         {
+            if (resetBackoff) { resetBackoff = false; attempt = 0; }
             Set(LinkState.Connecting, attempt == 0 ? $"Connecting to {Pc.DisplayName}…" : $"Reconnecting to {Pc.DisplayName} (attempt {attempt + 1})…");
             string reason;
             try
             {
                 reason = await (Pc.IsLocal ? RunLocalAsync(ct) : RunTunnelAsync(ct, () => attempt = 0, lookup: attempt % 2 == 0));
             }
-            catch (OperationCanceledException) { break; }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
             catch (Exception e) { reason = e.Message; }
+            finally { KillSsh(); }
             if (ct.IsCancellationRequested) break;
             if (reason == "") { attempt = 0; continue; }   // reconnect immediately (e.g. learned the server's port)
 
@@ -90,14 +116,17 @@ internal sealed partial class Link : IDisposable
             Set(LinkState.Disconnected, reason);
             while (retryNow.CurrentCount > 0) retryNow.Wait(0);
             try { await retryNow.WaitAsync(TimeSpan.FromSeconds(Math.Min(30, 2 * attempt)), ct); } catch (OperationCanceledException) { break; }
+            if (resetBackoff) { resetBackoff = false; attempt = 0; }
         }
     }
 
+    // The server and the port forward listen on 127.0.0.1 only; asking "localhost" could reach whatever
+    // someone else has listening on [::1] with the same port.
     static async Task<bool> AliveAsync(int port, CancellationToken ct)
     {
         try
         {
-            using var r = await Http.GetAsync($"http://localhost:{port}/api/ping", ct);
+            using var r = await Http.GetAsync($"http://127.0.0.1:{port}/api/ping", ct);
             return r.StatusCode == HttpStatusCode.OK;
         }
         catch (Exception) when (!ct.IsCancellationRequested) { return false; }
@@ -106,9 +135,18 @@ internal sealed partial class Link : IDisposable
     /// <summary>A request to this PC's server with the access token.</summary>
     public HttpRequestMessage Request(HttpMethod method, string path, HttpContent? body = null)
     {
-        var req = new HttpRequestMessage(method, $"http://localhost:{Port}{path}") { Content = body };
+        var req = new HttpRequestMessage(method, $"http://127.0.0.1:{Port}{path}") { Content = body };
         req.Headers.Add("X-SSHMgr-Token", Token);
         req.Headers.Add("X-SSHMgr", "1");
+        return req;
+    }
+
+    /// <summary>A request only the app itself may make (answering approvals and pairing requests): also
+    /// carries the app secret when this PC's server has one.</summary>
+    public HttpRequestMessage AppRequest(HttpMethod method, string path, HttpContent? body = null)
+    {
+        var req = Request(method, path, body);
+        if (AppSecret != "") req.Headers.Add("X-SSHMgr-App", AppSecret);
         return req;
     }
 
@@ -121,18 +159,25 @@ internal sealed partial class Link : IDisposable
             if (r.StatusCode != HttpStatusCode.OK) return false;
             using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync(ct));
             var root = doc.RootElement;
-            var name = root.GetProperty("host").GetString() ?? "";
-            Version = root.TryGetProperty("version", out var v) ? v.GetString() ?? "" : remoteVersion ?? "";
+            string S(string n) => root.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
+            var name = S("host");
+            Version = root.TryGetProperty("version", out var vv) && vv.ValueKind == JsonValueKind.String ? vv.GetString() ?? "" : remoteVersion ?? "";
             var mac = root.TryGetProperty("mac", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() ?? "" : Pc.Mac;
+            // only real addresses: they end up in ssh's command line and in Wake-on-LAN packets
             var ips = root.TryGetProperty("ips", out var i) && i.ValueKind == JsonValueKind.Array
-                ? i.EnumerateArray().Select(x => x.GetString() ?? "").Where(x => x != "").ToList() : Pc.Ips;
+                ? i.EnumerateArray().Where(x => x.ValueKind == JsonValueKind.String).Select(x => Ssh.CleanIp(x.GetString() ?? ""))
+                    .OfType<string>().Distinct().ToList()
+                : Pc.Ips;
             // a PC added by its IP address: remember its computer name too, so it is still found when the
             // router gives it another address, and keep the saved address up to date
-            var computer = root.TryGetProperty("computer", out var cn) && cn.ValueKind == JsonValueKind.String ? cn.GetString() ?? "" : "";
+            var computer = S("computer");
+            if (!Ssh.SafeName(computer)) computer = "";
+            Computer = computer;
             var byAddress = IPAddress.TryParse(Pc.Host, out _);
             var lookupName = byAddress && computer != "" ? computer : Pc.LookupName;
             var host = byAddress && ips.Count > 0 && !ips.Contains(Pc.Host)
                 ? (Ssh.Resolve(lookupName) is { } now && ips.Contains(now) ? now : ips[0]) : Pc.Host;
+            if (name.Length > 64 || name.Any(char.IsControl)) name = "";
             if ((name != "" && name != Pc.PcName) || mac != Pc.Mac || !ips.SequenceEqual(Pc.Ips) || lookupName != Pc.LookupName || host != Pc.Host)
             {
                 if (name != "") Pc.PcName = name;
@@ -159,6 +204,12 @@ internal sealed partial class Link : IDisposable
         }
     }
 
+    void ClearRemote()
+    {
+        remoteToken = remoteError = remoteVersion = remoteAppSecret = null;
+        Volatile.Write(ref remotePortValue, -1);
+    }
+
     async Task<string> RunLocalAsync(CancellationToken ct)
     {
         var folder = Ssh.LocalInstallFolder();
@@ -167,15 +218,15 @@ internal sealed partial class Link : IDisposable
         var (code, output) = File.Exists(exe)
             ? await Ssh.RunAsync(exe, ["--client-info"], 20000)
             : await Ssh.RunAsync(Path.Combine(folder, @".venv\Scripts\python.exe"), [Path.Combine(folder, "server.py"), "--client-info"], 20000);
-        remoteToken = remoteError = remoteVersion = null;
-        remotePort = null;
+        ClearRemote();
         foreach (var line in output.Split('\n')) Keep(line, store: false);
-        if (code != 0 || remoteToken is null || remotePort is null)
+        if (code != 0 || remoteToken is null || RemotePortSeen is null)
             return "Couldn't read SSH Manager's settings on this PC:\n\n" + output.Trim();
-        Port = remotePort.Value;
-        Token = remoteToken;
+        Port = RemotePortSeen.Value;
         if (!await AliveAsync(Port, ct))
         {
+            // nobody may be listening on the port before the server: check again once it's up
+            if (PortOwner.CheckServer(Port, folder, nothingIsOk: true) is { } squatted) return squatted;
             StartLocalServer(folder);
             var deadline = DateTime.UtcNow.AddSeconds(30);
             while (!await AliveAsync(Port, ct))
@@ -184,10 +235,16 @@ internal sealed partial class Link : IDisposable
                 await Task.Delay(500, ct);
             }
         }
+        // the token goes only to the real server
+        if (PortOwner.CheckServer(Port, folder) is { } wrong) return wrong;
+        Token = remoteToken ?? "";
+        AppSecret = remoteAppSecret ?? "";
         await LearnNameAsync(ct);
         Set(LinkState.Connected, "Connected (this PC)");
-        await WatchAsync(Port, null, ct);
-        return "SSH Manager's server on this PC stopped answering.";
+        string? taken = null;
+        // also notice someone else taking the port over while the server is restarting
+        await WatchAsync(Port, () => (taken = PortOwner.CheckServer(Port, folder, nothingIsOk: true)) is not null, ct);
+        return taken ?? "SSH Manager's server on this PC stopped answering.";
     }
 
     static void StartLocalServer(string folder)
@@ -215,63 +272,70 @@ internal sealed partial class Link : IDisposable
     /// address. Attempts alternate, so a stale address or a failed lookup never locks the PC out.</param>
     async Task<string> RunTunnelAsync(CancellationToken ct, Action connected, bool lookup)
     {
+        if (!Ssh.SafeName(Pc.Host.Trim()) || (Pc.User.Trim() != "" && !Ssh.SafeName(Pc.User.Trim(), allowSpaces: true)))
+            return $"The address or user name saved for {Pc.DisplayName} isn't valid. Use Change connection to fix it.";
         Port = Ssh.IsPortFree(preferredPort) ? preferredPort : Ssh.FreePort();
         StartSsh(lookup);
+        ct.ThrowIfCancellationRequested();   // removed while ssh was starting: finally in RunAsync kills it
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (true)
         {
-            if (remoteError is not null)
-            {
-                KillSsh();
-                return remoteError;
-            }
-            if (remotePort is { } rp && rp != Pc.RemotePort)
+            if (remoteError is { } err) return err;
+            if (RemotePortSeen is { } rp && rp != Pc.RemotePort)
             {
                 // the server uses another port than we forwarded to: remember it and start over
                 Pc.RemotePort = rp;
                 save();
-                KillSsh();
                 return "";
             }
             if (remoteToken is not null && await AliveAsync(Port, ct)) break;
-            if (ssh is null || ssh.HasExited) return DescribeSshFailure();
-            if (DateTime.UtcNow > deadline)
-            {
-                KillSsh();
-                return $"Connected over SSH, but SSH Manager on {Pc.DisplayName} did not answer.";
-            }
+            if (SshExited()) return DescribeSshFailure();
+            if (DateTime.UtcNow > deadline) return $"Connected over SSH, but SSH Manager on {Pc.DisplayName} did not answer.";
             await Task.Delay(300, ct);
         }
         Token = remoteToken!;
-        if (!await LearnNameAsync(ct))
-        {
-            KillSsh();
-            return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
-        }
+        AppSecret = remoteAppSecret ?? "";
+        if (!await LearnNameAsync(ct)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
         Set(LinkState.Connected, "Connected over SSH");
         connected();
-        var proc = ssh;
-        await WatchAsync(Port, () => proc is null || proc.HasExited, ct);
-        var why = proc is { HasExited: true } ? DescribeSshFailure() : $"{Pc.DisplayName} stopped answering.";
-        KillSsh();
-        return why;
+        Process? proc;
+        lock (sshLock) proc = ssh;
+        await WatchAsync(Port, () => proc is null || Exited(proc), ct);
+        return proc is not null && Exited(proc) ? DescribeSshFailure() : $"{Pc.DisplayName} stopped answering.";
+    }
+
+    static bool Exited(Process p)
+    {
+        try { return p.HasExited; } catch (Exception) { return true; }
+    }
+
+    bool SshExited()
+    {
+        lock (sshLock) return ssh is null || Exited(ssh);
     }
 
     void StartSsh(bool lookup = true)
     {
         KillSsh();
         lock (sshOutput) sshOutput.Clear();
-        remoteToken = remoteError = remoteVersion = null;
-        remotePort = null;
-        var psi = new ProcessStartInfo("ssh.exe")
+        ClearRemote();
+        var psi = new ProcessStartInfo(Ssh.Tool("ssh.exe"))
         {
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
         };
         foreach (var a in Ssh.Options(Pc, lookup: lookup)) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
-                                  "-L", $"{Port}:127.0.0.1:{Pc.RemotePort}", Pc.Target, Ssh.PowerShell(RemoteScript) })
+                                  "-L", $"127.0.0.1:{Port}:127.0.0.1:{Pc.RemotePort}" })
             psi.ArgumentList.Add(a);
+        // the page view opens http://localhost:port/, which may go to [::1]: hold that address too, so no
+        // other program can listen there and receive the page's token cookie
+        if (Ssh.Ipv6Loopback())
+        {
+            psi.ArgumentList.Add("-L");
+            psi.ArgumentList.Add($"[::1]:{Port}:127.0.0.1:{Pc.RemotePort}");
+        }
+        foreach (var a in new[] { "--", Pc.Target, Ssh.PowerShell(RemoteScript) }) psi.ArgumentList.Add(a);
 
         var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
         p.OutputDataReceived += (_, e) => Keep(e.Data, store: true);
@@ -280,7 +344,12 @@ internal sealed partial class Link : IDisposable
         ProcessJob.Add(p);   // ends with the app, even if the app is killed
         p.BeginOutputReadLine();
         p.BeginErrorReadLine();
-        ssh = p;
+        lock (sshLock)
+        {
+            var old = ssh;
+            ssh = p;
+            if (old is not null) Kill(old);
+        }
     }
 
     void Keep(string? line, bool store)
@@ -292,8 +361,11 @@ internal sealed partial class Link : IDisposable
             switch (m.Groups[1].Value)
             {
                 case "TOKEN": remoteToken = m.Groups[2].Value; break;
+                case "APPSECRET": remoteAppSecret = m.Groups[2].Value; break;
                 case "VERSION": remoteVersion = m.Groups[2].Value; break;
-                case "PORT" when int.TryParse(m.Groups[2].Value, out var port): remotePort = port; break;
+                case "PORT" when int.TryParse(m.Groups[2].Value, out var port) && port is > 0 and < 65536:
+                    Volatile.Write(ref remotePortValue, port);
+                    break;
                 case "ERROR": remoteError = m.Groups[2].Value; break;
             }
             return;   // never keep the token in the error text
@@ -306,7 +378,7 @@ internal sealed partial class Link : IDisposable
         }
     }
 
-    [GeneratedRegex("^SSHMGR-(TOKEN|PORT|ERROR|VERSION):(.*)$")]
+    [GeneratedRegex("^SSHMGR-(TOKEN|APPSECRET|PORT|ERROR|VERSION):(.*)$")]
     private static partial Regex InfoLine();
 
     string DescribeSshFailure()
@@ -320,11 +392,19 @@ internal sealed partial class Link : IDisposable
 
     void KillSsh()
     {
-        var p = ssh;
-        ssh = null;
-        if (p is null) return;
+        Process? p;
+        lock (sshLock)
+        {
+            p = ssh;
+            ssh = null;
+        }
+        if (p is not null) Kill(p);
+    }
+
+    static void Kill(Process p)
+    {
         try { if (!p.HasExited) p.Kill(true); } catch (Exception) { }
-        p.Dispose();
+        try { p.Dispose(); } catch (Exception) { }
     }
 
     public void Dispose()

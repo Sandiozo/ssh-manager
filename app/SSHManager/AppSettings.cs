@@ -53,6 +53,10 @@ internal sealed class AppSettings
     public bool AskWhereToSave { get; set; }
     public bool ShareClipboard { get; set; }
     public List<SyncPair> Syncs { get; set; } = [];
+    /// <summary>"system" (follow Windows), "light" or "dark".</summary>
+    public string Theme { get; set; } = "system";
+    /// <summary>Identifies this app among computers with the same name (pairing and approvals).</summary>
+    public string MachineId { get; set; } = "";
 
     public int[]? WindowBounds { get; set; }
     public bool Maximized { get; set; }
@@ -77,30 +81,65 @@ internal sealed class AppSettings
     [JsonPropertyName("RemotePort"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? LegacyRemotePort { get => null; set => legacy.RemotePort = value ?? 8765; }
 
+    static AppSettings Read(string path) =>
+        JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path)) ?? throw new InvalidDataException("empty settings");
+
     public static AppSettings Load()
     {
-        AppSettings s;
+        AppSettings s = new();
+        var bak = FilePath + ".bak";
         try
         {
-            s = File.Exists(FilePath) ? JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(FilePath)) ?? new() : new();
+            if (File.Exists(FilePath)) s = Read(FilePath);
+            else if (File.Exists(bak)) s = Read(bak);   // a save stopped between its steps
         }
-        catch (Exception) { s = new(); }
+        catch (Exception e)
+        {
+            // keep the damaged file for a look later instead of overwriting it; fall back to the backup
+            AppLog.Write("settings.json could not be read", e);
+            try { File.Move(FilePath, $"{FilePath}.bad-{DateTime.Now:yyyyMMdd-HHmmss}"); } catch (Exception) { }
+            try { s = File.Exists(bak) ? Read(bak) : new(); }
+            catch (Exception e2) { AppLog.Write("settings.json.bak could not be read either", e2); s = new(); }
+        }
+        if (s.MachineId == "") s.MachineId = Guid.NewGuid().ToString("N");
         if (s.Pcs.Count == 0 && s.legacy.Host != "")
         {
             s.Pcs.Add(s.legacy);
             s.Selected = s.legacy.Id;
-            s.Save();
         }
+        s.Save();
         return s;
     }
 
+    /// <summary>Lock for the lists (PCs, sync pairs) when they are read or changed off the window thread.</summary>
+    [JsonIgnore] public object Gate { get; } = new();
+
+    /// <summary>Saves from any thread: written to a temp file, then swapped in, keeping the previous file as .bak.</summary>
     public void Save()
     {
-        try
+        lock (Gate)
         {
-            Directory.CreateDirectory(Folder);
-            File.WriteAllText(FilePath, JsonSerializer.Serialize(this, Json));
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                try
+                {
+                    Directory.CreateDirectory(Folder);
+                    var json = JsonSerializer.Serialize(this, Json);
+                    var tmp = FilePath + ".tmp";
+                    File.WriteAllText(tmp, json);
+                    if (File.Exists(FilePath)) File.Replace(tmp, FilePath, FilePath + ".bak", ignoreMetadataErrors: true);
+                    else File.Move(tmp, FilePath);
+                    return;
+                }
+                catch (InvalidOperationException) { Thread.Sleep(20); }   // a list changed while it was being written
+                catch (IOException) { Thread.Sleep(50); }                 // e.g. a virus scanner has the file open
+                catch (Exception e)
+                {
+                    AppLog.Write("Saving settings failed", e);
+                    return;
+                }
+            }
+            AppLog.Write("Saving settings failed 3 times");
         }
-        catch (Exception) { }
     }
 }

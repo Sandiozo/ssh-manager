@@ -146,7 +146,7 @@ COOKIE = "sshmgr_token"
 agents_mod.configure(APP_SECRET)
 activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
-updater = Updater(config, DATA, activity)
+updater = Updater(config, DATA, activity, busy=lambda: runner.busy() or sys.modules["sshmgr.files"].transfers_active() > 0)
 runner = Runner(activity, DATA)
 agents = agents_mod.Agents()
 agents.machine_id_of = lambda name: (monitor.clients.get(name.strip().lower()) or {}).get("machine_id") or None

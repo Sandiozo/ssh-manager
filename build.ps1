@@ -1,6 +1,7 @@
-# Builds build\SSHManager-Setup.exe (+ .sha256): the server as an exe (PyInstaller), the app (.NET 8),
+# Builds build\SSHManager-Setup.exe (+ .sha256): the server as an exe (PyInstaller), the app (.NET 10),
 # HiddenRun (self-contained), the command-line tool sshmgr.exe, then the installer (Inno Setup 6).
-# Needs: Python 3.11+ with requirements.txt + pyinstaller, the .NET 8 SDK, Inno Setup 6 (ISCC.exe).
+# Needs: Python 3.11+ with requirements.txt + pyinstaller, the .NET 10 SDK, Inno Setup 6.5+ (ISCC.exe).
+# Release signatures (.sig) are made by the release workflow, not here.
 param([string]$Python = "$PSScriptRoot\.venv\Scripts\python.exe")
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
@@ -8,6 +9,9 @@ $build = "$root\build"
 $version = ((Get-Content "$root\sshmgr\__init__.py" -Raw) -replace '(?s).*__version__\s*=\s*"([^"]+)".*', '$1').Trim()
 "Building SSH Manager $version"
 foreach ($d in 'app', 'server', 'tools', 'cli') { if (Test-Path "$build\$d") { Remove-Item "$build\$d" -Recurse -Force } }
+Remove-Item "$build\SSHManager-Setup.exe*" -ErrorAction SilentlyContinue   # also a .sig of an earlier build
+$sdk = (dotnet --version) 2>$null
+if (-not $sdk -or [int]($sdk -replace '^(\d+).*', '$1') -lt 10) { throw "The .NET 10 SDK (or newer) is needed; dotnet --version says '$sdk'" }
 
 & $Python -m PyInstaller "$root\server.spec" --noconfirm --distpath "$build\dist" --workpath "$build\work" --log-level WARN
 if ($LASTEXITCODE) { throw "PyInstaller failed" }

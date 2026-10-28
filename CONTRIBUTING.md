@@ -15,7 +15,7 @@ Thanks for helping! Bug reports, ideas and pull requests are all welcome.
 |---|---|
 | `server.py`, `sshmgr/` | The server (Python, FastAPI): status, activity log, files, run, logs, screen, pairing, updates. |
 | `static/` | The dashboard (plain HTML, CSS and JavaScript, no build step). |
-| `app/SSHManager/` | The Windows app (C#, .NET 8, WinForms + WebView2): tunnels, tray, setup pages, sync, clipboard. |
+| `app/SSHManager/` | The Windows app (C#, .NET 10, WinForms + WebView2): tunnels, tray, setup pages, sync, clipboard. |
 | `app/HiddenRun/` | Small helper that starts a program without a window. |
 | `app/SshMgrCli/` | `sshmgr.exe`, the command-line tool: asks the app for a PC's connection over a named pipe (`CliPipe.cs` in the app) and calls that PC's API. |
 | `installer/` | Inno Setup script and the PowerShell scripts it runs (server setup, stop, app restart). |
@@ -24,7 +24,7 @@ Thanks for helping! Bug reports, ideas and pull requests are all welcome.
 
 ## Development setup
 
-1. Python 3.11+, the .NET 8 SDK and (for the installer) Inno Setup 6.
+1. Python 3.11+, the .NET 10 SDK and (for the installer) Inno Setup 6.5 or newer.
 2. Server: `python -m venv .venv`, `.venv\Scripts\pip install -r requirements.txt`, then
    `.venv\Scripts\python server.py`. It prints a login URL for a browser. Use `SSHMGR_HOME` to keep a
    test configuration away from your real one.

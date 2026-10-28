@@ -55,7 +55,8 @@ without opening a remote desktop.
    once. That's it.
 
 > Windows may show "Windows protected your PC" because the installer isn't code-signed. Click
-> **More info → Run anyway**. Each release lists the installer's SHA-256 checksum.
+> **More info → Run anyway**. Each release lists the installer's SHA-256 checksum and comes with a release
+> signature (`SSHManager-Setup.exe.sig`); the release notes show how to check it with `ssh-keygen`.
 
 ## Install
 
@@ -71,7 +72,10 @@ The installer asks what the PC should do:
 | **Client and server** | The app, plus everything needed for other PCs to manage this one: it turns on Windows' OpenSSH Server, allows it through the firewall on private networks, and runs SSH Manager's server in the background (started at sign-in). |
 
 The page shows what is installed already and what will be downloaded. Run the installer again at any time
-to switch roles.
+to switch roles. For unattended installs: `SSHManager-Setup.exe /VERYSILENT /ROLES=app,server` (or
+`/ROLES=app`); `/SERVERUSER=<account>` picks the administrator account the server runs as. On PCs that
+can't reach Windows Update (WSUS, offline), install OpenSSH from its
+[MSI release](https://github.com/PowerShell/Win32-OpenSSH/releases) first; the installer then uses it.
 
 ### Adding a PC
 
@@ -94,7 +98,8 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
 
 - **All PCs:** totals over the last 24 hours (logins, failed logins, commands, data transferred), SSH
   logins per hour for each PC, everyone connected anywhere, and one activity timeline across all PCs that
-  you can filter by PC, type or text. Below that, a card per PC with CPU, RAM, disks and failed logins.
+  you can filter by PC, type or text, and a table of every PC with CPU, memory, disks, sessions and failed
+  logins.
 - **Live sessions:** who is connected over SSH and the command each session is running right now.
 - **Activity log:** every command run over SSH with the full script (`powershell -EncodedCommand` scripts
   are decoded), every file transfer, run and settings change, labelled with the computer that did it.
@@ -116,10 +121,14 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
 **Connect**
 
 - **Folder sync:** keep a folder on this computer and a folder on a PC the same, in one direction or both.
-  Changes are sent a few seconds after they happen. Sync never deletes files; `.git`, `node_modules` and
-  the like are skipped by default.
+  Changes are sent a few seconds after they happen; `.git`, `node_modules` and the like are skipped by
+  default. Sync remembers the last state it synced, so it knows which side changed: if a file changed on
+  both sides, both copies are kept (the incoming one as `name (conflict <PC> <date>).ext`). A file deleted
+  on the PC goes to the Recycle Bin here; a file you delete here isn't fetched again; nothing is ever deleted
+  on the PC. New folder pairs are confirmed in a Windows dialog, and system and private folders (Windows,
+  Program Files, AppData, `.ssh`, Startup) can't be synced.
 - **Shared clipboard:** text copied on one computer can be pasted on the others (off until you switch it
-  on in the app settings).
+  on in the app settings). Text that password managers mark as private is never shared.
 - **Wake-on-LAN:** wake a PC that is asleep or off from its card. The app learns each PC's network card
   while connected; the PC needs Wake-on-LAN enabled in its BIOS and network adapter settings.
 
@@ -129,9 +138,11 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
   last known address), and notifies about lost connections, failed logins, unknown computers and finished
   transfers.
 - **Settings** (⚙ in the top bar): the computers that connect, the SSH keys allowed to log in, quick
-  actions, what AI agents may do, logs, file shortcuts, screen preview, updates and the app's own options.
-- **Automatic updates:** each PC updates itself when a new release is published; downloads are checked
-  against their SHA-256.
+  actions, what AI agents may do, logs, file shortcuts, screen preview and updates. The app's own options
+  (start with Windows, notifications, downloads, clipboard, light or dark appearance) are under **App
+  settings** at the bottom of the left bar.
+- **Automatic updates:** each PC updates itself when a new release is published, but waits while runs or
+  file transfers are in progress. Every installer is signed for this project and checked before it runs.
 - **Plugins:** small Python files that add your own command decoders, activity details or API routes.
 - **Command line:** `sshmgr` lets scripts and AI agents run commands, move files, take screenshots and
   wait for things on your PCs through the app's connections (see [Command line](#command-line)).
@@ -148,8 +159,9 @@ and nothing is stored on disk. The installer adds it to `PATH` (open a new termi
 
 ```
 sshmgr pcs                                          the PCs in the app and whether they are connected
-sshmgr run <pc> "Get-Service sshd" [--cwd <dir>] [--env K=V] [--timeout <s>]
+sshmgr run [--cwd <dir>] [--env K=V] [--timeout <s>] <pc> "Get-Service sshd"
 sshmgr run <pc> -f script.ps1                       a script file (- reads it from standard input)
+sshmgr runs <pc>                                    recent and running runs
 sshmgr actions <pc>    /  sshmgr action <pc> <id>   list and run quick actions
 sshmgr shot <pc> screen.png [--window <app>|--monitor <n>]
 sshmgr windows <pc>                                 app windows that can be captured
@@ -160,16 +172,20 @@ sshmgr wait <pc> --process setup [--exited] [--timeout <s>]
 sshmgr mcp                                          an MCP server for AI agents (see below)
 ```
 
-`<pc>` is a PC's name, the name or address it was added with, or its id. `run` and `action` stream the
-output as it comes and exit with the script's exit code; Ctrl+C stops the run on the PC. Other exit codes:
-1 failed (or `wait` timed out), 2 wrong usage, 3 the app isn't running or the PC isn't connected. `pcs`,
+`<pc>` is a PC's name, the name or address it was added with, or its id. Options go before the PC; everything
+after it is the script, so a script with pipes, `$` or quotes is best passed as one quoted argument or with
+`-f`. `run` and `action` stream the output as it comes and exit with the script's exit code. Ctrl+C stops
+the run on the PC (or withdraws a request that waits for approval); press it again to quit at once. Other
+exit codes: 1 failed (or `wait` timed out), 2 wrong usage, 3 the app isn't running or the PC isn't
+connected, 4 the connection was lost while the run may still be going, 124 timed out, 130 stopped with
+Ctrl+C. `pcs`,
 `actions`, `windows` and `wait` take `--json`. Screenshots are full size; a `.png` is lossless. Everything
 it does is in that PC's activity log, like anything else done from the app. Run `sshmgr help` for all
 options.
 
 `--as <name>` (or the `SSHMGR_AGENT` environment variable) marks the calls as an AI agent's, so the PC labels
-them `<name> (<this computer>)` and applies its AI agent settings. Inside Claude Code, `sshmgr` does this by
-itself (`Claude`).
+them `<name> (<this computer>)` and applies its AI agent settings. Inside Claude Code, Codex, Cursor and
+Gemini CLI, `sshmgr` does this by itself.
 
 ## Use with AI agents
 
@@ -189,7 +205,6 @@ claude mcp add --scope user sshmgr -- sshmgr mcp
 [mcp_servers.sshmgr]
 command = "sshmgr"
 args = ["mcp"]
-tool_timeout_sec = 900   # runs can take a while; Codex stops waiting after 60 s by default
 ```
 
 **Other MCP clients** (Cursor, VS Code, Claude Desktop, …): add a stdio server with the command `sshmgr` and
@@ -200,12 +215,19 @@ If the client was started before SSH Manager was installed, restart it or use th
 | Tool | What it does |
 |---|---|
 | `list_pcs`, `pc_status` | The PCs, whether they are connected and what agents may do there; one PC's CPU, memory, disks, sessions and failed logins. |
-| `run`, `run_status` | Runs PowerShell (working directory, environment variables, timeout) and returns the output and exit code. Long output keeps its start and end and points to the complete output on the PC. `background: true` returns at once; `run_status` follows the run. |
-| `list_actions`, `run_action` | The PC's quick actions, and running one. |
+| `run`, `run_status`, `list_runs` | Runs PowerShell (working directory, environment variables, timeout) and returns the output and exit code. A run that takes longer than `wait_seconds` (default 40) keeps going and the tool returns its run id; `run_status` follows it and pages through its output, `list_runs` finds recent and running runs. Long output keeps its start and end and points to the complete output on the PC. |
+| `list_actions`, `run_action` | The PC's quick actions, and running one (an action that needs approval returns a request id that `run_status` follows). |
 | `screenshot`, `list_windows` | A screenshot of an app window or a monitor, returned as an image (PNG). |
-| `list_files`, `download_file`, `upload_file` | Browse folders; get a file (small text and images come back directly, anything else is saved on this computer); put a file or a piece of text on the PC. |
+| `list_files`, `download_file`, `upload_file` | Browse folders; get a file (text up to 30 KB and images come back directly, anything else is saved on this computer); put a file or a piece of text on the PC. |
+| `read_file` | Chosen lines of a text file (any encoding). |
+| `make_folder`, `rename`, `delete` | Change files on the PC (`delete` moves to the Recycle Bin). |
 | `read_log` | The last lines of a configured log or any text file, optionally only the lines containing some text. |
-| `wait_for` | Waits until a file appears or changes, or a program starts or exits. |
+| `wait_for` | Waits until a file appears or changes, or a program starts or exits (up to the wait limit per call). |
+
+Files the agent saves or uploads from this computer (`save_to`, `local_path`) must be in its working folder,
+the temp folder or the folder in `SSHMGR_MCP_ROOT`, and existing files are only overwritten with
+`overwrite: true`. `SSHMGR_MCP_MAX_WAIT` changes how long a tool call waits before it returns (seconds,
+default 40), for clients with longer tool timeouts.
 
 **Who did what.** The agent says who it is (from the MCP client's name, e.g. Claude or Codex;
 `sshmgr mcp --as <name>` sets another). The PC records it, so Activity, Live sessions and All PCs show for
@@ -215,33 +237,37 @@ example `Claude (LAPTOP)` instead of only the computer.
 
 | Access | Agents can |
 |---|---|
-| **Full** (default) | do everything a person can do from the dashboard |
+| **Full** (default) | run scripts as administrator and change files: trust the agent as you would an administrator |
 | **Read-only** | only look: status, activity, logs, files and downloads, screenshots |
 | **Off** | do nothing |
 
-Whatever the setting, agents can't change settings, SSH keys or pairing, and the screen settings (whole
-screens, the list of apps that can be viewed) apply to them too. A quick action marked **ask first** that an
-agent starts waits until someone clicks **Allow** in an SSH Manager app, on that PC or on the computer the
-agent works from. If nobody answers within two minutes, or someone clicks **Deny**, it doesn't run.
+Whatever the setting, agents can never: change settings, SSH keys or pairing; answer approval or pairing
+requests; use the clipboard; restart the server or install updates; or read or change SSH Manager's access
+token, settings and plugins or SSH keys on the PC. The screen settings (whole screens, the list of apps that
+can be viewed) apply to them too. A quick action marked **ask first** that an agent starts, or a script
+identical to one, waits until someone clicks **Allow** in an SSH Manager app, on that PC or on the computer
+the agent works from. Only the app can answer; if nobody answers within two minutes, or someone clicks
+**Deny**, it doesn't run.
 
-These limits keep an agent that uses SSH Manager as intended within bounds; they are not a security
-boundary. Anything that runs as you on a computer whose app is connected to a PC can use that connection
-without saying it is an agent. Run agents you don't trust under another Windows account, or turn AI access
-off on the PCs they shouldn't touch.
+`sshmgr mcp` always identifies itself as an agent. Still, with full access an agent runs scripts as
+administrator, and anything that runs as you on a computer whose app is connected to a PC can use that
+connection without saying it is an agent. Run agents you don't trust under another Windows account, or set
+AI access to read-only or off on the PCs they shouldn't change.
 
 ## Automation API
 
 Scripts and AI agents can use the same API as the dashboard (`sshmgr` above is the easy way to). It is
 only reachable on `127.0.0.1` of each PC, so open an SSH port forward first (`ssh -L 18765:127.0.0.1:8765 <pc>`). Read the access token
 once over SSH with `"C:\Program Files\SSH Manager\Server\SSHManagerServer.exe" --client-info` (the
-`SSHMGR-TOKEN:` line) and send it with every request as the `X-SSHMgr-Token` header; requests that
+`SSHMGR-TOKEN:` line; the `SSHMGR-APPSECRET:` line is for the SSH Manager app only) and send it with every request as the `X-SSHMgr-Token` header; requests that
 change something also need `X-SSHMgr: 1`. Everything done through the API is in the activity log. An AI
 agent adds `X-SSHMgr-Agent: <name>`: its calls are then labelled with that name and limited by the PC's
 AI access setting (`GET /api/ai` tells the level).
 
 | Call | What it does |
 |---|---|
-| `POST /api/run` `{script, title?, cwd?, env?}` | Runs a PowerShell script (admin, in the signed-in user's session). `cwd` may use environment variables; `env` adds variables for this run; titles over 200 characters are shortened. |
+| `POST /api/run` `{script, title?, cwd?, env?, timeout?}` | Runs a PowerShell script (admin, in the signed-in user's session). `cwd` may use environment variables; `env` adds variables for this run; `timeout` (seconds) stops it after that long; titles over 200 characters are shortened. |
+| `GET /api/runs` | Recent and running runs. |
 | `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines are kept here; `skipped` tells how many were left out. |
 | `GET /api/runs/{id}/output` | The complete output as a text file (for the last 50 runs); `output_file` in the run's status is where it is kept on the PC. |
 | `POST /api/runs/{id}/stop` | Stops a run. |
@@ -271,7 +297,14 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
 ## Security
 
 - The server listens on `127.0.0.1` only; reaching it from another computer requires SSH access.
-- Every request needs an access token, which the app reads over SSH when it connects.
+- Every request needs an access token, which the app reads over SSH when it connects. Each PC's dashboard
+  only accepts its own token cookie, which pages can't read.
+- The server's home folder (access token, settings, plugins) is made private to you, administrators and
+  the system when the server runs with administrator rights, and plugins aren't loaded from a folder other
+  accounts can change.
+- A PC's dashboard is shown in the app but can't change the app: adding PCs, setup, the app's settings and
+  updates only work from the app's own pages, folder syncs a dashboard asks for are confirmed in a Windows
+  dialog, and links open in your browser only after you confirm.
 - Requests from web sites are blocked (Host header check, and a custom header is required for changes).
 - The server runs with administrator rights, because Windows runs an administrator's SSH sessions elevated
   and the server needs to see them. Anyone who can use a PC's dashboard can read and write any file there,
@@ -285,14 +318,19 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
   windows are then neither listed nor captured, also through the API). The clipboard is off until you
   switch it on.
 - New host keys are accepted the first time the app connects (trust on first use) and checked after that.
+  Before you sign in with a password, the app shows the PC's host key so you can compare it.
 - Pairing requests only carry a public key, can only be filed by someone who can already use this PC's
   dashboard, reach only apps connected to this PC, expire after two minutes and change nothing until
-  someone clicks **Allow**. Every request and answer is logged on both PCs.
-- AI agents that identify themselves are limited by each PC's AI access setting and can't change settings,
-  keys or pairing; quick actions marked "ask first" need a person's Allow when an agent starts them. See
+  someone clicks **Allow**. The prompt shows the computer that asked, its address and its key fingerprint;
+  after **Deny** it has to wait before asking again. Every request and answer is logged on both PCs.
+- AI agents are limited by each PC's AI access setting and can't change settings, keys or pairing, answer
+  approvals or read the access token, keys or clipboard; quick actions marked "ask first" need a person's
+  Allow in the app when an agent starts them. See
   [Use with AI agents](#use-with-ai-agents) for what this does and doesn't protect against.
 - Passwords typed when adding a PC are handed to `ssh` once and never stored.
-- Updates are downloaded from this repository's GitHub releases and checked against their SHA-256.
+- Updates are downloaded from this repository's GitHub releases and installed only when both their SHA-256
+  and their release signature (an SSH signature made with this project's release key) check out. The
+  server keeps downloaded installers in a folder only administrators can change.
 
 Found a security problem? Please report it privately, see [SECURITY.md](SECURITY.md).
 
@@ -304,6 +342,7 @@ Found a security problem? Please report it privately, see [SECURITY.md](SECURITY
 | App settings | `%LOCALAPPDATA%\SSHManager\settings.json` |
 | Server settings and data ("home") | `%LOCALAPPDATA%\SSHManager\server` of the user who installed it |
 | Server logs | `<home>\data\server.log`; setup log: `C:\Program Files\SSH Manager\Server\setup.log` |
+| Downloaded updates | `%ProgramData%\SSHManager\updates` (administrators only) |
 
 To keep the server's settings somewhere else (for example in your own private repository), put the folder
 path in `sshmgr-home.txt` in the `Server` folder, or set the `SSHMGR_HOME` environment variable.
@@ -311,8 +350,9 @@ path in `sshmgr-home.txt` in the `Server` folder, or set the `SSHMGR_HOME` envir
 ```
 <home>
 ├─ config.json   computers, key labels, file shortcuts, quick actions, logs, display name, updates, port
+├─ config.json.bak   the last settings that loaded fine (used if config.json is damaged)
 ├─ plugins\      your plugins (*.py)
-└─ data\         activity log, logs, access token, key-file backups, downloaded updates
+└─ data\         activity log, logs (rotated at 5 MB, 3 kept), access token, key-file backups
 ```
 
 Most of `config.json` can be edited under **Settings** (⚙):
@@ -352,7 +392,9 @@ def setup(ctx):
     # ctx.app is the FastAPI app (add routes), ctx.config, ctx.home, ctx.monitor, ctx.activity
 ```
 
-Plugins run inside the server with its administrator rights, so only use plugins you trust.
+Plugins run inside the server with its administrator rights, so only use plugins you trust. They are only
+loaded when the `plugins` folder and the files in it can be changed by you, administrators and the system
+alone (the server log says why a plugin was skipped).
 
 ## Extras
 
@@ -381,9 +423,11 @@ computer's key.
 
 ## Uninstall
 
-Settings → Apps → **SSH Manager** → Uninstall. It stops the server and removes its sign-in task. OpenSSH
-Server stays installed (remove it in Settings → System → Optional features if you don't need it), and so do
-the settings folders listed under [Configuration](#configuration).
+Settings → Apps → **SSH Manager** → Uninstall. It stops the server, removes its sign-in task and SSH
+Manager's firewall rule, and offers to remove the SSH keys that SSH Manager added (so other PCs can't log
+in any more) and to turn off OpenSSH Server. A silent uninstall does both with
+`unins000.exe /VERYSILENT /REMOVEACCESS`. The settings folders listed under
+[Configuration](#configuration) stay.
 
 ## Troubleshooting
 
@@ -403,7 +447,7 @@ relevant lines from the logs listed under [Configuration](#configuration).
 ## Building from source
 
 - Server only: Python 3.11+, `pip install -r requirements.txt`, then `python server.py`.
-- Everything, including the installer: Python with `pyinstaller`, the .NET 8 SDK and Inno Setup 6, then
+- Everything, including the installer: Python with `pyinstaller`, the .NET 10 SDK and Inno Setup 6, then
   `.\build.ps1`. Output: `build\SSHManager-Setup.exe`.
 - Pushing a tag `vX.Y.Z` that matches `sshmgr/__init__.py` builds and publishes a release with GitHub Actions.
 

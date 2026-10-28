@@ -147,10 +147,10 @@ function renderStatus(s) {
   $("#pills").innerHTML = pills.join("");
 
   const u = s.update || {};
-  const upd = u.status && u.status !== "idle" ? `<div class="alert update"><span>${u.status === "downloading" ? "Downloading" : "Installing"} SSH Manager ${esc(u.latest)}… the page reconnects by itself.</span></div>`
+  const upd = u.status && u.status !== "idle" ? `<div class="alert update"><span>${{ downloading: "Downloading", verifying: "Checking", installing: "Installing" }[u.status] || "Updating"} SSH Manager ${esc(u.latest)}… the page reconnects by itself.</span></div>`
     : u.available ? `<div class="alert update"><span><b>SSH Manager ${esc(u.latest)} is available</b> on ${esc(s.host.name)} (it has ${esc(u.current)}).
         ${u.installable ? "" : "This copy runs from source: update it with <code>git pull</code>."}</span>
-        ${u.installable ? `<button class="primary" data-update-now>Install now</button>` : ""}</div>` : "";
+        ${u.installable && u.verifiable !== false ? `<button class="primary" data-update-now>Install now</button>` : ""}</div>` : "";
   const sec = [...(s.security?.warnings || []), ...(s.config_problem ? [s.config_problem] : [])];
   $("#notice").innerHTML = upd + sec.map(w => `<div class="alert warnish">${esc(w)}</div>`).join("") + (s.elevated ? "" : `<div class="alert warnish"><b>Running without admin rights.</b>
     SSH commands from an admin account run elevated, so their contents show as "hidden", and SSH keys can't be managed,
@@ -836,17 +836,24 @@ $("#set-nav-app").onclick = e => { e.stopPropagation(); toHost("open-app-setting
 
 // ---------- updates ----------
 async function installUpdate() {
-  if (!confirm(`Install the SSH Manager update on ${hostName}? Its server restarts; this window reconnects by itself.`)) return;
+  const busy = last?.update?.busy ? "\n\nCommands or file transfers are running on it right now; they will be interrupted." : "";
+  if (!confirm(`Install the SSH Manager update on ${hostName}? Its server restarts; this window reconnects by itself.${busy}`)) return;
   try { await api("/api/update/install", { method: "POST" }); toast("Update started"); } catch (e) { toast(e.message, true); }
 }
 document.addEventListener("click", e => { if (e.target.closest("[data-update-now]")) installUpdate(); });
 function renderUpdate() {
   const u = last?.update; if (!u) return;
+  const busyText = { downloading: "Downloading", verifying: "Checking the signature of", installing: "Installing" }[u.status];
   $("#upd-version").textContent = `${hostName}: version ${u.current}`;
-  $("#upd-state").innerHTML = u.status !== "idle" ? `${u.status === "downloading" ? "Downloading" : "Installing"} ${esc(u.latest)}…`
+  const notes = [
+    u.postponed ? esc(u.postponed) : "",
+    u.failed ? `Installing ${esc(u.failed.version)} failed${u.failed.count > 1 ? ` ${u.failed.count} times` : ""} (${ago(u.failed.at)}): ${esc(u.failed.error || "unknown error")}` : "",
+    u.available && u.verifiable === false && u.installable ? esc(u.error || "This release has no signature, so it can't be installed from here.") : "",
+  ].filter(Boolean).map(t => `<br>${t}`).join("");
+  $("#upd-state").innerHTML = (busyText ? `${busyText} ${esc(u.latest)}…`
     : u.available ? `<b>Version ${esc(u.latest)} is available.</b>` + (u.installable ? "" : " This copy runs from source; update it with <code>git pull</code>.")
-    : u.error ? esc(u.error) : u.checked ? `Up to date (checked ${ago(u.checked)}).` : "Not checked yet.";
-  $("#upd-install").hidden = !(u.available && u.installable && u.status === "idle");
+    : u.error ? esc(u.error) : u.checked ? `Up to date (checked ${ago(u.checked)}).` : "Not checked yet.") + notes;
+  $("#upd-install").hidden = !(u.available && u.installable && u.verifiable !== false && u.status === "idle");
 }
 $("#upd-check").onclick = async () => { try { last.update = await api("/api/update/check", { method: "POST" }); renderUpdate(); } catch (e) { toast(e.message, true); } };
 $("#upd-install").onclick = installUpdate;

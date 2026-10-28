@@ -33,7 +33,9 @@ internal sealed partial class Link : IDisposable
             $ok = [bool]($pf | Where-Object { ($dir + '\').StartsWith($_, [StringComparison]::OrdinalIgnoreCase) }) -or (Test-Path (Join-Path $dir 'server.py'))
         }
         if (-not $ok) { 'SSHMGR-ERROR:SSH Manager''s install record on this PC points to an unexpected folder (' + $dir + '). Reinstall SSH Manager on this PC.'; exit 4 }
-        & (Join-Path $dir 'ensure-running.ps1')
+        # as a script block, so an execution policy set by Group Policy can't block it
+        $p = Join-Path $dir 'ensure-running.ps1'
+        & ([scriptblock]::Create((Get-Content -LiteralPath $p -Raw -Encoding UTF8))) -Root $dir
         """;
 
     readonly Action save;

@@ -282,7 +282,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
                 if ($admin) { $f = "$env:ProgramData\ssh\administrators_authorized_keys" }
                 else { New-Item -ItemType Directory -Force "$HOME\.ssh" | Out-Null; $f = "$HOME\.ssh\authorized_keys" }
                 if (-not ((Test-Path $f) -and (Select-String -Path $f -SimpleMatch $key -Quiet))) { Add-Content -Path $f -Value $key -Encoding ascii }
-                if ($admin) { icacls $f /inheritance:r /grant 'Administrators:F' /grant 'SYSTEM:F' | Out-Null }
+                if ($admin) { icacls $f /inheritance:r /grant '*S-1-5-32-544:F' /grant '*S-1-5-18:F' | Out-Null }
                 'SSHMGR-KEY-ADDED'
                 """;
             var c = new PcEntry { Host = host, User = user };

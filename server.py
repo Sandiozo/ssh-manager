@@ -128,7 +128,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from sshmgr import agents as agents_mod, desktop, plugins, winsec  # noqa: E402
 from sshmgr.activity import ActivityLog  # noqa: E402
-from sshmgr.files import _peer_process, client_label, make_router, tunnel_pid  # noqa: E402
+from sshmgr.files import _peer_process, client_label, make_router, transfers_active, tunnel_pid  # noqa: E402
 from sshmgr.monitor import Monitor  # noqa: E402
 from sshmgr.protect import Protect  # noqa: E402
 from sshmgr.settings import make_router as make_settings_router  # noqa: E402
@@ -146,7 +146,7 @@ COOKIE = "sshmgr_token"
 agents_mod.configure(APP_SECRET)
 activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
-updater = Updater(config, DATA, activity, busy=lambda: runner.busy() or sys.modules["sshmgr.files"].transfers_active() > 0)
+updater = Updater(config, DATA, activity, busy=lambda: runner.busy() or transfers_active() > 0)
 runner = Runner(activity, DATA)
 agents = agents_mod.Agents()
 agents.machine_id_of = lambda name: (monitor.clients.get(name.strip().lower()) or {}).get("machine_id") or None

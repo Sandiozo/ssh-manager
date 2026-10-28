@@ -3,6 +3,80 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [1.7.0] - 2026-10-28
+
+A security and reliability release, with a new look.
+
+### Security
+- Updates are signed. SSH Manager installs an update only when its release signature and checksum both
+  match; the server keeps downloaded installers in a folder only administrators can change.
+- A PC's dashboard can no longer change the app: adding PCs, setup steps, the app's settings and updates
+  only work from the app's own pages. Folder syncs a dashboard asks for are confirmed in a Windows dialog,
+  and system and private folders (Windows, Program Files, AppData, `.ssh`, Startup) can't be synced.
+- Links in pages open in your browser only after you confirm, and only web links.
+- Folder sync refuses file paths from a PC that would land outside the synced folder.
+- Each PC's dashboard only accepts its own login cookie, which pages can't read, so one PC no longer
+  receives another PC's access token.
+- The server's home folder (access token, settings, plugins) is made private to you, administrators and
+  the system, and plugins are not loaded from a folder other accounts can change.
+- Before handing out its access token, SSH Manager checks that the program on the server's port really is
+  its server.
+- AI agents can no longer approve their own requests, answer pairing requests, use the clipboard, restart
+  the server, install updates, or read SSH Manager's token, settings and plugins or the PC's SSH keys.
+  `sshmgr mcp` always identifies itself as an agent, and running the script of an "ask first" action
+  directly asks too.
+- Pairing prompts show the computer that really asked, with its address and key fingerprint; after Deny,
+  the same computer has to wait before asking again.
+- Before you sign in to a new PC with a password, the app shows the PC's host key to compare.
+- Shared clipboard skips text that password managers mark as private.
+- Uninstalling removes SSH Manager's firewall rule and offers to remove the SSH keys it added and to turn
+  off OpenSSH Server (`/REMOVEACCESS` for silent uninstalls).
+- Names shown on the app's own pages can no longer inject script.
+
+### Changed
+- New look for the dashboard and the app's pages: a calmer dark theme and a light theme, a table of
+  computers instead of cards, and a logins chart with hover details. **App settings** (bottom of the left
+  bar) has the app's own options, including Light, Dark or follow Windows.
+- Two-way folder sync remembers what it synced last: if a file changed on both sides, both copies are kept;
+  a file deleted on the PC goes to the Recycle Bin here; a file you delete here isn't fetched again; one
+  failing file no longer stops the sync.
+- Automatic updates wait until no commands or file transfers are running; a failed update is retried
+  later instead of over and over. Updating stops only SSH Manager's own programs, reopens the app for
+  everyone who had it open, keeps `sshmgr` sessions of AI agents running, and starts the server again if
+  setup fails. Silent updates no longer reconfigure OpenSSH Server or the firewall.
+- AI agents: runs no longer time out in the agent's tool. After about 40 seconds the tool returns the run's
+  id and the run keeps going (`run_status`, new `list_runs`). New tools `read_file`, `make_folder`,
+  `rename` and `delete` (to the Recycle Bin). Files an agent saves or uploads on this computer must be in
+  its working folder, the temp folder or `SSHMGR_MCP_ROOT`.
+- `sshmgr run`: options go before the PC and everything after it is the script; new `sshmgr runs <pc>`;
+  exit code 4 when the connection was lost while a run may still be going; Ctrl+C twice quits at once.
+- Runs accept a time limit (`timeout`) that the PC enforces.
+- SSH Manager now uses .NET 10 (the installer downloads it if needed).
+
+### Fixed
+- The server stopped accepting connections after a dropped SSH tunnel.
+- The dashboard stalled for up to 30 seconds when the Windows event log was slow.
+- A damaged `config.json` stopped the server; it now starts with the last good settings and says so.
+- A damaged `settings.json` could wipe the app's PCs and folder syncs; settings are now saved with a backup.
+- SSH keys and settings files are saved safely, so a crash mid-save can't lock anyone out.
+- Logs, the activity list and run output grew without limit.
+- `sshmgr` crashed on exit codes like -1 or 0xC0000005 and showed stack traces.
+- Text files in ANSI or UTF-16 encoding are read correctly by agents and the CLI.
+- Shared clipboard bounced the same text back and forth between two PCs.
+- The app reconnects right after sleep or a network change.
+- Uploading to a folder's name gave a misleading error.
+- Folder downloads start right away, skip folder loops and list the files they couldn't include.
+- Deleting tells you when a file was deleted permanently because its drive has no Recycle Bin.
+- Session tracking with user names that contain spaces or a non-standard SSH port; reachability checks on
+  every Windows language.
+- A server started over SSH moves to your desktop session when you sign in, so screen preview and
+  clipboard work.
+- The installer hung for minutes when PowerShell scripts were restricted by Group Policy, and explains
+  Windows Update / WSUS problems with OpenSSH.
+- The firewall check notices when SSH is still blocked, for example on a network set to Public.
+- The same PC added twice (by name and by address) can be merged; the window no longer opens off-screen
+  after a monitor was removed; only one copy of the app runs per user.
+
 ## [1.6.0] - 2026-10-19
 
 ### Added
@@ -230,6 +304,7 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.7.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.0
 [1.6.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.6.0
 [1.5.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.1
 [1.5.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.5.0

@@ -42,12 +42,15 @@ MAX_INSTALLER = 400 << 20
 DETACHED = 0x00000008 | 0x00000200 | 0x01000000   # DETACHED_PROCESS | NEW_PROCESS_GROUP | BREAKAWAY_FROM_JOB
 CREATE_NO_WINDOW = 0x08000000
 
-# The release signing key (public half). The private half is the release workflow's
-# RELEASE_SIGNING_KEY secret; see .github/workflows/release.yml.
+# The release signing keys (public halves). Releases are signed with the first; its private half is the
+# release workflow's RELEASE_SIGNING_KEY secret (see .github/workflows/release.yml). The second is a backup
+# kept offline: if the first is ever lost or leaked, a release signed with the backup replaces it.
 SIGNER = "sshmanager-release"
 NAMESPACE = "sshmanager-release"
 ALLOWED_SIGNERS = ("sshmanager-release ssh-ed25519 "
-                   "AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r\n")
+                   "AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r\n"
+                   "sshmanager-release ssh-ed25519 "
+                   "AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc\n")
 
 
 class UpdateError(Exception):

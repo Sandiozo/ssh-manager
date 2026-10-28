@@ -30,12 +30,17 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # the release key's public half, as in sshmgr/updater.py and app/SSHManager/AppUpdater.cs
-  ALLOWED_SIGNERS: "sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r"
+  # the release keys' public halves (main, then the offline backup), as in sshmgr/updater.py and
+  # app/SSHManager/AppUpdater.cs
+  ALLOWED_SIGNERS: |
+    sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r
+    sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc
 
 jobs:
   build:
     runs-on: windows-latest
+    # waits until the maintainer approves the run; the signing key is a secret of this environment
+    environment: release
     timeout-minutes: 75
     permissions:
       contents: write   # creating the release

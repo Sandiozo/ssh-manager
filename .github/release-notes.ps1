@@ -12,7 +12,8 @@ $notes += "`n`n---`n`n**Install:** download ``SSHManager-Setup.exe`` below and r
 if ($Sha256) { $notes += "`n`nSHA-256 of ``SSHManager-Setup.exe``: ``$Sha256``" }
 if ($Signed) {
     $notes += "`n`n``SSHManager-Setup.exe.sig`` is its release signature (SSH Manager checks it before installing an update). " +
-              "To check it yourself, save the line ``sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r`` " +
+              "To check it yourself, save the lines ``sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r`` and " +
+              "``sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc`` (the offline backup key) " +
               "as ``allowed_signers``, then run: ``cmd /c ""ssh-keygen -Y verify -f allowed_signers -I sshmanager-release -n sshmanager-release -s SSHManager-Setup.exe.sig < SSHManager-Setup.exe""``"
 }
 $notes

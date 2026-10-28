@@ -22,10 +22,12 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
     const string Repo = "Sandiozo/ssh-manager";
     const string Asset = "SSHManager-Setup.exe";
     const long MaxInstaller = 400L << 20;
-    /// <summary>The release signing key (public half); the private half is the release workflow's secret.</summary>
+    /// <summary>The release signing keys (public halves): releases are signed with the first, whose private half
+    /// is the release workflow's secret; the second is a backup kept offline that can replace it.</summary>
     internal const string Signer = "sshmanager-release";
     internal const string AllowedSigners =
-        "sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r\n";
+        "sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r\n" +
+        "sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICYUvd8e+M5q9ZZMhL76qYzmUk3EN6eWRecEpkikPZIc\n";
     static readonly HttpClient Http = CreateClient();
     static readonly string DataFolder =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SSHManager");

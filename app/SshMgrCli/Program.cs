@@ -249,15 +249,15 @@ static partial class Program
         return a;
     }
 
-    /// <summary>The script from several words: the first as given, the others too unless they contain spaces
-    /// or quotes (they were one argument, so they stay one: quoted for PowerShell).</summary>
+    /// <summary>The script from several words: the first as given (it may be a whole script), the others too
+    /// unless they contain spaces or quotes (they were one argument, so they stay one: quoted for PowerShell).</summary>
     static string JoinScript(List<string> words)
     {
         if (words.Count <= 1) return words.FirstOrDefault() ?? "";
         static bool NeedsQuotes(string w) => w == "" || w.Any(c => char.IsWhiteSpace(c) || c is '\'' or '"' or '‘' or '’');
         static string Quote(string w) => "'" + w.Replace("'", "''").Replace("‘", "‘‘").Replace("’", "’’") + "'";
-        var first = NeedsQuotes(words[0]) ? "& " + Quote(words[0]) : words[0];
-        return string.Join(" ", words.Skip(1).Select(w => NeedsQuotes(w) ? Quote(w) : w).Prepend(first));
+        // the first word is script text ("Get-Service sshd" -Verbose), the others are its arguments
+        return string.Join(" ", words.Skip(1).Select(w => NeedsQuotes(w) ? Quote(w) : w).Prepend(words[0]));
     }
 
     // ---- the app ----
@@ -831,6 +831,7 @@ static partial class Program
             var inside = remote.TrimEnd('\\', '/') + "\\" + name;
             if (await IsFolder(pc, remote, ct))
             {
+                if (name == "") throw new Failure($"{remote} is a folder on {pc.Name}; give the full path of the file to write.");
                 try { return await PutTo(inside); }   // <remote> is a folder: put it inside
                 catch (Failure g) when (g.Status == HttpStatusCode.Conflict)
                 {

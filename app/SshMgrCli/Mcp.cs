@@ -808,7 +808,7 @@ static partial class Program
         foreach (var r in runs)
         {
             var status = Str(r["status"]);
-            sb.AppendLine($"- {Str(r["id"])}: {status}{(status == "running" ? "" : $", exit code {ExitText(r["exit_code"])}")}, " +
+            sb.AppendLine($"- {Str(r["id"])}: {status}{(status == "running" || r["exit_code"] is not JsonValue ? "" : $", exit code {ExitText(r["exit_code"])}")}, " +
                           $"{Duration(Dbl(r["duration_s"]))}, {Long(r["next"])} lines. \"{Str(r["title"])}\" started " +
                           $"{Str(r["started"]).Replace("T", " ").Replace("+00:00", "Z")} by {Str(r["client"])}" +
                           (Str(r["action_id"]) is { Length: > 0 } act ? $" (quick action {act})" : ""));
@@ -1299,7 +1299,7 @@ static partial class Program
                     return [TextBlock($"{remote} on {pc.Name} ({Size(bytes.Length)}).{where}"),
                             new JsonObject { ["type"] = "image", ["data"] = Convert.ToBase64String(bytes), ["mimeType"] = image }];
                 if (DecodeText(bytes) is { } text && text.Length <= MaxText)
-                    return [TextBlock($"{remote} on {pc.Name} ({Size(bytes.Length)}).{where}\n\n{text}")];
+                    return [TextBlock($"{remote} on {pc.Name} ({Size(bytes.Length)}).{where}\n\n{text.Replace("\r\n", "\n")}")];
                 if (saved is null)
                 {
                     saved = Target();
@@ -1344,7 +1344,8 @@ static partial class Program
             ? "&mtime=" + (new DateTimeOffset(File.GetLastWriteTimeUtc(local)).ToUnixTimeMilliseconds() / 1000.0).ToString(CultureInfo.InvariantCulture)
             : "";
         var size = data?.Length ?? new FileInfo(local!).Length;
-        var done = await Upload(pc, remote, name, () => data is not null ? new MemoryStream(data) : File.OpenRead(local!), size, query,
+        // text names its file in `path`: if that is a folder, don't make up a name inside it
+        var done = await Upload(pc, remote, local is not null ? name : "", () => data is not null ? new MemoryStream(data) : File.OpenRead(local!), size, query,
                                 Bool(a, "overwrite"), "set overwrite=true to replace it", ctx.Cancel);
         return [TextBlock($"Uploaded {(local ?? "the text")} to {(Str(done["path"]) is { Length: > 0 } p ? p : remote)} on {pc.Name} ({Size(size)}).")];
     }

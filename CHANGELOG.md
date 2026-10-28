@@ -3,7 +3,7 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
-## [Unreleased]
+## [1.7.2] - 2026-10-28
 
 ### Security
 - The offline backup release key was replaced with a new one.
@@ -330,6 +330,7 @@ A security and reliability release, with a new look.
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.7.2]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.2
 [1.7.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.1
 [1.7.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.0
 [1.6.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.6.0

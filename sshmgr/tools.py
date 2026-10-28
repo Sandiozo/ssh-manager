@@ -11,9 +11,13 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from . import agents as agents_mod, desktop, logs, wol
+from . import agents as agents_mod, desktop, logs, protect as protect_mod, wol
 from .activity import ActivityLog
 from .runner import Runner
+
+
+def normalize_script(script: str) -> str:
+    return "\n".join(line.rstrip() for line in script.replace("\r\n", "\n").replace("\r", "\n").strip().split("\n"))
 
 
 class RunBody(BaseModel):
@@ -21,6 +25,7 @@ class RunBody(BaseModel):
     title: str = Field("", max_length=10_000)     # longer titles are shortened, not rejected
     cwd: str = Field("", max_length=1000)         # working directory (environment variables allowed)
     env: dict[str, str] = {}                      # extra environment variables for this run
+    timeout: float = Field(0, ge=0, le=7 * 24 * 3600)   # seconds; the run is stopped (status "timeout") after it
 
 
 class ClipBody(BaseModel):
@@ -33,7 +38,7 @@ class WakeBody(BaseModel):
     ips: list[str] = []
 
 
-def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents: "agents_mod.Agents") -> APIRouter:
+def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents: "agents_mod.Agents", protect) -> APIRouter:
     r = APIRouter(prefix="/api")
     clip = desktop.ClipboardWatch()
     last_screen_view: dict[str, float] = {}
@@ -69,8 +74,12 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             activity.add("setup", action="approval-unanswered", client=client, title=a.get("name", ""))
             raise HTTPException(403, f"\"{a.get('name')}\" needs a person's approval, but no SSH Manager app that could ask "
                                      "is open (on this PC or the computer the request came from). Ask the owner to run it.")
+        script = a.get("script", "")
+        from_pc = machines[1]
+        machine_id = request.headers.get("x-sshmgr-machine-id", "").strip()[:64] or (agents.machine_id_of(from_pc) if from_pc else None)
         q = agents.create(client, machines, {"title": a.get("name", ""), "action_id": a.get("id", ""),
-                                             "script": a.get("script", "")[:2000], "pc": monitor_name()})
+                                             "script": script[:2000], "script_truncated": len(script) > 2000,
+                                             "pc": monitor_name(), "from": from_pc or None, "machine_id": machine_id or None})
         activity.add("setup", action="approval-requested", client=client, title=a.get("name", ""))
         answer = await agents.wait(q)
         if answer is None:
@@ -82,18 +91,33 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
     def monitor_name() -> str:
         return config.get("name") or os.environ.get("COMPUTERNAME", "this PC")
 
+    def asks_first(script: str) -> dict | None:
+        """The "ask first" quick action whose script this is (compared without line-ending and trailing-space
+        differences), so an agent can't skip the approval by sending the action's script itself."""
+        s = normalize_script(script)
+        return next((a for a in config.get("actions", []) if a.get("confirm") and s and normalize_script(a.get("script", "")) == s),
+                    None)
+
     @r.post("/run")
-    def run_script(request: Request, body: RunBody):
+    async def run_script(request: Request, body: RunBody):
+        if not body.script.strip():
+            raise HTTPException(400, "The script is empty.")
         title = " ".join((body.title.strip() or body.script.strip().splitlines()[0]).split())
         if len(title) > 200:
             title = title[:199] + "…"
+        agent = agents_mod.agent_of(request)
         cwd = os.path.expandvars(body.cwd.strip()) if body.cwd.strip() else None
-        if cwd and not os.path.isdir(cwd):
+        if cwd and agent and protect_mod.is_network_or_device(cwd):
+            raise HTTPException(403, protect_mod.NETWORK)
+        if cwd and not await asyncio.to_thread(os.path.isdir, cwd):
             raise HTTPException(400, f"The working directory doesn't exist: {cwd}")
         if len(body.env) > 100 or any(not k or "=" in k or "\0" in k + v for k, v in body.env.items()):
             raise HTTPException(400, "Invalid environment variables.")
-        return runner.start(title, body.script, who(request), cwd=cwd, env=body.env or None,
-                            agent=agents_mod.agent_of(request)).view()
+        client = await asyncio.to_thread(who, request)
+        if agent and (a := asks_first(body.script)):
+            await approve(request, client, a)
+        return runner.start(title, body.script, client, cwd=cwd, env=body.env or None, agent=agent,
+                            timeout=body.timeout).view()
 
     @r.get("/runs")
     def get_runs():
@@ -117,7 +141,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
 
     # ---- wait for something to happen (instead of polling in a loop) ----
     @r.get("/wait")
-    async def wait_for(file: str = "", changed_after: str = "", process: str = "", state: str = "started",
+    async def wait_for(request: Request, file: str = "", changed_after: str = "", process: str = "", state: str = "started",
                        timeout: float = Query(60, ge=0, le=300)):
         """Waits until `file` exists (and, with `changed_after`, was modified after that time: an ISO time,
         Unix seconds or "now"), or until a program named `process` has started / exited. Returns
@@ -126,6 +150,8 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             raise HTTPException(400, "Give either file or process.")
         if state not in ("started", "exited"):
             raise HTTPException(400, "state must be started or exited.")
+        if file and agents_mod.is_agent(request) and (why := await asyncio.to_thread(protect.why, file)):
+            raise HTTPException(403, why)
         t0 = time.time()
         after = None
         if changed_after:
@@ -180,7 +206,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
         return {"logs": out}
 
     @r.get("/logs/read")
-    def read_log(index: int | None = None, path: str = "", offset: int = -1, file: str = ""):
+    def read_log(request: Request, index: int | None = None, path: str = "", offset: int = -1, file: str = ""):
         if index is not None:
             entries = config.get("logs", [])
             if not 0 <= index < len(entries):
@@ -188,7 +214,16 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             path = entries[index].get("path", "")
         if not path:
             raise HTTPException(400, "Choose a log.")
-        return logs.read(path, offset, file)
+        if agents_mod.is_agent(request):
+            if protect_mod.is_network_or_device(path):
+                raise HTTPException(403, protect_mod.NETWORK)
+            target = logs.resolve(path)
+            if target is not None and (why := protect.why(target)):
+                raise HTTPException(403, why)
+        try:
+            return logs.read(path, offset, file)
+        except PermissionError:
+            raise HTTPException(403, f"Access denied: {path}")
 
     # ---- screen preview ----
     def screen_allowed():
@@ -210,7 +245,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             return {"monitors": [], "whole_screen": False}
         try:
             return {"monitors": desktop.monitors(), "whole_screen": True}
-        except desktop.NotInDesktopSession as e:
+        except (desktop.NotInDesktopSession, desktop.ScreenUnavailable) as e:
             raise HTTPException(409, str(e))
 
     @r.get("/screen/windows")
@@ -235,7 +270,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             raise HTTPException(403, "Whole-screen preview is turned off on this PC; pick an app instead.")
         try:
             jpeg = desktop.capture_window(window, width, quality, fmt) if window else desktop.capture(monitor, width, quality, fmt)
-        except desktop.NotInDesktopSession as e:
+        except (desktop.NotInDesktopSession, desktop.ScreenUnavailable) as e:
             raise HTTPException(409, str(e))
         except desktop.WindowGone as e:
             raise HTTPException(404, str(e))
@@ -254,11 +289,14 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
 
     @r.post("/clipboard")
     def put_clipboard(body: ClipBody):
+        """Puts text on this PC's clipboard; "changed": false when it already held exactly that text."""
         try:
-            clip.put(body.text, body.origin)
+            changed = clip.put(body.text, body.origin)
         except desktop.NotInDesktopSession as e:
             raise HTTPException(409, str(e))
-        return {"seq": clip.seq}
+        except RuntimeError as e:   # the clipboard is busy (another program has it open)
+            raise HTTPException(409, str(e))
+        return {"seq": clip.seq, "changed": changed}
 
     # ---- Wake-on-LAN ----
     @r.get("/wol/self")

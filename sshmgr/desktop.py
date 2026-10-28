@@ -36,23 +36,46 @@ def _require_desktop():
                                   "It moves there at the next sign-in, or restart the PC.")
 
 
+class ScreenUnavailable(RuntimeError):
+    """Windows won't hand out the screen right now (locked, sign-in screen, an administrator prompt)."""
+
+
+SCREEN_UNAVAILABLE = ("The screen can't be captured right now: the PC may be locked or at the sign-in screen, "
+                      "or showing an administrator (UAC) prompt.")
+
+
+def _grab(fn):
+    try:
+        return fn()
+    except (NotInDesktopSession, WindowGone):
+        raise
+    except Exception as e:   # mss.ScreenShotError (BitBlt failed), OSError from GDI
+        raise ScreenUnavailable(SCREEN_UNAVAILABLE) from e
+
+
 # ---- screen ----
 
 def monitors() -> list[dict]:
     _require_desktop()
     import mss
-    with mss.mss() as sct:
-        return [{"index": i, "width": m["width"], "height": m["height"]} for i, m in enumerate(sct.monitors) if i > 0]
+
+    def get():
+        with mss.mss() as sct:
+            return [{"index": i, "width": m["width"], "height": m["height"]} for i, m in enumerate(sct.monitors) if i > 0]
+    return _grab(get)
 
 
 def capture(monitor: int = 1, width: int = 1280, quality: int = 70, fmt: str = "jpeg") -> bytes:
     _require_desktop()
     import mss
     from PIL import Image
-    with mss.mss() as sct:
-        mons = sct.monitors
-        mon = mons[monitor] if 0 <= monitor < len(mons) else mons[1]
-        shot = sct.grab(mon)
+
+    def grab():
+        with mss.mss() as sct:
+            mons = sct.monitors
+            mon = mons[monitor] if 0 <= monitor < len(mons) else mons[1 if len(mons) > 1 else 0]
+            return sct.grab(mon)
+    shot = _grab(grab)
     return _encode(Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX"), width, quality, fmt)
 
 
@@ -167,6 +190,10 @@ def window_app(hwnd: int) -> str:
 def capture_window(hwnd: int, width: int = 1280, quality: int = 70, fmt: str = "jpeg") -> bytes:
     """One app window, also when other windows cover it (not when it's minimized)."""
     _require_desktop()
+    return _grab(lambda: _capture_window(hwnd, width, quality, fmt))
+
+
+def _capture_window(hwnd: int, width: int, quality: int, fmt: str) -> bytes:
     from PIL import Image
     hwnd = wt.HWND(hwnd)
     if not _u32.IsWindow(hwnd):
@@ -214,14 +241,45 @@ def _open_clipboard():
     raise RuntimeError("The clipboard is busy.")
 
 
-def get_text() -> str | None:
+_u32.RegisterClipboardFormatW.argtypes, _u32.RegisterClipboardFormatW.restype = [wt.LPCWSTR], wt.UINT
+_u32.IsClipboardFormatAvailable.argtypes, _u32.IsClipboardFormatAvailable.restype = [wt.UINT], wt.BOOL
+_u32.GetClipboardData.argtypes, _u32.GetClipboardData.restype = [wt.UINT], wt.HANDLE
+# formats password managers (and Windows' own clipboard history rules) use to say "don't copy this elsewhere"
+CF_EXCLUDE = _u32.RegisterClipboardFormatW("ExcludeClipboardContentFromMonitorProcessing")
+CF_HISTORY = _u32.RegisterClipboardFormatW("CanIncludeInClipboardHistory")
+CF_VIEWER_IGNORE = _u32.RegisterClipboardFormatW("Clipboard Viewer Ignore")
+
+
+def _private() -> bool:
+    """The clipboard (already open) holds something its owner asked not to be shared or recorded."""
+    if _u32.IsClipboardFormatAvailable(CF_EXCLUDE) or _u32.IsClipboardFormatAvailable(CF_VIEWER_IGNORE):
+        return True
+    if _u32.IsClipboardFormatAvailable(CF_HISTORY):
+        handle = _u32.GetClipboardData(CF_HISTORY)
+        if handle:
+            ptr = kernel32.GlobalLock(handle)
+            if ptr:
+                try:
+                    return ctypes.c_uint32.from_address(ptr).value == 0
+                finally:
+                    kernel32.GlobalUnlock(handle)
+    return False
+
+
+def get_text(skip_private: bool = True) -> str | None:
+    """The clipboard's text; None when there is none, or (skip_private) when it is marked as not to be
+    shared (passwords from a password manager)."""
     _require_desktop()
     _open_clipboard()
     try:
+        if skip_private and _private():
+            return None
         handle = user32.GetClipboardData(CF_UNICODETEXT)
         if not handle:
             return None
         ptr = kernel32.GlobalLock(handle)
+        if not ptr:
+            return None
         try:
             return ctypes.wstring_at(ptr)[:MAX_TEXT]
         finally:
@@ -255,6 +313,7 @@ class ClipboardWatch:
         self.origin = ""        # who put the current text there: "" (this PC) or the app's machine name
         self.lock = threading.Lock()
         self.last_win_seq = 0
+        self.changed_at: float | None = None   # when (monotonic) the clipboard last changed; None: not since start
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self):
@@ -265,6 +324,8 @@ class ClipboardWatch:
             win_seq = user32.GetClipboardSequenceNumber()
             if win_seq == self.last_win_seq:
                 continue
+            if self.last_win_seq:   # the first look at startup is not a change
+                self.changed_at = time.monotonic()
             self.last_win_seq = win_seq
             try:
                 text = get_text()
@@ -274,14 +335,29 @@ class ClipboardWatch:
                 if text is not None and text != self.text:
                     self.text, self.origin, self.seq = text, "", self.seq + 1
 
-    def put(self, text: str, origin: str):
+    def put(self, text: str, origin: str) -> bool:
+        """Puts text on this PC's clipboard. Does nothing (returns False) when it already holds exactly that
+        text: two PCs that share clipboards both ways would otherwise keep sending it back and forth, and
+        replace a richer copy (formatting, an image) with plain text."""
+        try:
+            if get_text(skip_private=False) == text:
+                return False
+        except NotInDesktopSession:
+            raise
+        except Exception:
+            pass
         set_text(text)
         with self.lock:
             self.text, self.origin, self.seq = text, origin, self.seq + 1
             self.last_win_seq = user32.GetClipboardSequenceNumber()
+            self.changed_at = time.monotonic()
+        return True
 
     def since(self, seq: int) -> dict:
+        """The text when it changed after seq. age_s: seconds since the clipboard last changed on this PC (any
+        content, also private or non-text); None when it hasn't changed since the server started."""
         with self.lock:
+            age = None if self.changed_at is None else round(time.monotonic() - self.changed_at, 1)
             if self.seq <= seq or self.text is None:
-                return {"seq": self.seq, "changed": False}
-            return {"seq": self.seq, "changed": True, "text": self.text, "origin": self.origin}
+                return {"seq": self.seq, "changed": False, "age_s": age}
+            return {"seq": self.seq, "changed": True, "text": self.text, "origin": self.origin, "age_s": age}

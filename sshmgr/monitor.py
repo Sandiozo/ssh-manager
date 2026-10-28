@@ -1,10 +1,12 @@
 """Watches the SSH server on this PC.
 
-- sshd service state and port 22
-- logins/logouts/failures from the OpenSSH/Operational event log (polled with wevtutil)
-- live sessions (established TCP connections on port 22) and the commands they run, sampled from
+- sshd service state and its port(s) (Port / ListenAddress in sshd_config, and what sshd listens on)
+- logins/logouts/failures from the OpenSSH/Operational event log (polled with wevtutil, in its own
+  thread: never while holding the lock, never on a request; a request that needs a brand-new login
+  waits briefly for the poller instead)
+- live sessions (established TCP connections on the SSH port) and the commands they run, sampled from
   the process table: every process whose parent is an sshd process is one command sent over SSH
-- reachability of the configured computers (ping) and, if installed, the Desktop Commander device status
+- reachability of the configured computers (netcheck.py) and, if installed, the Desktop Commander status
 """
 import base64
 import ctypes
@@ -16,11 +18,13 @@ import subprocess
 import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import psutil
 
+from . import netcheck
 from .activity import ActivityLog
 
 log = logging.getLogger("sshmgr")
@@ -33,18 +37,58 @@ MAX_SCRIPT = 20000
 EVENT_RE = re.compile(
     r"<TimeCreated SystemTime='([^']+)'/>.*?<EventRecordID>(\d+)</EventRecordID>.*?"
     r"<Execution ProcessID='(\d+)'.*?<Data Name='payload'>(.*?)</Data>", re.S)
-ACCEPT_RE = re.compile(r"Accepted (\S+) for (\S+) from (\S+) port (\d+)(?: ssh2)?(?:: (\S+) (\S+))?")
+# user names can contain spaces ("John Smith"): match them lazily up to " from <address> port <n>"
+ACCEPT_RE = re.compile(r"Accepted (\S+) for (.+?) from (\S+) port (\d+)(?: ssh2)?(?:: (\S+) (\S+))?")
 DISCONNECT_RE = re.compile(r"(?:Disconnected from|Connection closed by|Connection reset by)"
-                           r"(?: (?:authenticating |invalid )?user \S+)? (\S+) port (\d+)")
+                           r"(?: (?:authenticating |invalid )?user .+?)? (\S+) port (\d+)")
 RECEIVED_DISCONNECT_RE = re.compile(r"Received disconnect from (\S+) port (\d+):\d+: (.*)")
-FAILED_RE = re.compile(r"Failed (\S+) for (?:invalid user )?(\S+) from (\S+) port (\d+)")
-INVALID_RE = re.compile(r"Invalid user (\S*) from (\S+) port (\d+)")
+FAILED_RE = re.compile(r"Failed (\S+) for (?:invalid user )?(.+?) from (\S+) port (\d+)")
+INVALID_RE = re.compile(r"Invalid user (.*?) from (\S+) port (\d+)")
+SSHD_CONFIG = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ssh" / "sshd_config"
+UNRESOLVED_WAIT = 10        # seconds a finished command waits for its login to appear in the event log
 ENCODED_RE = re.compile(r"-(?:EncodedCommand|enc|ec|e)\s+\"?([A-Za-z0-9+/=]{8,})", re.I)
 
 
+_timeouts = {"count": 0, "logged": 0.0}
+
+
 def run(args: list[str], timeout: float = 15) -> str:
-    r = subprocess.run(args, capture_output=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
+    """Output of a program, or "" when it fails or takes longer than timeout (logged now and then)."""
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=timeout, creationflags=CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        _timeouts["count"] += 1
+        if time.monotonic() - _timeouts["logged"] > 600:
+            _timeouts["logged"] = time.monotonic()
+            log.warning("%s took longer than %ss (%d times so far)", args[0], timeout, _timeouts["count"])
+        return ""
+    except OSError as e:
+        log.warning("%s failed: %s", args[0], e)
+        return ""
     return r.stdout.decode("utf-8", errors="replace")
+
+
+def sshd_config_ports() -> set[int]:
+    """Port and ListenAddress ...:port lines of sshd_config (22 when there are none)."""
+    ports: set[int] = set()
+    try:
+        text = SSHD_CONFIG.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return {22}
+    for line in text.splitlines():
+        parts = line.strip().split(None, 1)
+        if len(parts) != 2 or parts[0].startswith("#"):
+            continue
+        key, value = parts[0].lower(), parts[1].split("#", 1)[0].strip()
+        if key == "match":
+            break   # Port can't be set inside Match blocks
+        if key == "port" and value.isdigit():
+            ports.add(int(value))
+        elif key == "listenaddress":
+            addr = value.split()[0] if value.split() else ""
+            if m := (re.match(r"^\[.*\]:(\d+)$", addr) or re.match(r"^[^:]*:(\d+)$", addr)):
+                ports.add(int(m.group(1)))
+    return ports or {22}
 
 
 def iso(dt: datetime) -> str:
@@ -99,6 +143,11 @@ class Monitor:
         self.decoders: list = []                             # plugin hooks, see plugins.py
         self.finish_hooks: list = []
         self.clients: dict[str, dict] = {}                   # machine name -> stats the SSH Manager app sent
+        self.unresolved: list[dict] = []                     # finished commands waiting for their login event
+        self.poll_now = threading.Event()                    # wakes the event-log poller early
+        self.polled = threading.Condition()
+        self.poll_gen = 0                                    # completed event-log polls
+        self._ports: tuple[float, set[int]] = (-1e9, {22})
         self.peers: dict[str, dict] = {}
         self.reload_peers()
         self.dashboard_port = config.get("port", 8765)
@@ -122,10 +171,51 @@ class Monitor:
 
     # ---- lifecycle ----------------------------------------------------------------------------
     def start(self):
-        self._poll_events(initial=True)
-        for target, interval in ((self._poll_events, 3), (self._poll_peers, 10)):
-            threading.Thread(target=self._loop, args=(target, interval), daemon=True).start()
+        threading.Thread(target=self._events_loop, daemon=True).start()
+        threading.Thread(target=self._loop, args=(self._poll_peers, 10), daemon=True).start()
         threading.Thread(target=self._loop, args=(self._sample_processes, 0.4), daemon=True).start()
+
+    def _events_loop(self):
+        initial = True
+        while True:
+            try:
+                self._poll_events(initial)
+                initial = False
+            except Exception:
+                log.exception("_poll_events failed")
+            try:
+                self._flush_unresolved()
+            except Exception:
+                log.exception("finishing commands failed")
+            with self.polled:
+                self.poll_gen += 1
+                self.polled.notify_all()
+            self.poll_now.wait(3)
+            self.poll_now.clear()
+
+    def fresh_events(self, timeout: float = 1.5) -> bool:
+        """Asks the poller to read the event log now and waits (at most timeout) until it has. Never runs
+        wevtutil itself, so a request can't hang on it."""
+        with self.polled:
+            target = self.poll_gen + 2   # a poll already running may have started before the newest login
+            self.poll_now.set()
+            return self.polled.wait_for(lambda: self.poll_gen >= target, timeout)
+
+    def ssh_ports(self, conns=None) -> set[int]:
+        """The ports sshd listens on: sshd_config's, plus any port an sshd process listens on. Cached."""
+        now = time.monotonic()
+        if now - self._ports[0] < 30:
+            return self._ports[1]
+        ports = sshd_config_ports()
+        try:
+            sshd_pids = {p.pid for p in psutil.process_iter(["name"]) if (p.info["name"] or "").lower() == "sshd.exe"}
+            for c in conns if conns is not None else psutil.net_connections("tcp"):
+                if c.status == psutil.CONN_LISTEN and c.pid in sshd_pids and c.laddr:
+                    ports.add(c.laddr.port)
+        except psutil.Error:
+            pass
+        self._ports = (now, ports)
+        return ports
 
     @staticmethod
     def _loop(fn, interval):
@@ -154,6 +244,7 @@ class Monitor:
 
     # ---- event log ----------------------------------------------------------------------------
     def _poll_events(self, initial: bool = False):
+        """Reads new OpenSSH events. Only called by the poller thread (wevtutil can take long)."""
         if initial:
             out = run(["wevtutil", "qe", "OpenSSH/Operational", "/c:3000", "/rd:true", "/f:xml"])
         else:
@@ -175,6 +266,9 @@ class Monitor:
                     "key_type": key_type, "fp": fp, "start": iso(ts), "end": None, "pid": pid, "reason": None}
             self.conns[(conn["ip"], conn["port"])] = conn
             self.conn_list.append(conn)
+            if len(self.conns) > len(self.conn_list) + 1000:   # forget sessions that dropped out of the history
+                kept = {id(c) for c in self.conn_list}
+                self.conns = {k: c for k, c in self.conns.items() if id(c) in kept or not c["end"]}
         elif m := RECEIVED_DISCONNECT_RE.search(msg):
             if conn := self.conns.get((norm_ip(m.group(1)), int(m.group(2)))):
                 conn["reason"] = m.group(3).strip()
@@ -194,12 +288,14 @@ class Monitor:
                     conn["end"] = conn["end"] or iso(ts)
 
     # ---- sockets and processes ----------------------------------------------------------------
-    def _ssh_sockets(self) -> list:
-        return [c for c in psutil.net_connections("tcp")
-                if c.status == psutil.CONN_ESTABLISHED and c.laddr and c.laddr.port == 22 and c.raddr]
+    def _ssh_sockets(self, conns=None) -> list:
+        conns = psutil.net_connections("tcp") if conns is None else conns
+        ports = self.ssh_ports(conns)
+        return [c for c in conns if c.status == psutil.CONN_ESTABLISHED and c.laddr and c.laddr.port in ports and c.raddr]
 
     def _sample_processes(self):
         pids = set(psutil.pids())
+        ended = []
         with self.lock:
             for pid in [p for p in self.procs if p not in pids]:
                 del self.procs[pid]
@@ -212,12 +308,38 @@ class Monitor:
                 except (psutil.NoSuchProcess, psutil.AccessDenied, ProcessLookupError):
                     self.procs[pid] = ("?", 0, 0)
             for pid in [p for p in self.running if p not in self.procs]:
-                self._finish(self.running.pop(pid))
+                rec = self.running.pop(pid)
+                rec["ended"] = datetime.now(timezone.utc)
+                self._resolve(rec)
+                if rec["ip"]:
+                    ended.append(rec)
+                else:
+                    # short commands can end before the event-log poll has seen their login: the poller
+                    # finishes them once it has (or after UNRESOLVED_WAIT seconds, as "unknown")
+                    rec["wait_until"] = time.monotonic() + UNRESOLVED_WAIT
+                    self.unresolved.append(rec)
+                    del self.unresolved[:-1000]
+                    self.poll_now.set()
             for p in new:
                 name, ppid, ctime = self.procs[p.pid]
                 parent = self.procs.get(ppid, ("",))[0].lower()
                 if parent in SSHD_NAMES and name.lower() not in SSHD_NAMES | IGNORED_CHILDREN:
                     self._start_command(p, name, ppid, ctime)
+        for rec in ended:
+            self._finish(rec)
+
+    def _flush_unresolved(self):
+        """Finishes the commands whose login the last poll found (or that waited long enough)."""
+        now = time.monotonic()
+        done = []
+        with self.lock:
+            for rec in list(self.unresolved):
+                self._resolve(rec)
+                if rec["ip"] or now > rec["wait_until"]:
+                    self.unresolved.remove(rec)
+                    done.append(rec)
+        for rec in done:
+            self._finish(rec)
 
     def _start_command(self, p: psutil.Process, name: str, ppid: int, ctime: float):
         try:
@@ -260,13 +382,9 @@ class Monitor:
                 return
 
     def _finish(self, rec: dict):
-        self._resolve(rec)
-        if not rec["ip"]:
-            # short commands can end before the 3 s event-log poll has seen their login
-            self._poll_events()
-            self._resolve(rec)
+        """Records a finished command in the activity log (not called while holding the lock)."""
         start = datetime.fromisoformat(rec["start"])
-        duration = max(0.0, (datetime.now(timezone.utc) - start).total_seconds())
+        duration = max(0.0, ((rec.get("ended") or datetime.now(timezone.utc)) - start).total_seconds())
         extra = {}
         for hook in self.finish_hooks:
             try:
@@ -281,17 +399,22 @@ class Monitor:
 
     # ---- peers and Desktop Commander ----------------------------------------------------------
     def _poll_peers(self):
-        for peer in list(self.peers.values()):
+        peers = list(self.peers.values())
+        if peers:
+            with ThreadPoolExecutor(max_workers=min(8, len(peers))) as pool:
+                list(pool.map(self._check_peer, peers))
+
+    def _check_peer(self, peer: dict):
+        try:
             res = {"online": False, "latency_ms": None, "checked": iso(datetime.now(timezone.utc))}
             for target in [t for t in (peer.get("host"), peer.get("ip")) if t]:
-                out = run(["ping", "-4", "-n", "1", "-w", "800", target], timeout=5)
-                if "TTL=" in out:
-                    m = re.search(r"from ([\d.]+):.*?time[=<](\d+)ms", out)
-                    res.update(online=True, latency_ms=int(m.group(2)) if m else None,
-                               resolved_ip=m.group(1) if m else peer.get("ip"), via=target)
+                if found := netcheck.reach(target):
+                    res.update(online=True, latency_ms=found[1], resolved_ip=found[0], via=target)
                     break
             with self.lock:
                 peer.update(res)
+        except Exception:
+            log.exception("checking %s failed", peer.get("name"))
 
     @staticmethod
     def desktop_commander() -> dict:
@@ -330,10 +453,11 @@ class Monitor:
     def status(self, tunnel_agents: dict[int, list[str]] | None = None) -> dict:
         """`tunnel_agents`: sshd PID of a port forward -> AI agents that used it recently (see agents.py)."""
         now = datetime.now(timezone.utc)
+        tcp = psutil.net_connections("tcp")
+        sockets = self._ssh_sockets(tcp)
+        ssh_ports = self.ssh_ports(tcp)
+        tunnel_pids = {c.pid for c in tcp if c.raddr and c.raddr.port == self.dashboard_port and c.status == psutil.CONN_ESTABLISHED}
         with self.lock:
-            sockets = self._ssh_sockets()
-            tunnel_pids = {c.pid for c in psutil.net_connections("tcp")
-                           if c.raddr and c.raddr.port == self.dashboard_port and c.status == psutil.CONN_ESTABLISHED}
             for rec in self.running.values():
                 self._resolve(rec)
             sessions = []
@@ -394,8 +518,8 @@ class Monitor:
             sshd = {"installed": True, "status": svc["status"], "start_type": svc["start_type"], "pid": svc["pid"]}
         except Exception:
             sshd = {"installed": False, "status": "missing", "start_type": None, "pid": None}
-        sshd["listening"] = any(c.status == psutil.CONN_LISTEN and c.laddr.port == 22
-                                for c in psutil.net_connections("tcp"))
+        sshd["listening"] = any(c.status == psutil.CONN_LISTEN and c.laddr and c.laddr.port in ssh_ports for c in tcp)
+        sshd["ports"] = sorted(ssh_ports)
         vm = psutil.virtual_memory()
         disks = []
         for part in self._partitions():
@@ -435,17 +559,18 @@ class Monitor:
 
     def _conn_for_pid(self, pid: int) -> dict | None:
         """The open SSH session that owns process pid (e.g. the sshd end of a tunnel)."""
-        with self.lock:
-            chain, p = [], pid
-            while p and p not in chain:
-                chain.append(p)
-                p = self.procs.get(p, ("", 0, 0))[1]
-            for attempt in range(2):
+        for attempt in range(2):
+            with self.lock:
+                chain, p = [], pid
+                while p and p not in chain:
+                    chain.append(p)
+                    p = self.procs.get(p, ("", 0, 0))[1]
                 for conn in reversed(self.conn_list):
                     if conn["pid"] in chain and not conn["end"]:
                         return conn
-                if attempt == 0:
-                    self._poll_events()   # a brand-new session's login may not be read from the log yet
+            # a brand-new session's login may not be read from the log yet: let the poller read it
+            if attempt == 0 and not self.fresh_events():
+                break
         return None
 
     def label_for_pid(self, pid: int) -> str | None:

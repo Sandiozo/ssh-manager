@@ -17,7 +17,8 @@ from pathlib import Path
 
 CREATE_NO_WINDOW = 0x08000000
 MAX_LINES = 5000
-KEEP_RUNS = 50
+KEEP_RUNS = 50                    # finished runs kept (runs still going are always kept)
+MAX_OUTPUT = 50 * 1024 * 1024     # bytes of output written to a run's file; the rest is only streamed
 PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
 
 
@@ -38,6 +39,13 @@ def decode_clixml(line: str) -> list[str] | None:
     return text.replace("\r\n", "\n").rstrip("\n").split("\n") if text else []
 
 
+def signed(code: int) -> int:
+    """Windows exit codes are unsigned 32-bit (0xC0000005 = 3221225477); report them as signed ints
+    (-1073741819), as PowerShell and most tools do."""
+    code &= 0xFFFFFFFF
+    return code - 0x100000000 if code >= 0x80000000 else code
+
+
 def _iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -49,7 +57,7 @@ class Run:
         self.output = output.with_name(f"{self.id}.log")
         self.lines: list[str] = []
         self.dropped = 0          # lines no longer in memory (still in the output file)
-        self.status = "running"   # running | done | failed | stopped
+        self.status = "running"   # running | done | failed | stopped | timeout
         self.exit_code: int | None = None
         self.started = _iso()
         self.ended: str | None = None
@@ -94,33 +102,70 @@ class Runner:
         with self.lock:
             self.runs[run.id] = run
             self.order.append(run.id)
-            while len(self.order) > KEEP_RUNS:
-                gone = self.runs.pop(self.order.pop(0), None)
-                if gone and gone.status != "running":
-                    try:
-                        gone.output.unlink(missing_ok=True)
-                    except OSError:
-                        pass
+        self._prune()
         threading.Thread(target=self._pump, args=(run, timeout), daemon=True).start()
         return run
 
+    def _prune(self):
+        """Forgets the oldest finished runs beyond KEEP_RUNS (and deletes their output files). Runs that
+        are still going are never dropped."""
+        with self.lock:
+            finished = [i for i in self.order if self.runs[i].status != "running"]
+            gone = finished[:max(0, len(finished) - KEEP_RUNS)]
+            for i in gone:
+                self.order.remove(i)
+                run = self.runs.pop(i)
+                try:
+                    run.output.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def busy(self) -> bool:
+        """A run is still going (the updater waits for it)."""
+        with self.lock:
+            return any(r.status == "running" for r in self.runs.values())
+
     def _pump(self, run: Run, timeout: float):
-        if timeout:
-            threading.Timer(timeout, lambda: run.status == "running" and self.stop(run.id)).start()
-        with open(run.output, "w", encoding="utf-8", newline="\n") as out:
+        if timeout:   # enforced here, so the limit holds even when whoever started the run went away
+            timer = threading.Timer(timeout, lambda: run.status == "running" and self.stop(run.id, "timeout"))
+            timer.daemon = True
+            timer.start()
+        try:
+            out = open(run.output, "w", encoding="utf-8", newline="\n")
+        except OSError:
+            out = None   # no output file (disk full, no access): the run still streams to the page
+        written = 0
+        try:
             for raw in iter(run.proc.stdout.readline, b""):
                 line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
                 decoded = decode_clixml(line)
                 for line in [line] if decoded is None else decoded:
-                    out.write(line + "\n")
-                    out.flush()
+                    if out is not None:
+                        try:
+                            if written + len(line) + 1 > MAX_OUTPUT:
+                                out.write(f"[output truncated: only the first {MAX_OUTPUT // (1024 * 1024)} MB are kept "
+                                          "in this file]\n")
+                                out.close()
+                                out = None
+                            else:
+                                out.write(line + "\n")
+                                out.flush()
+                                written += len(line.encode("utf-8", errors="replace")) + 1
+                        except OSError:
+                            out = None
                     with run.lock:
                         run.lines.append(line)
                         if len(run.lines) > MAX_LINES:
                             extra = len(run.lines) - MAX_LINES
                             del run.lines[:extra]
                             run.dropped += extra
-        code = run.proc.wait()
+        finally:
+            if out is not None:
+                try:
+                    out.close()
+                except OSError:
+                    pass
+        code = signed(run.proc.wait())
         with run.lock:
             run.exit_code = code
             if run.status == "running":
@@ -131,13 +176,18 @@ class Runner:
         self.activity.add("action", ts=run.started, client=run.client, title=run.title, script=run.script[:20000],
                           output=tail, exit_code=code, status=run.status, duration_s=round(run.t1 - run.t0, 1),
                           **({"agent": run.agent} if run.agent else {}))
+        self._prune()
 
-    def stop(self, run_id: str) -> bool:
+    def stop(self, run_id: str, status: str = "stopped") -> bool:
         run = self.runs.get(run_id)
         if not run or run.status != "running" or not run.proc:
             return False
-        run.status = "stopped"
-        subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True, creationflags=CREATE_NO_WINDOW)
+        run.status = status
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True,
+                           creationflags=CREATE_NO_WINDOW, timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            run.proc.kill()
         return True
 
     def get(self, run_id: str) -> Run | None:

@@ -1,7 +1,6 @@
 """Settings API: the computer list, key labels, file shortcuts and display name (config.json), plus the
 SSH keys allowed to log in (administrators_authorized_keys)."""
 import ipaddress
-import json
 import os
 import re
 from pathlib import Path
@@ -9,7 +8,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from . import keys, wol
+from . import cfgfile, keys, wol
 from .activity import ActivityLog
 
 
@@ -68,9 +67,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
     r = APIRouter(prefix="/api")
 
     def save():
-        tmp = config_path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        os.replace(tmp, config_path)
+        cfgfile.save(config, config_path)   # callers hold cfgfile.lock around their change + save
 
     def current() -> dict:
         return {"name": config.get("name", ""), "computer_name": os.environ.get("COMPUTERNAME", ""),
@@ -103,7 +100,19 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
                     wol.normalize(p.mac)
                 except ValueError as e:
                     raise HTTPException(400, f"{p.name}: {e}")
-        before = current()
+        with cfgfile.lock:
+            before = current()
+            apply(body)
+            save()
+            after = current()
+        monitor.reload_peers()
+        changed = [k for k in ("name", "peers", "keys", "bookmarks", "default_upload", "auto_update", "actions", "logs",
+                               "screen_preview", "screen_apps", "screen_monitors", "ai_access") if before[k] != after[k]]
+        if changed:
+            activity.add("setup", action="settings", client=who(request), changed=changed)
+        return after
+
+    def apply(body: SettingsBody):
         config["name"] = body.name.strip()
         config["peers"] = [{"name": p.name.strip(), "host": p.host.strip(), "ip": p.ip.strip(),
                             **({"mac": wol.normalize(p.mac)} if p.mac.strip() else {})} for p in body.peers]
@@ -129,13 +138,6 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             config["screen_monitors"] = body.screen_monitors
         if body.ai_access is not None:
             config["ai_access"] = body.ai_access
-        save()
-        monitor.reload_peers()
-        changed = [k for k in ("name", "peers", "keys", "bookmarks", "default_upload", "auto_update", "actions", "logs",
-                               "screen_preview", "screen_apps", "screen_monitors", "ai_access") if before[k] != current()[k]]
-        if changed:
-            activity.add("setup", action="settings", client=who(request), changed=changed)
-        return current()
 
     @r.get("/keys")
     def get_keys():
@@ -155,8 +157,9 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
         except keys.KeyError_ as e:
             raise HTTPException(400, str(e))
         if body.label.strip():
-            config.setdefault("keys", {})[k["fingerprint"]] = body.label.strip()
-            save()
+            with cfgfile.lock:
+                config.setdefault("keys", {})[k["fingerprint"]] = body.label.strip()
+                save()
         activity.add("setup", action="key-added", client=who(request), fingerprint=k["fingerprint"],
                      label=body.label.strip() or k["comment"])
         return k
@@ -170,8 +173,9 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             keys.remove_key(body.fingerprint, data_dir)
         except keys.KeyError_ as e:
             raise HTTPException(400, str(e))
-        label = config.get("keys", {}).pop(body.fingerprint, "")
-        save()
+        with cfgfile.lock:
+            label = config.get("keys", {}).pop(body.fingerprint, "")
+            save()
         activity.add("setup", action="key-removed", client=who(request), fingerprint=body.fingerprint, label=label)
         return {"removed": body.fingerprint}
 

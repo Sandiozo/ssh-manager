@@ -1,5 +1,6 @@
 """Log viewer: follows the end of a text file. A configured log can name a file or a pattern (e.g.
 logs\\app-*.log); a pattern follows the newest matching file, so daily rotation is handled."""
+import codecs
 import glob
 import os
 from pathlib import Path
@@ -19,10 +20,13 @@ def resolve(pattern: str) -> Path | None:
     return p if p.is_file() else None
 
 
-def _decode(data: bytes, utf16: bool) -> str:
-    if utf16:
-        return data.decode("utf-16-le", errors="replace").lstrip("﻿")
-    return data.decode("utf-8", errors="replace").lstrip("﻿")
+def _decode(data: bytes, utf16: bool) -> tuple[str, int]:
+    """(text, bytes used): a character cut off at the end of the chunk is left for the next read
+    instead of turning into a replacement character."""
+    dec = codecs.getincrementaldecoder("utf-16-le" if utf16 else "utf-8")(errors="replace")
+    text = dec.decode(data, final=False)
+    pending = len(dec.getstate()[0])
+    return text.lstrip("﻿"), len(data) - pending
 
 
 def read(pattern: str, offset: int = -1, file: str = "") -> dict:
@@ -41,8 +45,8 @@ def read(pattern: str, offset: int = -1, file: str = "") -> dict:
             start += 1
         f.seek(start)
         data = f.read(min(MAX_CHUNK, size - start))
-    text = _decode(data, utf16)
+    text, used = _decode(data, utf16)
     if reset and start > 0:
         text = text.split("\n", 1)[-1]   # drop the partial first line
-    return {"file": str(path), "text": text, "offset": start + len(data), "reset": reset, "size": size,
+    return {"file": str(path), "text": text, "offset": start + used, "reset": reset, "size": size,
             "mtime": path.stat().st_mtime, "error": None}

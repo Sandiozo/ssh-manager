@@ -27,12 +27,31 @@ class PluginContext:
         self.monitor.finish_hooks.append(fn)
 
 
+def unsafe(folder: Path, files: list[Path]) -> str | None:
+    """Why plugins can't be trusted here: the plugins folder (or the home folder around it, or a plugin
+    file) can be changed by an account other than this user, Administrators and SYSTEM. The server runs
+    plugins with its own (admin) rights, so such an account could take over this PC."""
+    from . import winsec
+    try:
+        trusted = winsec.trusted_sids(winsec.current_user_sid())
+    except OSError as e:
+        return f"can't tell which account this server runs as ({e})"
+    for p in [folder.parent, folder, *files]:
+        if sids := winsec.others_with(str(p), trusted, winsec.WRITE_BITS):
+            who = ", ".join(winsec.account_name(s) for s in sids)
+            return f"{p} can be changed by {who}"
+    return None
+
+
 def load(ctx: PluginContext) -> list[dict]:
     loaded = []
     folder = ctx.home / "plugins"
-    for path in sorted(folder.glob("*.py")) if folder.is_dir() else []:
-        if path.name.startswith("_"):
-            continue
+    files = [p for p in sorted(folder.glob("*.py")) if not p.name.startswith("_")] if folder.is_dir() else []
+    if files and (why := unsafe(folder, files)):
+        log.error("plugins not loaded: %s. Only this user, Administrators and SYSTEM may be able to change the "
+                  "plugins (the server runs them with its rights); fix the folder's permissions and restart.", why)
+        return [{"name": p.stem, "ok": False, "description": f"not loaded: {why} (see server.log)"} for p in files]
+    for path in files:
         try:
             spec = importlib.util.spec_from_file_location(f"sshmgr_plugin_{path.stem}", path)
             module = importlib.util.module_from_spec(spec)

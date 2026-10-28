@@ -35,21 +35,37 @@ def send(mac: str, ips: list[str] | None = None) -> None:
                     pass
 
 
-_physical: tuple[float, set[str]] = (0.0, set())
+_physical: tuple[float, dict[str, int | None]] = (-1e9, {})
+# NDIS_PHYSICAL_MEDIUM values of wireless adapters: wireless LAN, wireless WAN, native 802.11, Bluetooth,
+# WiMAX, UWB, IrDA, 802.15.4
+WIRELESS_MEDIA = {1, 8, 9, 10, 12, 13, 16, 20}
 
 
-def physical_adapters() -> set[str]:
-    """Names of real network cards (not VPN/virtual adapters), from Windows; cached for 10 minutes."""
+def physical_adapters() -> dict[str, int | None]:
+    """Real network cards (not VPN/virtual adapters) -> their physical medium (NdisPhysicalMedium, a number,
+    so it doesn't depend on the Windows language or the adapter's name); cached for 10 minutes."""
     global _physical
-    if time.time() - _physical[0] > 600:
+    if time.monotonic() - _physical[0] > 600:
+        found: dict[str, int | None] = {}
         try:
             out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-                                  "Get-NetAdapter -Physical | ForEach-Object Name"],
+                                  "[Console]::OutputEncoding = [Text.Encoding]::UTF8; Get-NetAdapter -Physical | ForEach-Object { \"$($_.NdisPhysicalMedium)`t$($_.Name)\" }"],
                                  capture_output=True, timeout=20, creationflags=0x08000000).stdout
-            _physical = (time.time(), {n.strip() for n in out.decode(errors="replace").splitlines() if n.strip()})
+            for line in out.decode("utf-8", errors="replace").splitlines():
+                medium, _, name = line.strip("\r\n").partition("\t")
+                if name.strip():
+                    found[name.strip()] = int(medium) if medium.strip().isdigit() else None
         except Exception:
-            _physical = (time.time(), set())
+            pass
+        _physical = (time.monotonic(), found)
     return _physical[1]
+
+
+def _wired(name: str, medium: int | None) -> bool:
+    if medium is not None:
+        return medium not in WIRELESS_MEDIA
+    low = name.lower()
+    return not any(w in low for w in ("wi-fi", "wifi", "wlan", "wireless", "802.11"))
 
 
 def own_macs() -> list[dict]:
@@ -63,5 +79,5 @@ def own_macs() -> list[dict]:
         mac = next((a.address for a in addrs if a.family == psutil.AF_LINK), None)
         ips = [a.address for a in addrs if a.family == socket.AF_INET and not a.address.startswith(("127.", "169.254."))]
         if mac and ips and mac.replace("-", "") != "000000000000":
-            out.append({"adapter": name, "mac": normalize(mac), "ips": ips, "wired": "wi" not in name.lower()})
+            out.append({"adapter": name, "mac": normalize(mac), "ips": ips, "wired": _wired(name, physical.get(name))})
     return sorted(out, key=lambda a: not a["wired"])   # wired first: Wake-on-LAN usually only works there

@@ -399,7 +399,8 @@ begin
   Top := T.Top + T.Height + ScaleY(18);
   AddText('Needed for this:', 0, Top, True);
   DepsLabel := AddText('', 0, Top + ScaleY(18), False);
-  if ServerInstalled then BothRadio.Checked := True else ClientRadio.Checked := True;
+  { start from the chosen roles: leaving this page (also in silent installs) applies the selection }
+  if ServerChosen and ((Roles <> '') or ServerInstalled) then BothRadio.Checked := True else ClientRadio.Checked := True;
   RolesChanged(nil);
 end;
 

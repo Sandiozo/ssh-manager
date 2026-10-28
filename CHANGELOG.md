@@ -3,6 +3,16 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [Unreleased]
+
+### Security
+- The offline backup release key was replaced with a new one.
+
+### Fixed
+- All PCs: the Computers table no longer scrolls sideways in a window about 1400 pixels wide; a computer's
+  details line shows in full on hover.
+- Activity lists: the type ("POWERSHELL") no longer runs into the computer name.
+
 ## [1.7.1] - 2026-10-28
 
 The 1.7.0 installer published on GitHub was wrongly flagged by Microsoft Defender as a trojan (a

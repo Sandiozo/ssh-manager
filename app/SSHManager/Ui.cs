@@ -271,7 +271,7 @@ internal static class Ui
         .machines tbody tr:hover td { background:var(--hover); }
         .machines .who { display:flex; align-items:center; gap:10px; }
         .machines .who b { font-weight:600; }
-        .machines .who small { display:block; color:var(--muted); font-size:11.5px; max-width:340px; overflow:hidden; text-overflow:ellipsis; }
+        .machines .who small { display:block; color:var(--muted); font-size:11.5px; max-width:260px; overflow:hidden; text-overflow:ellipsis; }
         .machines .msg { color:var(--muted); font-size:11.5px; white-space:normal; max-width:420px; }
         .machines .acts { display:flex; gap:6px; justify-content:flex-end; }
         .machines .acts button { height:26px; padding:0 10px; font-size:12px; }
@@ -305,7 +305,7 @@ internal static class Ui
         .seg button:first-child { border-left:0; }
         .seg button.on { background:var(--accent-wash); color:var(--ink); font-weight:600; }
         #acts { max-height:600px; overflow-y:auto; }
-        .act { display:grid; grid-template-columns:48px minmax(90px, 140px) 76px minmax(70px, 120px) minmax(0, 1fr); gap:10px; align-items:center; min-height:32px;
+        .act { display:grid; grid-template-columns:48px minmax(90px, 140px) 90px minmax(70px, 120px) minmax(0, 1fr); gap:10px; align-items:center; min-height:32px;
                padding:0 6px; border-top:1px solid var(--rule); cursor:pointer; font-size:12.5px; }
         .act:first-child { border-top:0; } .act:hover { background:var(--hover); }
         .act .t { color:var(--muted); font-size:11.5px; font-variant-numeric:tabular-nums; }
@@ -384,7 +384,8 @@ internal static class Ui
                p.canUpdate ? `<button data-act="update-pc" data-id="${esc(p.id)}">Update to v${esc(p.latest)}</button>` : "",
                p.local ? "" : `<button data-act="edit-pc" data-id="${esc(p.id)}">Edit</button><button data-act="remove-pc" data-id="${esc(p.id)}">Remove</button>`].join("");
           const msg = p.state !== "Connected" && p.kind === "pc" && p.message ? `<div class="msg">${esc(p.message)}</div>` : "";
-          return `<tr><td><div class="who"><span class="dot ${st}"></span><div><b>${esc(p.name)}</b><small>${sub}${extra ? " · " + esc(extra) : ""}</small>${msg}</div>${tag}</div></td>
+          const line = sub + (extra ? " · " + esc(extra) : "");
+          return `<tr><td><div class="who"><span class="dot ${st}"></span><div><b>${esc(p.name)}</b><small title="${line}">${line}</small>${msg}</div>${tag}</div></td>
             <td>${mini(s.cpu)}</td><td>${mini(s.ram_total ? s.ram_used / s.ram_total * 100 : null)}</td><td class="num">${disks}</td>
             <td class="num">${p.sessions ?? `<span class="dim">—</span>`}${p.failures ? ` <span class="tag" style="color:var(--critical)">${p.failures} failed</span>` : ""}</td>
             <td><div class="acts">${btns}</div></td></tr>`;

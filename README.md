@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="SSH Manager: overview of a PC with its computers, live sessions and recent activity" width="100%">
+  <img src="docs/screenshot.png" alt="SSH Manager's All PCs page: every PC with CPU, memory and disks, SSH logins per PC over 24 hours, and one activity timeline" width="100%">
 </p>
 
 ## Why SSH Manager
@@ -93,6 +93,19 @@ once, in one of three ways:
 Each PC decides for itself who may manage it: adding PC B on PC A never lets B manage A.
 
 ## Features
+
+<table>
+  <tr>
+    <td width="33%"><img src="docs/screenshot-pc.png" alt="A PC's dashboard: SSH server, sessions, logins, CPU and memory, the computers that connect to it, live sessions with an AI agent, and recent activity"></td>
+    <td width="33%"><img src="docs/screenshot-files.png" alt="The file browser of a PC: shortcuts, drives and a folder's files, with send, download and rename"></td>
+    <td width="33%"><img src="docs/screenshot-light.png" alt="The All PCs page in the light appearance"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>One PC's dashboard</sub></td>
+    <td align="center"><sub>Files: drag and drop both ways</sub></td>
+    <td align="center"><sub>Light appearance</sub></td>
+  </tr>
+</table>
 
 **Monitor**
 

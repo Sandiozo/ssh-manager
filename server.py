@@ -69,7 +69,7 @@ COOKIE = "sshmgr_token"
 
 activity = ActivityLog(DATA / "activity.jsonl")
 monitor = Monitor(config, activity)
-updater = Updater(config, DATA, activity)
+updater = Updater(config, DATA, activity, busy=lambda: runner.busy() or sys.modules["sshmgr.files"].transfers_active() > 0)
 runner = Runner(activity, DATA)
 agents = agents_mod.Agents()
 app = FastAPI(title="SSH Manager", docs_url=None, redoc_url=None)

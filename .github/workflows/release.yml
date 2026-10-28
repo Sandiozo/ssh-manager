@@ -1,68 +1,244 @@
-# Builds SSHManager-Setup.exe and attaches it to the GitHub release when a version tag (v1.2.3) is
-# pushed. The tag must match __version__ in sshmgr/__init__.py.
+# Builds SSHManager-Setup.exe, tries it out on the runner (installs it, checks the server and the
+# command-line tool, uninstalls it), signs it and publishes the GitHub release when a version tag
+# (v1.2.3) is pushed. The tag must match __version__ in sshmgr/__init__.py.
+#
+# Signing: the repository secret RELEASE_SIGNING_KEY holds the release key, an unencrypted ed25519
+# private key in OpenSSH format. Its public half is pinned in sshmgr/updater.py and
+# app/SSHManager/AppUpdater.cs (and below); the apps install an update only with a valid signature.
+# The release is created as a draft, gets all three files (exe, .sha256, .sig) and only then is
+# published, so nobody sees a release without them.
+#
+# Manual runs (workflow_dispatch) build and test, and attach the files to the run; with "sign" they
+# are signed too (to check the secret before a real release).
 name: Release
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      sign:
+        description: "Also sign the installer (checks the RELEASE_SIGNING_KEY secret)"
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # the release key's public half, as in sshmgr/updater.py and app/SSHManager/AppUpdater.cs
+  ALLOWED_SIGNERS: "sshmanager-release ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINA7i2sOU03vcOMdvoyMlz09XEufb34fqN8PprEfNd8r"
 
 jobs:
   build:
     runs-on: windows-latest
+    timeout-minutes: 75
+    permissions:
+      contents: write   # creating the release
+    defaults:
+      run:
+        shell: pwsh
     steps:
-      - uses: actions/checkout@v4
+      # third-party actions are pinned to commits (the comment says which release that is)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1   # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0   # v7.1.0
         with:
           python-version: "3.12"
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68   # v6.0.0
         with:
-          dotnet-version: "8.0.x"
+          dotnet-version: "10.0.x"
+
+      - name: Check the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          $v = ((Get-Content sshmgr/__init__.py -Raw) -replace '(?s).*__version__\s*=\s*"([^"]+)".*', '$1').Trim()
+          if ("v$v" -cne $env:TAG) { throw "Tag $env:TAG doesn't match __version__ $v in sshmgr/__init__.py" }
+          "Version $v"
 
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
-          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
-
-      - name: Check version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          $v = ((Get-Content sshmgr/__init__.py -Raw) -replace '(?s).*__version__\s*=\s*"([^"]+)".*', '$1').Trim()
-          if ("v$v" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} doesn't match __version__ $v" }
+          # the installer script needs Inno Setup 6.5 or newer
+          choco upgrade innosetup -y --no-progress
+          if ($LASTEXITCODE) { throw "Installing Inno Setup failed" }
 
       - name: Build installer
         run: ./build.ps1 -Python python
 
+      # Installs the built installer on this runner like a user would (both roles, silently), checks
+      # that the server answers and the command-line tool runs, then uninstalls it. A broken
+      # installer never gets released.
+      - name: Try the installer
+        timeout-minutes: 35
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $logs = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP\smoke-logs"
+          $dir = "$env:ProgramFiles\SSH Manager"
+          $v = ((Get-Content sshmgr/__init__.py -Raw) -replace '(?s).*__version__\s*=\s*"([^"]+)".*', '$1').Trim()
+
+          "== install (roles app,server)"
+          $p = Start-Process build\SSHManager-Setup.exe -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/ROLES=app,server', "/LOG=$logs\install.log"
+          if ($p.ExitCode) { throw "Setup exited with code $($p.ExitCode)" }
+          foreach ($f in 'App\SSHManager.exe', 'Cli\sshmgr.exe', 'Server\SSHManagerServer.exe', 'Server\ensure-running.ps1', 'Tools\HiddenRun.exe') {
+            if (-not (Test-Path "$dir\$f")) { throw "Missing after install: $f" }
+          }
+          Copy-Item "$dir\Server\setup.log" $logs -ErrorAction SilentlyContinue
+          Get-Content "$dir\Server\setup.log" -ErrorAction SilentlyContinue | Select-String 'WARNING|FAILED|OpenSSH' | ForEach-Object { "setup.log: $_" }
+
+          "== --client-info"
+          $info = & "$dir\Server\SSHManagerServer.exe" --client-info
+          if ($LASTEXITCODE) { throw "--client-info exited with $LASTEXITCODE" }
+          $map = @{}
+          foreach ($line in $info) { if ($line -match '^SSHMGR-(VERSION|PORT|TOKEN):(.+)$') { $map[$Matches[1]] = $Matches[2].Trim() } }
+          if ($map.VERSION -ne $v) { throw "--client-info version '$($map.VERSION)', expected $v" }
+          if (-not ($map.PORT -match '^\d+$')) { throw "--client-info port '$($map.PORT)'" }
+          if (-not $map.TOKEN -or $map.TOKEN.Length -lt 16) { throw "--client-info printed no token" }
+          $port = [int]$map.PORT
+          "version $($map.VERSION), port $port, token present"
+
+          "== server listening"
+          function Wait-Port([int]$seconds) {
+            $end = (Get-Date).AddSeconds($seconds)
+            while ((Get-Date) -lt $end) {
+              if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { return $true }
+              Start-Sleep -Seconds 2
+            }
+            return $false
+          }
+          if (-not (Wait-Port 90)) {
+            # the logon task runs only in a signed-in desktop session, which a runner may not have
+            Write-Warning "The logon task didn't start the server: $((Get-ScheduledTaskInfo -TaskName 'SSH Manager' -ErrorAction SilentlyContinue | Format-List | Out-String).Trim())"
+            Start-Process "$dir\Server\SSHManagerServer.exe" -ArgumentList '--log-console' -WorkingDirectory "$dir\Server" -WindowStyle Hidden
+            if (-not (Wait-Port 90)) { throw "The server didn't start listening on port $port" }
+          }
+          $ping = Invoke-WebRequest "http://127.0.0.1:$port/api/ping" -UseBasicParsing -TimeoutSec 30
+          if ($ping.StatusCode -ne 200) { throw "/api/ping answered $($ping.StatusCode)" }
+          "server answers on port $port"
+
+          "== ensure-running.ps1 (what the app runs over SSH)"
+          $job = Start-Job { powershell -NoProfile -ExecutionPolicy Bypass -File "$using:dir\Server\ensure-running.ps1" }
+          $out = @()
+          foreach ($i in 1..60) {
+            $out += @(Receive-Job $job)
+            if ($out -match '^SSHMGR-(TOKEN|ERROR):') { break }
+            Start-Sleep -Seconds 1
+          }
+          Stop-Job $job; Remove-Job $job -Force
+          if ($out -match '^SSHMGR-ERROR:') { throw "ensure-running.ps1: $($out -match '^SSHMGR-ERROR:')" }
+          if (-not ($out -match '^SSHMGR-TOKEN:')) { throw "ensure-running.ps1 printed no token: $out" }
+          "ensure-running.ps1 hands out the token"
+
+          "== sshmgr.exe --help"
+          $help = & "$dir\Cli\sshmgr.exe" --help 2>&1
+          if ($LASTEXITCODE) { throw "sshmgr --help exited with $LASTEXITCODE`n$help" }
+          if (-not ("$help" -match 'sshmgr')) { throw "sshmgr --help printed: $help" }
+          "sshmgr.exe runs"
+
+          "== uninstall (/REMOVEACCESS)"
+          & "$dir\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /REMOVEACCESS "/LOG=$logs\uninstall.log"
+          # unins000.exe hands over to a copy of itself in %TEMP% and returns at once: wait for that
+          $end = (Get-Date).AddMinutes(5)
+          while ((Get-Date) -lt $end -and ((Test-Path "$dir\unins000.exe") -or (Get-Process '_iu*', 'unins000' -ErrorAction SilentlyContinue))) { Start-Sleep -Seconds 2 }
+          if (Test-Path "$dir\unins000.exe") { throw "Uninstall didn't finish" }
+          if (Get-ScheduledTask -TaskName 'SSH Manager' -ErrorAction SilentlyContinue) { throw "The logon task is still there after uninstalling" }
+          if (Get-Process SSHManagerServer, SSHManager -ErrorAction SilentlyContinue) { throw "SSH Manager is still running after uninstalling" }
+          if (Test-Path "$env:ProgramData\SSHManager") { throw "$env:ProgramData\SSHManager is still there after uninstalling" }
+          if (Get-NetFirewallRule -Name 'SSHManager-sshd' -ErrorAction SilentlyContinue) { throw "The firewall rule is still there after uninstalling" }
+          "uninstalled cleanly"
+
+      - name: Keep the test logs
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
+        with:
+          name: smoke-test-logs
+          path: ${{ runner.temp }}/smoke-logs
+
+      # The key goes to a file only this account can read, and is deleted right after. The signature
+      # is checked against the pinned public key, so a wrong secret fails here, not on users' PCs.
+      - name: Sign the installer
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.sign
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RELEASE_SIGNING_KEY) { throw "The RELEASE_SIGNING_KEY secret is missing; releases must be signed." }
+          $keygen = "$env:WINDIR\System32\OpenSSH\ssh-keygen.exe"
+          $key = Join-Path $env:RUNNER_TEMP ("release-key-" + [guid]::NewGuid().ToString('N'))
+          $signers = Join-Path $env:RUNNER_TEMP 'allowed_signers'
+          try {
+            New-Item -ItemType File -Path $key -Force | Out-Null
+            $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            icacls $key /inheritance:r /grant:r "*${me}:F" | Out-Null
+            if ($LASTEXITCODE) { throw "Couldn't restrict the key file's permissions" }
+            $text = ($env:RELEASE_SIGNING_KEY -replace "`r`n", "`n").Trim() + "`n"
+            [IO.File]::WriteAllText($key, $text, (New-Object Text.UTF8Encoding($false)))
+            Remove-Item build/SSHManager-Setup.exe.sig -ErrorAction SilentlyContinue
+            & $keygen -Y sign -f $key -n sshmanager-release build/SSHManager-Setup.exe
+            if ($LASTEXITCODE -or -not (Test-Path build/SSHManager-Setup.exe.sig)) { throw "Signing failed" }
+          } finally {
+            Remove-Item $key -Force -ErrorAction SilentlyContinue
+          }
+          Set-Content $signers $env:ALLOWED_SIGNERS -Encoding ascii
+          # exactly what the apps do: the installer on stdin, checked against the pinned key
+          $out = Join-Path $env:RUNNER_TEMP 'verify.txt'
+          $p = Start-Process $keygen -NoNewWindow -Wait -PassThru -RedirectStandardInput build/SSHManager-Setup.exe -RedirectStandardOutput $out `
+            -ArgumentList '-Y', 'verify', '-f', "`"$signers`"", '-I', 'sshmanager-release', '-n', 'sshmanager-release', '-s', 'build/SSHManager-Setup.exe.sig'
+          Get-Content $out
+          if ($p.ExitCode) { throw "The signature doesn't verify against the pinned public key: RELEASE_SIGNING_KEY is the wrong key" }
+
       # handy for manual runs; not needed for releases (and fails when the account's artifact storage is full)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9   # v7.0.2
         if: "!startsWith(github.ref, 'refs/tags/v')"
         continue-on-error: true
         with:
           name: SSHManager-Setup
+          if-no-files-found: ignore
           path: |
             build/SSHManager-Setup.exe
             build/SSHManager-Setup.exe.sha256
+            build/SSHManager-Setup.exe.sig
 
       - name: Release notes from CHANGELOG.md
-        id: notes
         if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          "version=$('${{ github.ref_name }}'.TrimStart('v'))" >> $env:GITHUB_OUTPUT
           $hash = ((Get-Content build/SSHManager-Setup.exe.sha256 -Raw).Trim() -split '\s+')[0]
-          ./.github/release-notes.ps1 -Version "${{ github.ref_name }}" -Sha256 $hash | Set-Content build/release-notes.md -Encoding utf8
+          ./.github/release-notes.ps1 -Version $env:TAG -Sha256 $hash -Signed | Set-Content build/release-notes.md -Encoding utf8
 
-      - name: Attach to release
+      - name: Publish the release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: SSH Manager ${{ steps.notes.outputs.version }}
-          body_path: build/release-notes.md
-          files: |
-            build/SSHManager-Setup.exe
-            build/SSHManager-Setup.exe.sha256
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $files = 'build/SSHManager-Setup.exe', 'build/SSHManager-Setup.exe.sha256', 'build/SSHManager-Setup.exe.sig'
+          foreach ($f in $files) { if (-not (Test-Path $f)) { throw "Missing $f" } }
+          $title = "SSH Manager $($env:TAG.TrimStart('v'))"
+          gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            # a release for this tag exists already (made by hand): replace its files and notes
+            gh release upload $env:TAG @files --clobber --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE) { throw "Uploading the files failed" }
+            gh release edit $env:TAG --title $title --notes-file build/release-notes.md --draft=false --repo $env:GITHUB_REPOSITORY
+          } else {
+            # draft first: nobody (and no app) sees the release before all files are there
+            gh release create $env:TAG @files --draft --verify-tag --title $title --notes-file build/release-notes.md --repo $env:GITHUB_REPOSITORY
+            if ($LASTEXITCODE) { throw "Creating the draft release failed" }
+            gh release edit $env:TAG --draft=false --latest --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE) { throw "Publishing the release failed" }

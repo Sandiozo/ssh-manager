@@ -3,6 +3,13 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
+## [Unreleased]
+
+### Fixed
+- A PC busy with builds or games could show as disconnected for half a minute at a time: Windows started
+  SSH Manager's server below normal priority, so other programs could take all of the CPU. The server now
+  runs above normal priority (it uses very little CPU); the programs it starts still run at normal priority.
+
 ## [1.7.2] - 2026-10-28
 
 ### Security

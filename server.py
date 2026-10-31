@@ -566,6 +566,20 @@ class Server(uvicorn.Server):
             threading.Thread(target=_watchdog, daemon=True, name="watchdog").start()
 
 
+def raise_priority():
+    """Windows starts a logon task's program below normal priority, so a PC busy with builds or games can
+    starve the server for half a minute and the app shows the PC as disconnected. The server needs little
+    CPU but must answer in time. Programs it starts (runs, wevtutil) still get normal priority: Windows
+    only passes idle and below-normal priority on to child processes."""
+    if sys.platform != "win32":
+        return
+    import psutil
+    try:
+        psutil.Process().nice(psutil.ABOVE_NORMAL_PRIORITY_CLASS)
+    except psutil.Error as e:
+        log.warning("couldn't raise the server's priority: %s", e)
+
+
 def serve():
     loop = asyncio.SelectorEventLoop if sys.platform == "win32" else "auto"
     # protocols named instead of "auto": uvicorn would otherwise pick httptools or websockets whenever a
@@ -584,6 +598,7 @@ if __name__ == "__main__":
         log.error("%s", CONFIG_PROBLEM)
     else:
         cfgfile.backup(CONFIG_PATH, config)
+    raise_priority()
     monitor.start()
     updater.start()
     serve()

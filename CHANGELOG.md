@@ -5,6 +5,10 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 
 ## [Unreleased]
 
+### Changed
+- Setting up the server role also sets Windows' OpenSSH Server to start again by itself if it crashes
+  (unless its recovery was set up already); before, no PC could connect until someone started it at the PC.
+
 ### Fixed
 - A PC busy with builds or games could show as disconnected for half a minute at a time: Windows started
   SSH Manager's server below normal priority, so other programs could take all of the CPU. The server now

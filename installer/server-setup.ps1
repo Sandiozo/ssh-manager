@@ -291,6 +291,12 @@ try {
             } catch {
                 Warn "Windows' OpenSSH Server didn't start ($($_.Exception.Message)). Other PCs can't connect to this one until it runs: check the 'OpenSSH SSH Server' service in Services."
             }
+            # if sshd ever crashes, Windows starts it again (unless someone set its recovery up already):
+            # otherwise no PC can connect until somebody starts it at this PC
+            if (-not (sc.exe qfailure sshd | Select-String 'FAILURE_ACTIONS')) {
+                sc.exe failure sshd reset= 86400 actions= restart/5000/restart/10000/restart/60000 | Out-Null
+                if ($LASTEXITCODE) { Warn "Couldn't set the OpenSSH SSH Server service to restart after a crash (sc.exe exit code $LASTEXITCODE)." }
+            }
             $port = Get-SshdPort
             Report 86 "Allowing SSH through the firewall" "port $port, private networks"
             try { Set-Firewall $port } catch { Warn "Couldn't check Windows Firewall for SSH (port $port): $($_.Exception.Message)" }

@@ -5,7 +5,7 @@
 #  - %ProgramData%\SSHManager\install-path.txt: where the app's remote command finds ensure-running.ps1;
 #    the folder gets fixed permissions (Administrators and SYSTEM write, Users read)
 #  - "SSH Manager" scheduled task: starts the server at logon of an administrator account (the existing
-#    task's user, else the user signed in at the console, else the installing user), with admin rights, hidden
+#    task's user, else the user signed in to the installer's session, else the installing user), with admin rights, hidden
 # -Upgrade (silent update, role unchanged): only the %ProgramData% folder and the logon task; OpenSSH
 # Server and the firewall are left exactly as they are.
 # Progress goes to -ProgressFile (UTF-8) as "percent|what is happening|detail" lines (the installer
@@ -68,8 +68,16 @@ function Test-Admin([string]$account) {
     } catch { return $null }
 }
 
-# The user signed in at the console (also when the installer runs elevated as another admin, or over SSH)
-function Get-ConsoleUser {
+# The user signed in to the session this setup runs in (also when the installer runs elevated as another
+# admin): on a server several people may be signed in over Remote Desktop, and the console's session can be
+# someone else's, left disconnected. Without a desktop in this session (over SSH): the console's user.
+function Get-SignedInUser {
+    $session = [Diagnostics.Process]::GetCurrentProcess().SessionId
+    if ($session) {
+        $own = Get-CimInstance Win32_Process -Filter "Name='explorer.exe' AND SessionId=$session" -ErrorAction SilentlyContinue |
+            ForEach-Object { $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; if ($o.User) { "$($o.Domain)\$($o.User)" } }
+        if (@($own)[0]) { return @($own)[0] }
+    }
     try { $u = (Get-CimInstance Win32_ComputerSystem).UserName; if ($u) { return $u } } catch { }
     $owners = Get-CimInstance Win32_Process -Filter "Name='explorer.exe'" -ErrorAction SilentlyContinue | Sort-Object SessionId |
         ForEach-Object { $o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; if ($o.User) { "$($o.Domain)\$($o.User)" } }
@@ -89,16 +97,16 @@ function Select-TaskUser {
         $u = Resolve-Account $existing.Principal.UserId
         if ($u) { return $u }
     }
-    $console = Resolve-Account (Get-ConsoleUser)
-    if ($console -and (Test-Admin $console) -ne $false) { return $console }
+    $signedIn = Resolve-Account (Get-SignedInUser)
+    if ($signedIn -and (Test-Admin $signedIn) -ne $false) { return $signedIn }
     $installer = Resolve-Account $User
     if ($installer -and (Test-Admin $installer) -ne $false) {
-        if ($console -and $console -ne $installer) {
-            Warn "$console is a standard account, and the server needs administrator rights, so SSH Manager's server starts when $installer signs in. Screen previews and the shared clipboard work in that account's session."
+        if ($signedIn -and $signedIn -ne $installer) {
+            Warn "$signedIn is a standard account, and the server needs administrator rights, so SSH Manager's server starts when $installer signs in. Screen previews and the shared clipboard work in that account's session."
         }
         return $installer
     }
-    throw "The server role needs a Windows administrator account, and $(if ($console) { $console } else { $User }) is a standard account. Run this installer from an administrator account (or install with /SERVERUSER=<admin account>)."
+    throw "The server role needs a Windows administrator account, and $(if ($signedIn) { $signedIn } else { $User }) is a standard account. Run this installer from an administrator account (or install with /SERVERUSER=<admin account>)."
 }
 
 # %ProgramData%\SSHManager: Administrators and SYSTEM may change it, Users may only read. A folder

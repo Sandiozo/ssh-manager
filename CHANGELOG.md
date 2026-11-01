@@ -9,6 +9,10 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - A PC busy with builds or games could show as disconnected for half a minute at a time: Windows started
   SSH Manager's server below normal priority, so other programs could take all of the CPU. The server now
   runs above normal priority (it uses very little CPU); the programs it starts still run at normal priority.
+- Installing on a PC used over Remote Desktop (such as a Windows Server) could set the server up for
+  another account, whose session was left disconnected at the console: the server then ran without a
+  screen, and the app on the PC started a second copy without admin rights. The server now runs for the
+  account the installer was started from.
 
 ## [1.7.2] - 2026-10-28
 

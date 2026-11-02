@@ -13,6 +13,9 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 - A PC busy with builds or games could show as disconnected for half a minute at a time: Windows started
   SSH Manager's server below normal priority, so other programs could take all of the CPU. The server now
   runs above normal priority (it uses very little CPU); the programs it starts still run at normal priority.
+- A PC added by its IP address and reached through a VPN such as Tailscale (or a forwarded port) stopped
+  connecting after the first time: the app replaced the address with one of the PC's own network addresses,
+  which other PCs can't reach. The app now keeps the address that the connection actually went to.
 - Installing on a PC used over Remote Desktop (such as a Windows Server) could set the server up for
   another account, whose session was left disconnected at the console: the server then ran without a
   screen, and the app on the PC started a second copy without admin rights. The server now runs for the

@@ -72,13 +72,15 @@ internal static class Ssh
 
     /// <summary>Common options for non-interactive use. New host keys are accepted on first contact
     /// (trust on first use) and checked from then on.</summary>
-    public static List<string> Options(PcEntry s, bool batch = true, bool lookup = true)
+    /// <summary>`hostName`: the address to connect to instead of looking the PC's name up.</summary>
+    public static List<string> Options(PcEntry s, bool batch = true, bool lookup = true, string? hostName = null)
     {
         var a = new List<string>();
         if (batch) a.AddRange(["-o", "BatchMode=yes"]);
         a.AddRange(["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]);
         if (s.KeyFile.Trim() != "") a.AddRange(["-i", s.KeyFile.Trim(), "-o", "IdentitiesOnly=yes"]);
-        if (lookup && s.LookupName.Trim() != "" && Resolve(s.LookupName.Trim()) is { } ip) a.AddRange(["-o", $"HostName={ip}"]);
+        if (hostName is not null) a.AddRange(["-o", $"HostName={hostName}"]);
+        else if (lookup && s.LookupName.Trim() != "" && Resolve(s.LookupName.Trim()) is { } ip) a.AddRange(["-o", $"HostName={ip}"]);
         return a;
     }
 

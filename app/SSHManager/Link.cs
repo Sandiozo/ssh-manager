@@ -49,6 +49,7 @@ internal sealed partial class Link : IDisposable
     int remotePortValue = -1;
     int? RemotePortSeen => Volatile.Read(ref remotePortValue) is var p && p >= 0 ? p : null;
     volatile bool resetBackoff;
+    volatile string reachedAt = "";   // the address the current SSH connection went to
 
     public PcEntry Pc { get; }
     public event Action<Link, LinkState, string>? Changed;
@@ -171,14 +172,14 @@ internal sealed partial class Link : IDisposable
                     .OfType<string>().Distinct().ToList()
                 : Pc.Ips;
             // a PC added by its IP address: remember its computer name too, so it is still found when the
-            // router gives it another address, and keep the saved address up to date
+            // router gives it another address, and keep the address this connection went to. Not one of the
+            // addresses the PC lists: one reached through a VPN (Tailscale) or a forwarded port isn't among them
             var computer = S("computer");
             if (!Ssh.SafeName(computer)) computer = "";
             Computer = computer;
             var byAddress = IPAddress.TryParse(Pc.Host, out _);
             var lookupName = byAddress && computer != "" ? computer : Pc.LookupName;
-            var host = byAddress && ips.Count > 0 && !ips.Contains(Pc.Host)
-                ? (Ssh.Resolve(lookupName) is { } now && ips.Contains(now) ? now : ips[0]) : Pc.Host;
+            var host = byAddress && IPAddress.TryParse(reachedAt, out _) ? reachedAt : Pc.Host;
             if (name.Length > 64 || name.Any(char.IsControl)) name = "";
             if ((name != "" && name != Pc.PcName) || mac != Pc.Mac || !ips.SequenceEqual(Pc.Ips) || lookupName != Pc.LookupName || host != Pc.Host)
             {
@@ -326,7 +327,10 @@ internal sealed partial class Link : IDisposable
             UseShellExecute = false, CreateNoWindow = true,
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
         };
-        foreach (var a in Ssh.Options(Pc, lookup: lookup)) psi.ArgumentList.Add(a);
+        // the PC's current address when its name resolves, else the saved one
+        var resolved = lookup && Pc.LookupName.Trim() != "" ? Ssh.Resolve(Pc.LookupName.Trim()) : null;
+        reachedAt = resolved ?? Pc.Host;
+        foreach (var a in Ssh.Options(Pc, lookup: false, hostName: resolved)) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                                   "-L", $"127.0.0.1:{Port}:127.0.0.1:{Pc.RemotePort}" })
             psi.ArgumentList.Add(a);

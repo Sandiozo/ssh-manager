@@ -20,6 +20,7 @@ APPROVAL_TTL seconds or on Deny. Only the app can answer: it proves itself with 
 These controls keep an agent that uses SSH Manager as intended within bounds. An agent with full access
 can run any script with administrator rights, so full access means trusting it like an administrator."""
 import asyncio
+import contextlib
 import contextvars
 import hmac
 import re
@@ -126,6 +127,28 @@ def refusal(request: Request, config: dict) -> str | None:
     return None
 
 
+@contextlib.asynccontextmanager
+async def hang_up(request: Request):
+    """An event that is set when the client closes its connection while the handler is still working.
+    request.is_disconnected() can't tell behind the server's "http" middleware (it always answers False
+    there), so this waits for the disconnect message itself."""
+    gone = asyncio.Event()
+
+    async def watch():
+        try:
+            while (await request.receive())["type"] != "http.disconnect":
+                pass
+            gone.set()
+        except Exception:
+            pass
+
+    task = asyncio.create_task(watch())
+    try:
+        yield gone
+    finally:
+        task.cancel()
+
+
 def _iso(t: float) -> str:
     return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
 
@@ -188,17 +211,29 @@ class Agents:
             self.events[q["id"]] = asyncio.Event()
             return q
 
-    async def wait(self, q: dict) -> dict | None:
-        """The answer ({allowed, by}), or None when nobody answered in time."""
+    async def wait(self, q: dict, gone: asyncio.Event | None = None) -> dict | None:
+        """The answer ({allowed, by}), or None when nobody answered in time. `gone` is set when the requester
+        gives up (closes its connection, see hang_up): the approval is then withdrawn (q["withdrawn"]) and
+        can no longer be answered. An approval that wasn't answered expires however the wait ends, also
+        when the handler is cancelled."""
+        waits = [asyncio.ensure_future(self.events[q["id"]].wait())]
+        if gone is not None:
+            waits.append(asyncio.ensure_future(gone.wait()))
         try:
-            await asyncio.wait_for(self.events[q["id"]].wait(), timeout=max(0.0, q["expires"] - time.monotonic()))
-        except asyncio.TimeoutError:
-            pass
+            await asyncio.wait(waits, timeout=max(0.0, q["expires"] - time.monotonic()), return_when=asyncio.FIRST_COMPLETED)
+            if gone is not None and gone.is_set():
+                with self.lock:
+                    q["withdrawn"] = True
+                    if q["answer"] is None:
+                        q["expires"] = 0
         finally:
+            for w in waits:
+                w.cancel()
             self.events.pop(q["id"], None)
+            with self.lock:
+                if q["answer"] is None:
+                    q["expires"] = 0
         with self.lock:
-            if q["answer"] is None:
-                q["expires"] = 0
             return q["answer"]
 
     def pending(self, machine: str) -> list[dict]:

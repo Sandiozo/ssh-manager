@@ -472,3 +472,12 @@ dialog pre { background: var(--sunken); border: 1px solid var(--rule); border-ra
 * { scrollbar-width: thin; scrollbar-color: var(--rule-2) transparent; }
 .cmd.agent { cursor: default; }
 .machines td.num { text-align: left; }
+
+/* ---- small helpers (the page's security policy allows no style="" in HTML) ---- */
+.ok-text { color: var(--ok); }
+.side-none { padding: 4px 8px; }
+td.w60 { width: 60%; }
+td.w65 { width: 65%; }
+td.nowrap { white-space: nowrap; }
+.dot.accent { background: var(--accent); }
+.dot.plus { background: none; color: var(--accent); }

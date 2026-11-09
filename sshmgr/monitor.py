@@ -46,6 +46,8 @@ FAILED_RE = re.compile(r"Failed (\S+) for (?:invalid user )?(.+?) from (\S+) por
 INVALID_RE = re.compile(r"Invalid user (.*?) from (\S+) port (\d+)")
 SSHD_CONFIG = Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ssh" / "sshd_config"
 UNRESOLVED_WAIT = 10        # seconds a finished command waits for its login to appear in the event log
+CLIENTS_KEEP = 24 * 3600    # seconds a computer's last report is kept (pages show it for 30 s)
+CLIENTS_MAX = 200           # computers whose reports are kept at most
 ENCODED_RE = re.compile(r"-(?:EncodedCommand|enc|ec|e)\s+\"?([A-Za-z0-9+/=]{8,})", re.I)
 
 
@@ -545,9 +547,18 @@ class Monitor:
         }
 
     def report_client(self, stats: dict, via: str):
-        """Stats an SSH Manager app sends about the computer it runs on."""
+        """Stats an SSH Manager app sends about the computer it runs on. Pages show only reports from the
+        last 30 s; older ones are kept for a day so that sessions from that computer's address keep its
+        name, and at most CLIENTS_MAX computers are kept (the ones that reported longest ago go first)."""
+        now = time.time()
         with self.lock:
-            self.clients[stats["machine"].lower()] = {**stats, "via": via, "ts": time.time()}
+            key = stats["machine"].lower()
+            self.clients = {m: c for m, c in self.clients.items() if now - c["ts"] < CLIENTS_KEEP and m != key}
+            if len(self.clients) >= CLIENTS_MAX:
+                oldest = sorted(self.clients, key=lambda m: self.clients[m]["ts"])
+                for m in oldest[:len(self.clients) - CLIENTS_MAX + 1]:
+                    del self.clients[m]
+            self.clients[key] = {**stats, "via": via, "ts": now}
 
     def _client_for(self, peer: dict) -> dict | None:
         now = time.time()

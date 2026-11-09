@@ -81,7 +81,20 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
                                              "script": script[:2000], "script_truncated": len(script) > 2000,
                                              "pc": monitor_name(), "from": from_pc or None, "machine_id": machine_id or None})
         activity.add("setup", action="approval-requested", client=client, title=a.get("name", ""))
-        answer = await agents.wait(q)
+        # the agent withdraws its request by closing the connection (sshmgr then tells it the action won't
+        # run): the approval is taken back and nothing runs, even if someone clicks Allow after that
+        try:
+            async with agents_mod.hang_up(request) as gone:
+                answer = await agents.wait(q, gone)
+                if answer is not None and answer["allowed"]:
+                    await asyncio.sleep(0.1)   # an agent that gave up just as Allow came in
+                withdrawn = q.get("withdrawn") or gone.is_set()
+        except asyncio.CancelledError:
+            activity.add("setup", action="approval-withdrawn", client=client, title=a.get("name", ""))
+            raise
+        if withdrawn:
+            activity.add("setup", action="approval-withdrawn", client=client, title=a.get("name", ""))
+            raise HTTPException(409, f"\"{a.get('name')}\" was not run: the request was withdrawn.")
         if answer is None:
             activity.add("setup", action="approval-unanswered", client=client, title=a.get("name", ""))
             raise HTTPException(403, f"\"{a.get('name')}\" was not run: nobody approved it within {agents_mod.APPROVAL_TTL} seconds.")

@@ -12,11 +12,13 @@ app does this), and every request must carry the access token, which clients rea
 import hmac
 import logging
 import os
+import re
 import socket
 import sys
 import threading
 import time
 from logging.handlers import RotatingFileHandler
+from typing import Annotated
 
 from sshmgr import __version__
 from sshmgr import cfgfile
@@ -119,6 +121,7 @@ except Exception:
     log.exception("checking the home folder's permissions failed")
 
 import asyncio  # noqa: E402
+import mimetypes  # noqa: E402
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
@@ -140,6 +143,10 @@ from sshmgr.updater import Updater  # noqa: E402
 
 # any local port: the app may forward from a different local port than this server's
 ALLOWED_HOSTNAMES = {"127.0.0.1", "localhost", "[::1]"}
+# Python takes file types from the Windows registry, where a program may have set .js to text/plain;
+# with "nosniff" (below) the browser would then refuse to run the page's script
+mimetypes.add_type("text/javascript", ".js")
+mimetypes.add_type("text/css", ".css")
 OPEN_PATHS = {"/api/ping", "/login", "/favicon.ico"}
 COOKIE = "sshmgr_token"
 
@@ -177,8 +184,27 @@ def authorized(request: Request) -> bool:
     return any(hmac.compare_digest(s.encode(), TOKEN.encode()) for s in supplied if s)
 
 
+# The dashboard page may only run its own script file and talk to this server: no inline scripts or
+# event handlers, no style="" attributes, nothing from other sites, and no other page may frame it. So
+# even if a value from another computer slipped into the page unescaped, it couldn't run anything.
+# Screen previews are shown from blob: URLs.
+PAGE_CSP = ("default-src 'none'; script-src 'self'; connect-src 'self'; img-src 'self' blob:; style-src 'self'; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+# the "not logged in" page has no script, only inline styles
+PLAIN_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next):
+    response = await _guarded(request, call_next)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    if request.url.path in ("/", "/login"):
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = PAGE_CSP if response.status_code == 200 else PLAIN_CSP
+    return response
+
+
+async def _guarded(request: Request, call_next):
     # Host check stops DNS-rebinding pages; the token keeps out anything on this PC (or a web page)
     # that didn't get it over SSH; the custom header on writes stops cross-site form posts.
     if split_host(request)[0] not in ALLOWED_HOSTNAMES:
@@ -312,19 +338,27 @@ def get_activity(after: int = 0, limit: int = 500, kind: str | None = None):
     return {"items": activity.list(after, limit, kind), "log_id": activity.log_id, "last_id": activity.last_id()}
 
 
+class DiskStats(BaseModel):
+    mount: str = Field(max_length=64)
+    total: int = Field(ge=0)
+    free: int = Field(ge=0)
+
+
+# what an SSH Manager app reports is shown on every dashboard that lists that computer: only plain values
+# of the expected type and size are accepted (anything else is refused with 422)
 class ClientStats(BaseModel):
     machine: str = Field(min_length=1, max_length=64)
-    cpu: float | None = None
-    ram_total: int | None = None
-    ram_used: int | None = None
-    disks: list[dict] = []
+    cpu: float | None = Field(None, allow_inf_nan=False)
+    ram_total: int | None = Field(None, ge=0)
+    ram_used: int | None = Field(None, ge=0)
+    disks: list[DiskStats] = Field([], max_length=32)
     battery: int | None = None
     charging: bool | None = None
-    uptime_s: int | None = None
-    app_version: str = ""
-    macs: list[str] = []
-    user: str = ""
-    features: list[str] = []   # e.g. "pair": its app can approve pairing requests
+    uptime_s: int | None = Field(None, ge=0)
+    app_version: str = Field("", max_length=64)
+    macs: list[Annotated[str, Field(max_length=32)]] = Field([], max_length=32)
+    user: str = Field("", max_length=256)
+    features: list[Annotated[str, Field(max_length=32)]] = Field([], max_length=16)   # e.g. "pair": its app can approve pairing requests
     machine_id: str = Field("", max_length=64)   # random id per app install (tells same-named computers apart)
 
 
@@ -413,18 +447,31 @@ def restart_server(request: Request):
 # When the user signs in, the logon task starts a new instance in the desktop session; it finds the port
 # taken, and asks the old instance (with the token, which it reads from the same home folder) to quit.
 
+PYTHON_FLAGS = re.compile(r"^-[bBdEiIOPqRsSuv]+$")   # interpreter options that take no value
+
+
 def _same_program(pid: int) -> bool:
+    """Process pid is this server program: installed, the same executable; from source, Python (this
+    one, or the base Python that a venv's python.exe starts) running this folder's server.py as its
+    script. The process' name and arguments alone prove nothing: any program can choose them."""
     import psutil
     try:
         p = psutil.Process(pid)
-        if os.path.normcase(p.exe()) == os.path.normcase(sys.executable):
-            return True
-        if not home_mod.FROZEN:
-            here = os.path.normcase(str(ROOT / "server.py"))
-            return any(os.path.normcase(a) == here for a in p.cmdline())
-    except psutil.Error:
-        pass
-    return False
+        exe = os.path.normcase(p.exe())
+        if home_mod.FROZEN:
+            return exe == os.path.normcase(sys.executable)
+        pythons = {os.path.normcase(os.path.dirname(x)) for x in (sys.executable, getattr(sys, "_base_executable", "")) if x}
+        if os.path.dirname(exe) not in pythons or not os.path.basename(exe).startswith("python"):
+            return False
+        args = p.cmdline()[1:]
+        while args and PYTHON_FLAGS.match(args[0]):
+            args = args[1:]
+        if not args:
+            return False
+        script = args[0] if os.path.isabs(args[0]) else os.path.join(p.cwd(), args[0])
+        return os.path.normcase(os.path.abspath(script)) == os.path.normcase(str(ROOT / "server.py"))
+    except (psutil.Error, OSError):
+        return False
 
 
 @app.post("/api/server/handover")
@@ -471,9 +518,18 @@ def take_over() -> bool:
     pid = listening_pid()
     if not pid or winsec.session_of(pid) != 0:
         return False
+    # the request carries the token: it only ever goes to this same program, checked before every try
+    # (another program may have taken the port, also while this waits)
+    if not _same_program(pid):
+        log.warning("port %s is held by a program in session 0 that isn't this SSH Manager server (pid %s); not "
+                    "sending it the token", PORT, pid)
+        return False
     log.info("a server in session 0 (pid %s) has port %s; asking it to hand over to this desktop session", pid, PORT)
     until = time.monotonic() + 600
     while time.monotonic() < until:
+        if pid != listening_pid() or not _same_program(pid):
+            log.warning("port %s is no longer held by the session-0 server (pid %s); not sending the token", PORT, pid)
+            return False
         try:
             c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
             c.request("POST", "/api/server/handover", body=b"",

@@ -8,11 +8,13 @@ const store = {
 };
 
 // ---------- formatting ----------
+// sizes from other computers' reports end up in HTML: anything that isn't a number shows as a dash
 function fmtBytes(n) {
-  if (n == null) return "";
+  n = n == null || n === "" ? NaN : Number(n);
+  if (!Number.isFinite(n)) return "—";
   const u = ["B", "KB", "MB", "GB", "TB"]; let i = 0;
   while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
-  return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i];
+  return (i ? n.toFixed(n < 10 ? 1 : 0) : Math.round(n)) + " " + u[i];
 }
 function fmtDur(s) {
   if (s == null) return "";
@@ -111,7 +113,19 @@ document.addEventListener("click", e => { const g = e.target.closest("[data-goto
 // ---------- status ----------
 let last = null, viewer = null, hostName = "";
 function dot(state) { return `<span class="dot ${state}"></span>`; }
-function meter(pct) { return `<div class="meter"><i class="${pct > 90 ? "crit" : pct > 75 ? "hot" : ""}" style="width:${Math.min(100, pct)}%"></i></div>`; }
+function meter(pct) {
+  pct = Math.max(0, Math.min(100, Number(pct) || 0));
+  return `<div class="meter"><i class="${pct > 90 ? "crit" : pct > 75 ? "hot" : ""}" data-w="${pct}"></i></div>`;
+}
+// the page's security policy allows no style="" in HTML: sizes are written as data-w / data-h / data-b
+// (percent) and set here
+function applySizes(root) {
+  for (const el of root.querySelectorAll("[data-w],[data-h],[data-b]")) {
+    if (el.dataset.w != null) el.style.width = el.dataset.w + "%";
+    if (el.dataset.h != null) el.style.height = el.dataset.h + "%";
+    if (el.dataset.b != null) el.style.bottom = el.dataset.b + "%";
+  }
+}
 // a round axis maximum whose half is a whole number too: 2, 4, 10, 20, 40, 100 ...
 function niceMax(v) { const p = 10 ** Math.floor(Math.log10(v)); return [2, 4, 10].map(m => m * p).find(m => m >= v); }
 
@@ -122,7 +136,7 @@ function clientStats(c) {
   if (c.cpu != null) rows.push(`<div class="row"><span>CPU</span><span>${Math.round(c.cpu)}%</span></div>${meter(c.cpu)}`);
   if (c.ram_total) rows.push(`<div class="row"><span>RAM</span><span>${fmtBytes(c.ram_used)} / ${fmtBytes(c.ram_total)}</span></div>${meter(c.ram_used / c.ram_total * 100)}`);
   for (const d of (c.disks || []).slice(0, 2)) rows.push(`<div class="row"><span>${esc(d.mount)}</span><span>${fmtBytes(d.free)} free of ${fmtBytes(d.total)}</span></div>${meter((1 - d.free / d.total) * 100)}`);
-  if (c.battery != null) rows.push(`<div class="row"><span>Battery</span><span>${c.battery}%${c.charging ? " · charging" : ""}</span></div>`);
+  if (c.battery != null) rows.push(`<div class="row"><span>Battery</span><span>${esc(c.battery)}%${c.charging ? " · charging" : ""}</span></div>`);
   if (c.uptime_s != null) rows.push(`<div class="row"><span>Up</span><span>${fmtDur(c.uptime_s)}</span></div>`);
   return rows.join("");
 }
@@ -163,14 +177,16 @@ function renderStatus(s) {
   $("#kpis").innerHTML = [
     kpi(`${dot(sshOk ? "ok" : "bad")}SSH server`, sshOk ? "Running" : esc(s.sshd.status), `port 22 · ${esc(s.sshd.start_type || "")}`),
     kpi("Sessions now", s.sessions.length, s.sessions.length ? esc([...new Set(s.sessions.map(x => x.client))].join(", ")) : "nobody connected"),
-    kpi("Logins · 24 h", s.logins_24h, `${s.unknown_clients.length ? s.unknown_clients.length + " unknown computer(s)" : "all from known computers"}`),
+    kpi("Logins · 24 h", esc(s.logins_24h), `${s.unknown_clients.length ? s.unknown_clients.length + " unknown computer(s)" : "all from known computers"}`),
     kpi("Failed logins · 24 h", s.failures_24h.length, s.failures_24h.length ? `last from ${esc(s.failures_24h.at(-1).ip)}` : "none", "", s.failures_24h.length ? "bad" : ""),
-    kpi("CPU", `${s.host.cpu.toFixed(0)}%`, "", meter(s.host.cpu)),
-    kpi("Memory", `${ram.percent.toFixed(0)}%`, `${fmtBytes(ram.used)} of ${fmtBytes(ram.total)}`, meter(ram.percent)),
+    kpi("CPU", `${Math.round(s.host.cpu)}%`, "", meter(s.host.cpu)),
+    kpi("Memory", `${Math.round(ram.percent)}%`, `${fmtBytes(ram.used)} of ${fmtBytes(ram.total)}`, meter(ram.percent)),
   ].join("");
+  applySizes($("#kpis"));
 
   // computers: this PC, the computers that connect to it, and Desktop Commander if installed
-  const mini = pct => pct == null ? `<span class="dim">—</span>` : `<div class="mini"><span class="num">${Math.round(pct)}%</span>${meter(pct)}</div>`;
+  const mini = pct => pct == null || !Number.isFinite(Number(pct)) ? `<span class="dim">—</span>`
+    : `<div class="mini"><span class="num">${Math.round(pct)}%</span>${meter(pct)}</div>`;
   const diskCell = list => (list || []).slice(0, 2).map((d, i) =>
     `${i ? `<br><span class="dim">` : "<span>"}${esc(d.mount)} ${fmtBytes(d.free)} free</span>`).join("") || `<span class="dim">—</span>`;
   const who = (state, name, sub, tag = "") =>
@@ -197,6 +213,7 @@ function renderStatus(s) {
       <td colspan="6" class="note">A second way in that doesn't go through SSH. Its commands don't show up here.</td></tr>`,
   ];
   $("#machines").innerHTML = rows.filter(Boolean).join("");
+  applySizes($("#machines"));
 
   // sessions
   $("#session-count").textContent = s.sessions.length ? `${s.sessions.length} open` : "";
@@ -206,15 +223,15 @@ function renderStatus(s) {
     const cmds = x.commands.filter(c => c.kind !== "dashboard");
     const isApp = x.commands.some(c => c.kind === "dashboard");
     return `<div class="session">
-      <div class="line" title="${esc(x.user || "?")}@${esc(x.ip)}:${x.port}${x.key ? " · " + esc(x.key) : ""}">
+      <div class="line" title="${esc(x.user || "?")}@${esc(x.ip)}:${esc(x.port)}${x.key ? " · " + esc(x.key) : ""}">
         ${dot("ok")}<span class="who">${esc(x.client)}</span>
         ${isApp ? `<span class="tag blue">app</span>` : x.tunnel ? `<span class="tag">port forward</span>` : ""}
         <span class="what">${cmds.length ? "" : isApp ? "SSH Manager app" : x.tunnel ? "Port forward (script or tool)" : "idle"}</span>
         <span class="muted small">${x.start ? ago(x.start) : ""}</span>
       </div>
       ${(x.agents || []).map(a => agentRow(`${a} (${x.client})`, s)).join("")}
-      ${cmds.map(c => `<div class="cmd" data-running="${c.pid}">
-          <span class="kind ${c.kind}">${esc(c.kind)}</span><code>${esc(c.summary)}</code>
+      ${cmds.map(c => `<div class="cmd" data-running="${esc(c.pid)}">
+          <span class="kind ${esc(c.kind)}">${esc(c.kind)}</span><code>${esc(c.summary)}</code>
           <span class="muted small">${fmtDur((Date.now() - new Date(c.start)) / 1000)}</span>
         </div>`).join("")}
     </div>`;
@@ -228,18 +245,19 @@ function renderStatus(s) {
   // logins per hour: thin columns on hairline gridlines, details on hover
   const max = niceMax(Math.max(1, ...s.hours.map(h => h.count)));
   $("#login-total").textContent = `${s.logins_24h} logins`;
-  $("#hours").innerHTML = [0, max / 2, max].map(v => `<div class="gl" style="bottom:${v / max * 100}%"><span>${v}</span></div>`).join("") +
+  $("#hours").innerHTML = [0, max / 2, max].map(v => `<div class="gl" data-b="${v / max * 100}"><span>${v}</span></div>`).join("") +
     s.hours.map((h, i) => {
-      const d = new Date(h.hour), hr = d.getHours();
-      return `<div class="b" data-tip="${hr}:00–${hr}:59 · ${h.count} login${h.count === 1 ? "" : "s"}"><i style="height:${h.count / max * 100}%"></i>${i % 3 === 0 ? `<span>${hr}</span>` : ""}</div>`;
+      const d = new Date(h.hour), hr = d.getHours(), n = Number(h.count) || 0;
+      return `<div class="b" data-tip="${hr}:00–${hr}:59 · ${n} login${n === 1 ? "" : "s"}"><i data-h="${n / max * 100}"></i>${i % 3 === 0 ? `<span>${hr}</span>` : ""}</div>`;
     }).join("");
+  applySizes($("#hours"));
 
   // connection history
   $("#history").innerHTML = s.history.slice().reverse().map(c => {
     const dur = c.end ? (new Date(c.end) - new Date(c.start)) / 1000 : (Date.now() - new Date(c.start)) / 1000;
     return `<tr><td>${esc(c.client)} <span class="muted">${esc(c.ip)}</span></td><td>${esc(c.user)}</td>
       <td class="muted">${esc(c.key || c.method)}</td><td>${fmtTime(c.start, true)}</td>
-      <td>${fmtDur(dur)}</td><td class="muted">${c.end ? fmtTime(c.end) : '<span style="color:var(--ok)">open</span>'}</td></tr>`;
+      <td>${fmtDur(dur)}</td><td class="muted">${c.end ? fmtTime(c.end) : '<span class="ok-text">open</span>'}</td></tr>`;
   }).join("") || `<tr><td colspan="6" class="muted">No connections in the event log.</td></tr>`;
   $("#failures").innerHTML = s.failures_24h.length
     ? `<div class="alert"><b>${s.failures_24h.length} failed login attempt(s) in the last 24 hours</b>
@@ -303,7 +321,8 @@ function actLabel(a) {
     const t = { settings: `Changed settings (${(a.changed || []).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
       "key-removed": `Removed SSH key ${a.label || a.fingerprint}`, "approval-requested": `Asked for approval to run "${a.title}"`,
       "approval-allowed": `Allowed ${a.requested_by || "an AI agent"} to run "${a.title}"`, "approval-denied": `Denied ${a.requested_by || "an AI agent"} running "${a.title}"`,
-      "approval-unanswered": `"${a.title}" not run: nobody approved it` }[a.action] || a.action;
+      "approval-unanswered": `"${a.title}" not run: nobody approved it`,
+      "approval-withdrawn": `"${a.title}" not run: the request was withdrawn` }[a.action] || a.action;
     return { kind: "setup", text: t };
   }
   const p = a.path || (a.paths || []).join(", ");
@@ -314,8 +333,8 @@ function actLabel(a) {
 }
 function actRow(a) {
   const l = actLabel(a);
-  return `<div class="act" data-id="${a.id}"><span class="time">${fmtTime(a.ts)}</span>
-    <span class="kind ${l.kind}">${esc(l.kind)}</span><span class="client muted small" ${a.agent ? 'title="AI agent"' : ""}>${a.agent ? "✦ " : ""}${esc(a.client || "")}</span>
+  return `<div class="act" data-id="${esc(a.id)}"><span class="time">${fmtTime(a.ts)}</span>
+    <span class="kind ${esc(l.kind)}">${esc(l.kind)}</span><span class="client muted small" ${a.agent ? 'title="AI agent"' : ""}>${a.agent ? "✦ " : ""}${esc(a.client || "")}</span>
     <span class="what" title="${esc(l.text)}">${esc(l.text)}</span><span class="dur muted small">${a.duration_s != null ? fmtDur(a.duration_s) : ""}</span></div>`;
 }
 function renderActivity() {
@@ -371,7 +390,7 @@ const files = {
   async loadRoots() {
     const r = await api("/api/fs/roots");
     $("#bookmarks").innerHTML = r.bookmarks.map(b => `<a data-path="${esc(b.path)}" class="${b.exists ? "" : "missing"}" title="${esc(b.path)}">${esc(b.name)}</a>`).join("")
-      || `<div class="muted small" style="padding:4px 8px">None yet. Use ☆ to add one.</div>`;
+      || `<div class="muted small side-none">None yet. Use ☆ to add one.</div>`;
     $("#drives").innerHTML = r.drives.map(d => `<a data-path="${esc(d.path)}">${esc(d.name)} <small>${fmtBytes(d.free)} free</small></a>`).join("");
     if (!this.path) this.open(r.bookmarks.find(b => b.exists)?.path || r.drives[0]?.path);
     else this.markActive();
@@ -725,8 +744,8 @@ const settingsUi = {
     this.renderPeers(true);
     this.renderKeys();
     $("#set-shortcuts").innerHTML = d.bookmarks.map((b, i) => `<tr data-i="${i}">
-      <td><input data-f="name" value="${esc(b.name)}"></td><td style="width:60%"><input data-f="path" value="${esc(b.path)}" spellcheck="false"></td>
-      <td style="white-space:nowrap"><button class="icon" data-act="up" ${i ? "" : "disabled"} title="Move up">↑</button><button class="icon" data-act="down" ${i < d.bookmarks.length - 1 ? "" : "disabled"} title="Move down">↓</button><button class="icon" data-act="del" title="Remove">✕</button></td></tr>`).join("")
+      <td><input data-f="name" value="${esc(b.name)}"></td><td class="w60"><input data-f="path" value="${esc(b.path)}" spellcheck="false"></td>
+      <td class="nowrap"><button class="icon" data-act="up" ${i ? "" : "disabled"} title="Move up">↑</button><button class="icon" data-act="down" ${i < d.bookmarks.length - 1 ? "" : "disabled"} title="Move down">↓</button><button class="icon" data-act="del" title="Remove">✕</button></td></tr>`).join("")
       || `<tr><td colspan="3" class="muted">No shortcuts.</td></tr>`;
     this.touch();
   },
@@ -744,7 +763,7 @@ const settingsUi = {
     }).join("") || `<tr><td colspan="7" class="muted">No computers yet.</td></tr>`;
     const unknown = (last?.unknown_clients || []).filter(u => !d.peers.some(p => p.ip === u.ip));
     $("#set-unknown").innerHTML = unknown.length ? `<div class="unknown"><b>Logged in, but not in your list:</b>
-      ${unknown.slice(0, 8).map(u => `<div><span class="mono">${esc(u.ip)}</span><span class="muted">${u.count} login(s) as ${esc(u.user)}, last ${ago(u.last)}</span>
+      ${unknown.slice(0, 8).map(u => `<div><span class="mono">${esc(u.ip)}</span><span class="muted">${esc(u.count)} login(s) as ${esc(u.user)}, last ${ago(u.last)}</span>
       <button data-add-ip="${esc(u.ip)}">Add</button></div>`).join("")}</div>` : "";
   },
   async loadKeys() {
@@ -763,7 +782,7 @@ const settingsUi = {
       <td><input data-f="label" value="${esc(this.draft.keys[x.fingerprint] || "")}" placeholder="${esc(x.comment || "label")}"></td>
       <td class="muted small">${esc(x.type.replace("ssh-", ""))}</td><td class="fp" title="${esc(x.fingerprint)}">${esc(x.fingerprint.slice(0, 22))}…</td>
       <td class="muted small">${esc(x.comment)}${x.file === "user" ? " (user file)" : ""}</td>
-      <td class="muted small">${x.in_use ? '<span style="color:var(--ok)">in use now</span>' : x.last_used ? ago(x.last_used) + (x.last_client ? " · " + esc(x.last_client) : "") : "not in the log"}</td>
+      <td class="muted small">${x.in_use ? '<span class="ok-text">in use now</span>' : x.last_used ? ago(x.last_used) + (x.last_client ? " · " + esc(x.last_client) : "") : "not in the log"}</td>
       <td><button class="icon" data-act="del" title="${x.in_use ? "In use by an open session" : "Stop allowing this key"}" ${!k.can_edit || x.in_use || x.file !== "admin" ? "disabled" : ""}>✕</button></td></tr>`).join("")
       || `<tr><td colspan="6" class="muted">${unreadable ? "—" : "No keys."}</td></tr>`;
   },
@@ -799,7 +818,7 @@ $("#set-keys").oninput = e => {
 $("#set-keys").onclick = async e => {
   const b = e.target.closest("[data-act=del]"); if (!b) return;
   const fp = b.closest("tr").dataset.fp, label = settingsUi.draft.keys[fp] || fp;
-  if (!confirm(`Stop allowing "${label}"?\n\nThe computer using this key will no longer be able to connect to ${hostName}. A backup of the key file is kept in D:\\SSH-Manager\\data.`)) return;
+  if (!confirm(`Stop allowing "${label}"?\n\nThe computer using this key will no longer be able to connect to ${hostName}. A backup of the key file is kept in SSH Manager's data folder on ${hostName}.`)) return;
   try { await api("/api/keys/remove", { method: "POST", json: { fingerprint: fp } }); toast("Key removed"); await settingsUi.load(); settingsUi.render(); settingsUi.loadKeys(); }
   catch (err) { toast(err.message, true); }
 };
@@ -847,7 +866,7 @@ function renderUpdate() {
   $("#upd-version").textContent = `${hostName}: version ${u.current}`;
   const notes = [
     u.postponed ? esc(u.postponed) : "",
-    u.failed ? `Installing ${esc(u.failed.version)} failed${u.failed.count > 1 ? ` ${u.failed.count} times` : ""} (${ago(u.failed.at)}): ${esc(u.failed.error || "unknown error")}` : "",
+    u.failed ? `Installing ${esc(u.failed.version)} failed${u.failed.count > 1 ? ` ${esc(u.failed.count)} times` : ""} (${ago(u.failed.at)}): ${esc(u.failed.error || "unknown error")}` : "",
     u.available && u.verifiable === false && u.installable ? esc(u.error || "This release has no signature, so it can't be installed from here.") : "",
   ].filter(Boolean).map(t => `<br>${t}`).join("");
   $("#upd-state").innerHTML = (busyText ? `${busyText} ${esc(u.latest)}…`
@@ -885,9 +904,9 @@ hostHandlers.pcs = m => {
   const own = m.current === "local";
   $("#nav-screen").hidden = own;
   if (own && !$("#tab-screen").hidden) showTab("overview");
-  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all"><span class="dot" style="background:var(--accent)"></span><span class="name">All PCs</span></button>` : "") +
+  $("#pcbar").innerHTML = (m.pcs.length > 1 ? `<button data-pc="all"><span class="dot accent"></span><span class="name">All PCs</span></button>` : "") +
     m.pcs.map(p => `<button data-pc="${esc(p.id)}" class="${p.id === m.current ? "on" : ""}" title="${esc(p.name)}">${dot(state(p))}<span class="name">${esc(p.name)}</span></button>`).join("") +
-    `<button class="add" data-pc="add" title="Add a PC"><span class="dot" style="background:none;color:var(--accent)">+</span><span class="name">Add PC</span></button>`;
+    `<button class="add" data-pc="add" title="Add a PC"><span class="dot plus">+</span><span class="name">Add PC</span></button>`;
 };
 $("#pcbar").onclick = e => {
   const b = e.target.closest("[data-pc]"); if (!b) return;
@@ -916,7 +935,7 @@ const runUi = {
       : `<div class="none">No quick actions yet. Add them under Settings → Quick actions, or type a command below and save it as one.</div>`;
   },
   renderRuns(runs) {
-    $("#runs").innerHTML = (runs || []).slice(0, 12).map(r => `<div class="run-row" data-run="${r.id}">${dot(r.status === "running" ? "warn" : r.status === "done" ? "ok" : "bad")}
+    $("#runs").innerHTML = (runs || []).slice(0, 12).map(r => `<div class="run-row" data-run="${esc(r.id)}">${dot(r.status === "running" ? "warn" : r.status === "done" ? "ok" : "bad")}
       <span class="t">${esc(r.title)}</span><span class="muted small">${esc(r.client)}</span><span class="muted small">${fmtTime(r.started)}</span></div>`).join("")
       || `<div class="none">Nothing run yet.</div>`;
   },
@@ -946,7 +965,7 @@ const runUi = {
         if (atBottom) out.scrollTop = out.scrollHeight;
       }
       $("#out-title").textContent = r.title;
-      $("#out-state").innerHTML = `<span class="state-chip ${r.status}">${r.status}${r.exit_code != null && r.status !== "done" ? " · exit " + r.exit_code : ""} · ${fmtDur(r.duration_s)}</span>`;
+      $("#out-state").innerHTML = `<span class="state-chip ${esc(r.status)}">${esc(r.status)}${r.exit_code != null && r.status !== "done" ? " · exit " + esc(r.exit_code) : ""} · ${fmtDur(r.duration_s)}</span>`;
       $("#out-stop").hidden = r.status !== "running";
       if (r.status === "running") this.timer = setTimeout(() => this.poll(), 700);
       else {
@@ -997,8 +1016,8 @@ const logUi = {
     } catch (e) { toast(e.message, true); }
   },
   renderList() {
-    $("#log-list").innerHTML = this.list.map(l => `<a data-log="${l.index}" class="${this.sel?.index === l.index ? "active" : ""} ${l.file ? "" : "missing"}" title="${esc(l.file || l.pattern)}">${esc(l.name)}${l.size != null ? `<span class="sz">${fmtBytes(l.size)}</span>` : ""}</a>`).join("")
-      || `<div class="muted small" style="padding:4px 8px">None yet. Add logs under Settings → Logs.</div>`;
+    $("#log-list").innerHTML = this.list.map(l => `<a data-log="${esc(l.index)}" class="${this.sel?.index === l.index ? "active" : ""} ${l.file ? "" : "missing"}" title="${esc(l.file || l.pattern)}">${esc(l.name)}${l.size != null ? `<span class="sz">${fmtBytes(l.size)}</span>` : ""}</a>`).join("")
+      || `<div class="muted small side-none">None yet. Add logs under Settings → Logs.</div>`;
   },
   open(sel) {
     this.sel = sel; this.file = ""; this.offset = -1; this.lines = []; this.tail = "";
@@ -1061,9 +1080,9 @@ const screenUi = {
       const [m, w] = await Promise.all([api("/api/screen/monitors"), api("/api/screen/windows").catch(() => ({ windows: [] }))]);
       const short = t => t.length > 60 ? t.slice(0, 58) + "…" : t;
       $("#scr-monitor").innerHTML =
-        (m.monitors.length ? `<optgroup label="Screens">${m.monitors.map(x => `<option value="m:${x.index}">Screen ${x.index} · ${x.width}×${x.height}</option>`).join("")}</optgroup>` : "") +
+        (m.monitors.length ? `<optgroup label="Screens">${m.monitors.map(x => `<option value="m:${esc(x.index)}">Screen ${esc(x.index)} · ${esc(x.width)}×${esc(x.height)}</option>`).join("")}</optgroup>` : "") +
         (w.windows.length ? `<optgroup label="Apps">${w.windows.map(x =>
-          `<option value="w:${x.id}" data-app="${esc(x.app)}">${esc(x.app || "App")} · ${esc(short(x.title))}${x.minimized ? " (minimized)" : ""}</option>`).join("")}</optgroup>` : "");
+          `<option value="w:${esc(x.id)}" data-app="${esc(x.app)}">${esc(x.app || "App")} · ${esc(short(x.title))}${x.minimized ? " (minimized)" : ""}</option>`).join("")}</optgroup>` : "");
       const want = String(store.get("scrSource", "m:1"));
       const sel = $("#scr-monitor");
       sel.value = want;
@@ -1129,9 +1148,9 @@ hostHandlers["sync-state"] = m => {
       <span class="p" title="${esc(p.local)}">${esc(p.local)}</span><span class="arrow">${modeArrow[p.mode] || "→"}</span>
       <span class="p" title="${esc(p.pcName)}: ${esc(p.remote)}">${esc(p.pcName)}: ${esc(p.remote)}</span>
       <span class="st" title="${esc(p.message || "")}">${p.removed ? "PC removed from the app" : p.enabled ? esc(p.message || "") : "paused"}</span>
-      <span class="btns"><button class="icon" data-sync="now" data-id="${p.id}" title="Sync now">⟳</button>
-        <button class="icon" data-sync="toggle" data-id="${p.id}" title="${p.enabled ? "Pause" : "Resume"}">${p.enabled ? "❚❚" : "▶"}</button>
-        <button class="icon" data-sync="remove" data-id="${p.id}" title="Remove">✕</button></span></div>`).join("")
+      <span class="btns"><button class="icon" data-sync="now" data-id="${esc(p.id)}" title="Sync now">⟳</button>
+        <button class="icon" data-sync="toggle" data-id="${esc(p.id)}" title="${p.enabled ? "Pause" : "Resume"}">${p.enabled ? "❚❚" : "▶"}</button>
+        <button class="icon" data-sync="remove" data-id="${esc(p.id)}" title="Remove">✕</button></span></div>`).join("")
     : `<div class="none">No folder pairs yet. Add one below.</div>`;
 };
 hostHandlers["sync-local-picked"] = m => { $("#sync-local").value = m.path || ""; };
@@ -1172,7 +1191,7 @@ function renderActionEditor() {
 function renderLogEditor() {
   const list = settingsUi.draft?.logs || [];
   $("#set-logs").innerHTML = list.map((l, i) => `<tr data-i="${i}"><td><input data-f="name" value="${esc(l.name)}"></td>
-      <td style="width:65%"><input data-f="path" value="${esc(l.path)}" spellcheck="false"></td>
+      <td class="w65"><input data-f="path" value="${esc(l.path)}" spellcheck="false"></td>
       <td><button class="icon" data-act="del" title="Remove">✕</button></td></tr>`).join("")
     || `<tr><td colspan="3" class="muted">No logs.</td></tr>`;
 }

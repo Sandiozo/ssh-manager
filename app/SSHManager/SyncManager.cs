@@ -26,7 +26,9 @@ internal sealed class SyncPair
 /// a change on one side is copied over; changes on both sides keep both (the other version is saved as
 /// "name (conflict PC date).ext"); a file deleted on one side and unchanged on the other is moved to the
 /// Recycle Bin here (when deleted on the PC) or not fetched again (when deleted here; nothing is deleted
-/// on the PC). Nothing is ever overwritten without its content being kept somewhere.
+/// on the PC). Nothing is ever overwritten without its content being kept somewhere. A pass changes nothing
+/// when the PC's folder is missing or can't be listed, leaves alone what the PC couldn't read, and waits for
+/// "Sync now" before it would move much of the folder to the Recycle Bin at once.
 /// </summary>
 internal sealed class SyncManager(AppSettings settings, Func<string, Link?> linkFor, Action changed)
 {
@@ -40,6 +42,9 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         public string Kind = "idle";   // idle | syncing | error | waiting
         public string Message = "";
         public bool Running, Again;
+        /// <summary>Files a pass held back from the Recycle Bin (too many gone from the PC at once), and how many
+        /// of them the user then let go with "Sync now".</summary>
+        public int HeldGone, ConfirmedGone;
         public FileSystemWatcher? Watcher;
         public System.Threading.Timer? Debounce;
     }
@@ -191,7 +196,11 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
 
     public void SyncNow(string id)
     {
-        if (Find(id) is { } pair) Run(pair, force: true);
+        if (Find(id) is not { } pair) return;
+        var s = StateOf(pair);
+        // the pair is showing files held back from the Recycle Bin: this click lets the next pass go ahead
+        lock (s) s.ConfirmedGone = s.HeldGone;
+        Run(pair, force: true);
     }
 
     void SyncAll()
@@ -490,40 +499,92 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
             Directory.CreateDirectory(pair.Local);
         }
         var pcName = link.Pc.DisplayName;
+        var state = LoadState(pair) ?? new SyncState { Local = pair.Local, Remote = pair.Remote };
+        var files = state.Files;
 
-        // what's on the PC
+        // What's on the PC. A listing that is missing or doesn't say what it holds stops the pass before
+        // anything is changed: read as an empty folder, it would send every synced file here to the Recycle Bin.
         var remote = new Dictionary<string, FileInfoLite>(StringComparer.OrdinalIgnoreCase);
         var unsafeNames = 0;
+        var skipped = new List<string>();   // places on the PC that exist but weren't listed: left alone
         using (var r = await Http.SendAsync(link.Request(HttpMethod.Get, "/api/fs/tree?path=" + Uri.EscapeDataString(pair.Remote))).ConfigureAwait(false))
         {
-            if (r.StatusCode == HttpStatusCode.NotFound && pair.Mode != "from-pc")
+            if (r.StatusCode == HttpStatusCode.NotFound)
             {
+                if (files.Values.Any(e => e.HasR))
+                    throw new InvalidOperationException($"{pair.Remote} isn't on the PC any more (a drive that isn't plugged in, or a folder that was renamed or moved?). " +
+                        "To be safe, nothing was changed. Make the folder available on the PC again; to start over with a new empty folder there, remove this sync and add it again.");
+                if (pair.Mode == "from-pc")
+                    throw new InvalidOperationException($"{pair.Remote} wasn't found on the PC.");
+                // first run: make the folder there
                 using var mk = await Http.SendAsync(link.Request(HttpMethod.Post, "/api/fs/mkdir", JsonContent(new { path = pair.Remote }))).ConfigureAwait(false);
+                if (!mk.IsSuccessStatusCode)
+                    throw new InvalidOperationException($"Couldn't make {pair.Remote} on the PC: {await ErrorText(mk).ConfigureAwait(false)}");
             }
+            else if (r.StatusCode == HttpStatusCode.Conflict)   // the folder is there but can't be listed: the PC says why
+                throw new InvalidOperationException((await ErrorText(r).ConfigureAwait(false)).TrimEnd('.', ' ') + ". Nothing was changed.");
             else if (!r.IsSuccessStatusCode)
-                throw new InvalidOperationException($"Couldn't list {pair.Remote} on the PC: {await r.Content.ReadAsStringAsync().ConfigureAwait(false)}");
+                throw new InvalidOperationException($"Couldn't list {pair.Remote} on the PC: {await ErrorText(r).ConfigureAwait(false)}");
             else
             {
                 using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync().ConfigureAwait(false));
-                if (doc.RootElement.TryGetProperty("files", out var list) && list.ValueKind == JsonValueKind.Array)
-                    foreach (var f in list.EnumerateArray())
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("files", out var list) || list.ValueKind != JsonValueKind.Array)
+                    throw new InvalidOperationException($"The PC's answer about {pair.Remote} had no list of files. Nothing was changed.");
+                foreach (var f in list.EnumerateArray())
+                {
+                    var raw = f.TryGetProperty("rel", out var rv) && rv.ValueKind == JsonValueKind.String ? rv.GetString() ?? "" : "";
+                    if (SafeRel(raw) is not { } rel) { unsafeNames++; continue; }
+                    if (Ignored(pair, rel)) continue;
+                    var size = f.TryGetProperty("size", out var sv) && sv.TryGetInt64(out var sz) ? sz : -1;
+                    var mtime = f.TryGetProperty("mtime", out var mv) && mv.TryGetDouble(out var mt) ? mt : 0;
+                    if (size >= 0) remote[rel] = new(rel, size, mtime);
+                }
+                // older servers don't send "skipped": nothing was left out
+                if (root.TryGetProperty("skipped", out var sk) && sk.ValueKind != JsonValueKind.Null)
+                {
+                    if (sk.ValueKind != JsonValueKind.Array || sk.EnumerateArray().Any(x => x.ValueKind != JsonValueKind.String))
+                        throw new InvalidOperationException($"The PC's answer about {pair.Remote} didn't say clearly what it left out. Nothing was changed.");
+                    foreach (var x in sk.EnumerateArray())
                     {
-                        var raw = f.TryGetProperty("rel", out var rv) && rv.ValueKind == JsonValueKind.String ? rv.GetString() ?? "" : "";
-                        if (SafeRel(raw) is not { } rel) { unsafeNames++; continue; }
-                        if (Ignored(pair, rel)) continue;
-                        var size = f.TryGetProperty("size", out var sv) && sv.TryGetInt64(out var sz) ? sz : -1;
-                        var mtime = f.TryGetProperty("mtime", out var mv) && mv.TryGetDouble(out var mt) ? mt : 0;
-                        if (size >= 0) remote[rel] = new(rel, size, mtime);
+                        var rel = (x.GetString() ?? "").Replace('\\', '/').Trim('/');
+                        skipped.Add(rel == "." ? "" : rel);
                     }
+                }
             }
         }
 
         var local = ScanLocal(pair);
-        var state = LoadState(pair) ?? new SyncState { Local = pair.Local, Remote = pair.Remote };
-        var files = state.Files;
 
+        // Files in or under a place the PC couldn't list are left exactly as they are in this pass: not sent,
+        // not fetched, not recycled, and what is remembered about them stays.
         var keys = local.Keys.Union(remote.Keys, StringComparer.OrdinalIgnoreCase).Union(files.Keys, StringComparer.OrdinalIgnoreCase)
+            .Where(k => !UnderAny(k, skipped))
             .OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
+
+        // Guard against a listing that is wrong without saying so: when much of the folder seems gone from the
+        // PC at once, nothing happens until the user confirms with "Sync now".
+        if (pair.Mode != "to-pc")
+        {
+            var synced = keys.Count(k => files.GetValueOrDefault(k) is { HasL: true, HasR: true });
+            var gone = keys.Count(k => DeletedOnPc(local.TryGetValue(k, out var a) ? a : null, remote.ContainsKey(k), files.GetValueOrDefault(k)));
+            var tooMany = TooManyGone(gone, synced);
+            var s = StateOf(pair);
+            int confirmed;
+            lock (s)
+            {
+                confirmed = s.ConfirmedGone;   // a confirmation counts for one pass only
+                s.ConfirmedGone = 0;
+                s.HeldGone = tooMany && confirmed < gone ? gone : 0;
+            }
+            if (tooMany && confirmed < gone)
+            {
+                Set(pair, "error", $"{gone} of the {synced} synced files are no longer in {pair.Remote} on the PC. To be safe, nothing was changed. " +
+                    "If they were deleted there on purpose, click Sync now (⟳) to move them to the Recycle Bin here too; if not, check the folder on the PC.");
+                return;
+            }
+        }
+
         int sent = 0, received = 0, conflicts = 0, recycled = 0, failed = 0, done = 0;
         string? firstError = null;
         var work = keys.Count(k => !(local.TryGetValue(k, out var a) && remote.TryGetValue(k, out var b) && Same(a, b)));
@@ -639,7 +700,7 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
                 }
                 else if (L is { } onlyL)
                 {
-                    var deletedOnPc = S is { HasR: true, HasL: true } && !LocalChanged();
+                    var deletedOnPc = DeletedOnPc(onlyL, false, S);
                     if (pair.Mode == "from-pc" || (pair.Mode == "two-way" && deletedOnPc))
                     {
                         if (deletedOnPc)
@@ -701,8 +762,40 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         if (recycled > 0) parts.Add($"{recycled} moved to the Recycle Bin");
         if (unsafeNames > 0) parts.Add($"{unsafeNames} unsafe name{(unsafeNames == 1 ? "" : "s")} skipped");
         var summary = parts.Count == 0 ? $"up to date · {DateTime.Now:HH:mm}" : $"synced {DateTime.Now:HH:mm} · {string.Join(", ", parts)}";
+        if (skipped.Count > 0)
+            summary += skipped.Count == 1
+                ? " · 1 place on the PC couldn't be read (a locked or linked folder or file); it was left as it is"
+                : $" · {skipped.Count} places on the PC couldn't be read (locked or linked folders or files); they were left as they are";
         if (failed > 0) Set(pair, "error", $"{summary} · {failed} failed, retried later ({firstError})");
         else Set(pair, "idle", summary);
+    }
+
+    /// <summary>A file here that was synced, is unchanged since, and is no longer on the PC: it was deleted there,
+    /// so a pass moves it to the Recycle Bin here (two-way and from-pc).</summary>
+    static bool DeletedOnPc(FileInfoLite? local, bool onPc, Entry? saved) =>
+        local is { } l && !onPc && saved is { HasL: true, HasR: true } && Same(l.Size, l.Mtime, saved.Ls, saved.Lm);
+
+    /// <summary>More than 20 files and more than half of the synced ones gone from the PC in one pass looks like
+    /// a folder that is unavailable or listed wrongly rather than files someone deleted. Below that, a mistake
+    /// costs little: the files are in the Recycle Bin.</summary>
+    static bool TooManyGone(int gone, int synced) => gone > 20 && gone * 2 > synced;
+
+    static bool UnderAny(string key, List<string> places) =>
+        places.Any(p => p == "" || key.Equals(p, StringComparison.OrdinalIgnoreCase) || key.StartsWith(p + "/", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The reason a server request failed: its "detail" when it sent one, else its text.</summary>
+    static async Task<string> ErrorText(HttpResponseMessage r)
+    {
+        var text = await r.Content.ReadAsStringAsync().ConfigureAwait(false);
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("detail", out var d) && d.ValueKind == JsonValueKind.String)
+                return d.GetString() ?? "";
+        }
+        catch (JsonException) { }
+        text = text.Trim();
+        return text != "" ? text : $"error {(int)r.StatusCode}";
     }
 
     static SyncPair Clone(SyncPair p) => new() { Id = p.Id, PcId = p.PcId, Local = p.Local, Remote = p.Remote, Mode = p.Mode, Ignore = p.Ignore, Enabled = p.Enabled };

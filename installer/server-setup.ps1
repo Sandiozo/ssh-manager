@@ -27,7 +27,9 @@ function Report([int]$percent, [string]$text, [string]$detail = '') {
     Write-Progress-Line "$percent|$text|$($detail -replace '[\r\n|]+', ' ')"
 }
 function Warn([string]$text) {
-    "WARNING: $text"
+    # Write-Host, not plain output: a function's output is part of its result, and Select-TaskUser
+    # (which warns, then returns the account) must return only the account name
+    Write-Host "WARNING: $text"
     Write-Progress-Line "WARN|$($text -replace '[\r\n|]+', ' ')"
 }
 

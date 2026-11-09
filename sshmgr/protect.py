@@ -7,7 +7,8 @@
 - SSH keys: %ProgramData%\\ssh\\*key* (host keys, administrators_authorized_keys), every .ssh folder; nothing
   in %ProgramData%\\ssh may be changed
 
-Paths are compared after resolving short (8.3) names, junctions and symbolic links, without case."""
+Paths are compared after resolving short (8.3) names, junctions and symbolic links, without case; folder
+walks resolve each folder they list, and file links by their target."""
 import os
 from pathlib import Path
 
@@ -89,7 +90,20 @@ class Protect:
                 return CONTAINS
         return None
 
-    def hidden_in_walk(self, path: str) -> bool:
-        """For folder walks (zip downloads, trees): leave this entry out for agents. Cheap: walks give full
-        long names and don't follow junctions."""
-        return self._hidden(_norm(path)) is not None
+    def walk_filter(self):
+        """For one folder walk (zip download, tree): a check `hidden(path, link=False)` that says which
+        entries to leave out for agents. The walk may have started from a junction, an 8.3 short name or
+        another alias, so each folder is resolved once (walks list a folder's entries together and give
+        their long names); entries are then compared by name. `link`: the entry is a file link, so it is
+        checked by where it leads."""
+        last = ["", ""]   # (folder as walked, folder resolved)
+
+        def hidden(path: str, link: bool = False) -> bool:
+            if link:
+                return self.why(path) is not None
+            folder, name = os.path.split(path)
+            if folder != last[0]:
+                last[:] = [folder, _real(folder)]
+            return self._hidden(_norm(os.path.join(last[1], name))) is not None
+
+        return hidden

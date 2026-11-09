@@ -30,6 +30,8 @@ CHUNK = 1 << 20
 UPLOAD_SUFFIX = ".sshmgr-upload"     # an upload in progress; never listed, never synced
 SKIPPED_NAME = "_files-not-included.txt"
 FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+FILE_ATTRIBUTE_DIRECTORY = 0x10
+NAME_SURROGATE = 0x20000000          # reparse tags that lead to another path (symbolic links, junctions)
 
 # ---- transfers in progress (the updater waits for them) ----
 _transfers = 0
@@ -88,10 +90,12 @@ def entry(p: Path) -> dict | None:
             "hidden": hidden}
 
 
-def walk(root: str, skip=None, errors: list | None = None):
+def walk(root: str, skip=None, errors: list | None = None, links: list | None = None):
     """Like os.walk (top-down), but never enters junctions, symbolic links or other reparse-point folders,
     and never visits the same folder twice, so link loops can't make it run forever. `skip(path)` leaves
-    entries out; unreadable folders are added to `errors` as (path, reason)."""
+    entries out, and `skip(path, link=True)` file links (checked by where they lead); unreadable folders
+    and entries are added to `errors` as (path, reason), and folders not entered because they are links to
+    `links`."""
     seen: set[tuple[int, int]] = set()
     stack = [root]
     while stack:
@@ -113,14 +117,24 @@ def walk(root: str, skip=None, errors: list | None = None):
             if skip and skip(e.path):
                 continue
             try:
-                is_dir = e.is_dir(follow_symlinks=False)
-                reparse = bool(e.stat(follow_symlinks=False).st_file_attributes & FILE_ATTRIBUTE_REPARSE_POINT)
-            except OSError:
+                st = e.stat(follow_symlinks=False)   # from the folder listing: no extra disk access
+            except OSError as x:
+                if errors is not None:
+                    errors.append((e.path, x.strerror or str(x)))
                 continue
-            if is_dir:
-                if not reparse and not e.is_symlink():
+            attrs = st.st_file_attributes
+            reparse = bool(attrs & FILE_ATTRIBUTE_REPARSE_POINT)
+            if attrs & FILE_ATTRIBUTE_DIRECTORY:
+                if not reparse:
                     dirs.append(e.name)
+                elif links is not None:
+                    links.append(e.path)
             else:
+                # a file link: an agent's walk checks where it leads (other reparse points, such as
+                # OneDrive files, don't lead to another path)
+                if reparse and skip and (st.st_reparse_tag & NAME_SURROGATE or not st.st_reparse_tag) \
+                        and skip(e.path, link=True):
+                    continue
                 files.append(e.name)
         yield top, dirs, files
         stack.extend(os.path.join(top, d) for d in reversed(dirs))
@@ -329,9 +343,16 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
             raise HTTPException(403, why)
 
     def walk_skip(request: Request):
-        """What folder walks leave out: in-progress uploads, and for agents the protected paths."""
-        agent = agents_mod.is_agent(request)
-        return lambda path: path.endswith(UPLOAD_SUFFIX) or (agent and protect.hidden_in_walk(path))
+        """What one folder walk leaves out: in-progress uploads, and for agents the protected paths however
+        the walk's folder was named, and file links that lead to them."""
+        hidden = protect.walk_filter() if agents_mod.is_agent(request) else None
+
+        def skip(path: str, link: bool = False) -> bool:
+            if link:
+                return bool(hidden and hidden(path, link=True))
+            return path.endswith(UPLOAD_SUFFIX) or bool(hidden and hidden(path))
+
+        return skip
 
     @r.get("/roots")
     def roots():
@@ -367,23 +388,40 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
     @r.get("/tree")
     def tree(request: Request, path: str, max_files: int = 100_000):
         """Every file under a folder with size and modification time (for folder sync). Junctions and links
-        are not followed; uploads in progress are left out."""
+        are not followed; uploads in progress are left out. `skipped` names what exists but is not in
+        `files` (folders that couldn't be read or are links, files that couldn't be read), so a sync never
+        takes them for deleted."""
         root = resolve(path)
         guard(request, root)
-        if not root.is_dir():
+        try:
+            is_dir = stat.S_ISDIR(os.stat(root).st_mode)
+        except (FileNotFoundError, NotADirectoryError):
+            is_dir = False
+        except OSError as e:
+            raise HTTPException(409, f"Can't read {root}: {e.strerror or e}")
+        if not is_dir:
             raise HTTPException(404, f"Not a folder: {root}")
-        files = []
-        for dirpath, _, filenames in walk(str(root), walk_skip(request)):
+        files, errors, links, unreadable = [], [], [], []
+
+        def rel(full: str) -> str:
+            return Path(full).relative_to(root).as_posix()
+
+        for dirpath, _, filenames in walk(str(root), walk_skip(request), errors, links):
             for name in filenames:
                 full = os.path.join(dirpath, name)
                 try:
                     st = os.stat(full)
                 except OSError:
+                    unreadable.append(rel(full))
                     continue
-                files.append({"rel": Path(full).relative_to(root).as_posix(), "size": st.st_size, "mtime": st.st_mtime})
+                files.append({"rel": rel(full), "size": st.st_size, "mtime": st.st_mtime})
                 if len(files) > max_files:
                     raise HTTPException(413, f"More than {max_files} files under {root}.")
-        return {"root": str(root), "files": files}
+        for p, why in errors:
+            if p == str(root):
+                raise HTTPException(409, f"Can't list {root}: {why}")
+        skipped = [rel(p) for p, _ in errors] + [rel(p) for p in links] + unreadable
+        return {"root": str(root), "files": files, "skipped": skipped}
 
     @r.get("/download")
     def download(request: Request, path: list[str] = Query(...)):

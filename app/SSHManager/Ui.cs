@@ -1,11 +1,13 @@
 using System.Net;
+using System.Security.Cryptography;
 
 namespace SSHManager;
 
 /// <summary>Pages the app draws itself (the overview, connection status, app settings), styled like the
 /// dashboard: a left rail with the PC list (filled by the app's "pcs" message) and a main area.
 /// Buttons carry data-act (the message type) and data-* values; one click handler posts them, so no
-/// value from a PC ever ends up inside script.</summary>
+/// value from a PC ever ends up inside script. Whatever a page writes as HTML goes through esc(), or
+/// is a number the page made itself (num, pct, bytes, dur); the page's policy (see Policy) is the backstop.</summary>
 internal static class Ui
 {
     /// <summary>"system", "light" or "dark"; set by the app from its settings.</summary>
@@ -89,6 +91,9 @@ internal static class Ui
     /// clicks to the app and shows [data-tip] hover details.</summary>
     public const string PcBarScript = """
         const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+        // a value as a number, or null when it isn't one: a page never writes the value itself where it expects a number
+        const num = v => { const n = v == null || v === "" || typeof v === "boolean" ? NaN : Number(v); return Number.isFinite(n) ? n : null; };
+        const arr = v => Array.isArray(v) ? v : [];
         const send = (type, data = {}) => chrome.webview.postMessage({ type, ...data });
         chrome.webview.addEventListener("message", e => {
           const m = e.data;
@@ -124,12 +129,22 @@ internal static class Ui
 
     const string GearIcon = """<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg>""";
 
+    /// <summary>What a page of the app may load and run: nothing but its own style sheet and its own script
+    /// (marked with a random value made for that page), style attributes, and pictures built into the page.
+    /// No network and no script written into attributes: text from a PC that slipped through as HTML could
+    /// not run anything or send anything anywhere.</summary>
+    static string Policy(string nonce) =>
+        $"default-src 'none'; script-src 'nonce-{nonce}'; style-src-elem 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; " +
+        "img-src data:; base-uri 'none'; form-action 'none'";
+
     /// <summary>A whole page: rail with the PC list, a top bar with the title, and the content.</summary>
     public static string Shell(string title, string css, string content, string script = "", bool center = false, bool settingsPage = false)
     {
         var theme = Theme is "light" or "dark" ? $" data-theme=\"{Theme}\"" : "";
+        var nonce = Convert.ToBase64String(RandomNumberGenerator.GetBytes(18));
         return $$"""
-            <!doctype html><html lang="en"{{theme}}><head><meta charset="utf-8"><title>SSH Manager · {{Esc(title)}}</title><style>{{BaseCss}}{{css}}</style></head>
+            <!doctype html><html lang="en"{{theme}}><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="{{Policy(nonce)}}">
+            <title>SSH Manager · {{Esc(title)}}</title><style nonce="{{nonce}}">{{BaseCss}}{{css}}</style></head>
             <body><div class="app">
               <aside class="rail">
                 <div class="brand"><img class="logo" src="{{LogoUri}}" alt=""><span>SSH Manager</span></div>
@@ -141,7 +156,7 @@ internal static class Ui
                 <header class="topbar"><h1>{{Esc(title)}}</h1></header>
                 <div class="content{{(center ? " center" : "")}}">{{content}}</div>
               </div>
-            </div><div class="viz-tip" id="viz-tip"></div><script>{{PcBarScript}}{{script}}</script></body></html>
+            </div><div class="viz-tip" id="viz-tip"></div><script nonce="{{nonce}}">{{PcBarScript}}{{script}}</script></body></html>
             """;
     }
 
@@ -351,10 +366,11 @@ internal static class Ui
           <div class="muted small" id="dlg-meta"></div><pre id="dlg-body"></pre></dialog>
         """, """
         const $ = id => document.getElementById(id);
-        const bytes = n => { if (n == null) return ""; const u = ["B","KB","MB","GB","TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i]; };
-        const dur = s => s == null ? "" : s < 3600 ? Math.round(s / 60) + " min" : s < 86400 ? Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min" : Math.floor(s / 86400) + " d " + Math.floor(s % 86400 / 3600) + " h";
-        const meter = p => `<div class="meter"><i class="${p > 90 ? "crit" : p > 75 ? "hot" : ""}" style="width:${Math.min(100, p || 0)}%"></i></div>`;
-        const mini = p => p == null ? `<span class="dim">—</span>` : `<div class="mini"><span class="num">${Math.round(p)}%</span>${meter(p)}</div>`;
+        const bytes = v => { let n = num(v); if (n == null) return "—"; const u = ["B","KB","MB","GB","TB"]; let i = 0; while (n >= 1024 && i < 4) { n /= 1024; i++; } return (i ? n.toFixed(n < 10 ? 1 : 0) : n) + " " + u[i]; };
+        const dur = v => { const s = num(v); return s == null ? "" : s < 3600 ? Math.round(s / 60) + " min" : s < 86400 ? Math.floor(s / 3600) + " h " + Math.floor(s % 3600 / 60) + " min" : Math.floor(s / 86400) + " d " + Math.floor(s % 86400 / 3600) + " h"; };
+        const pct = v => { const n = num(v); return n == null ? null : Math.max(0, Math.min(100, n)); };
+        const meter = p => `<div class="meter"><i class="${p > 90 ? "crit" : p > 75 ? "hot" : ""}" style="width:${p}%"></i></div>`;
+        const mini = v => { const p = pct(v); return p == null ? `<span class="dim">—</span>` : `<div class="mini"><span class="num">${Math.round(p)}%</span>${meter(p)}</div>`; };
         const hm = d => d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
         const when = iso => { const d = new Date(iso); return d.toDateString() === new Date().toDateString() ? hm(d) : d.toLocaleDateString([], { day: "numeric", month: "short" }); };
         const ago = iso => { if (!iso) return ""; const s = (Date.now() - new Date(iso)) / 1000; return s < 60 ? "just now" : dur(s) + " ago"; };
@@ -374,9 +390,9 @@ internal static class Ui
           const sub = p.kind === "this" ? "this computer · app"
             : p.kind === "client" ? (p.state === "Connected" ? `connected to ${esc(p.via)}` : p.state === "Online" ? "online · not connected" : "offline") + (p.version ? ` · v${esc(p.version)}` : "")
             : (p.state === "Connected" ? "connected" : esc((p.state || "").toLowerCase())) + (p.version ? ` · v${esc(p.version)}` : "");
-          const extra = [s.battery != null ? `battery ${s.battery}%${s.charging ? " charging" : ""}` : "", s.uptime_s != null ? `up ${dur(s.uptime_s)}` : ""].filter(Boolean).join(" · ");
+          const extra = [num(s.battery) != null ? `battery ${num(s.battery)}%${s.charging === true ? " charging" : ""}` : "", num(s.uptime_s) != null ? `up ${dur(s.uptime_s)}` : ""].filter(Boolean).join(" · ");
           const tag = p.kind === "pc" ? `<span class="tag accent">server</span>` : p.kind === "client" ? `<span class="tag">app</span>` : "";
-          const disks = (s.disks || []).slice(0, 2).map((d, j) => `${j ? "<br>" : ""}<span class="${j ? "dim" : ""}">${esc(d.mount)} ${bytes(d.free)} free</span>`).join("") || `<span class="dim">—</span>`;
+          const disks = arr(s.disks).slice(0, 2).map((d, j) => `${j ? "<br>" : ""}<span class="${j ? "dim" : ""}">${esc(d?.mount)} ${bytes(d?.free)} free</span>`).join("") || `<span class="dim">—</span>`;
           const btns = p.kind === "this" ? "" : p.kind === "client"
             ? (p.state === "Offline" && p.mac ? `<button data-act="wake-mac" data-mac="${esc(p.mac)}" data-ip="${esc(p.ip)}" data-name="${esc(p.name)}">Wake up</button>` : "")
             : [p.state === "Connected" ? `<button class="primary" data-act="switch-pc" data-id="${esc(p.id)}">Open</button>` : `<button data-act="retry" data-id="${esc(p.id)}">Retry</button>`,
@@ -386,28 +402,29 @@ internal static class Ui
           const msg = p.state !== "Connected" && p.kind === "pc" && p.message ? `<div class="msg">${esc(p.message)}</div>` : "";
           const line = sub + (extra ? " · " + esc(extra) : "");
           return `<tr><td><div class="who"><span class="dot ${st}"></span><div><b>${esc(p.name)}</b><small title="${line}">${line}</small>${msg}</div>${tag}</div></td>
-            <td>${mini(s.cpu)}</td><td>${mini(s.ram_total ? s.ram_used / s.ram_total * 100 : null)}</td><td class="num">${disks}</td>
-            <td class="num">${p.sessions ?? `<span class="dim">—</span>`}${p.failures ? ` <span class="tag" style="color:var(--critical)">${p.failures} failed</span>` : ""}</td>
+            <td>${mini(s.cpu)}</td><td>${mini(num(s.ram_total) ? num(s.ram_used) / num(s.ram_total) * 100 : null)}</td><td class="num">${disks}</td>
+            <td class="num">${num(p.sessions) ?? `<span class="dim">—</span>`}${num(p.failures) ? ` <span class="tag" style="color:var(--critical)">${num(p.failures)} failed</span>` : ""}</td>
             <td><div class="acts">${btns}</div></td></tr>`;
         }
         let acts = [], fKind = "";
         function kpis(sm) {
-          const k = (label, value, sub, cls = "") => `<div class="kpi"><div class="kpi-label">${label}</div><div class="kpi-value ${cls}">${value}</div><div class="kpi-sub">${sub}</div></div>`;
+          const k = (label, value, sub, cls = "") => `<div class="kpi"><div class="kpi-label">${esc(label)}</div><div class="kpi-value ${cls}">${esc(value)}</div><div class="kpi-sub">${esc(sub)}</div></div>`;
+          const n = name => num(sm[name]) ?? 0;
           $("kpis").innerHTML = [
-            k("PCs online", `${sm.online} / ${sm.total}`, sm.online < sm.total ? `${sm.total - sm.online} not connected` : "all connected", sm.online < sm.total ? "bad" : ""),
-            k("Sessions now", sm.sessions, "across all PCs"),
-            k("Logins · 24 h", sm.logins, "on all PCs"),
-            k("Failed logins · 24 h", sm.failures, sm.failures ? "see Connections on that PC" : "none", sm.failures ? "bad" : ""),
-            k("Commands · 24 h", sm.commands + sm.actions, sm.actions ? `${sm.actions} from Run` : "over SSH"),
-            k("Transferred · 24 h", sm.bytes ? bytes(sm.bytes) : "0 B", `${sm.files} file${sm.files === 1 ? "" : "s"}`),
+            k("PCs online", `${n("online")} / ${n("total")}`, n("online") < n("total") ? `${n("total") - n("online")} not connected` : "all connected", n("online") < n("total") ? "bad" : ""),
+            k("Sessions now", n("sessions"), "across all PCs"),
+            k("Logins · 24 h", n("logins"), "on all PCs"),
+            k("Failed logins · 24 h", n("failures"), n("failures") ? "see Connections on that PC" : "none", n("failures") ? "bad" : ""),
+            k("Commands · 24 h", n("commands") + n("actions"), n("actions") ? `${n("actions")} from Run` : "over SSH"),
+            k("Transferred · 24 h", bytes(n("bytes")), `${n("files")} file${n("files") === 1 ? "" : "s"}`),
           ].join("");
         }
         function niceMax(v) { const p = 10 ** Math.floor(Math.log10(v)); return [2, 4, 10].map(m => m * p).find(m => m >= v); }
         function chart(h) {
-          const n = Math.max(0, ...h.series.map(s => s.counts.length));
+          const n = Math.min(48, Math.max(0, ...h.series.map(s => arr(s.counts).length)));
           // fold PCs past the fourth into "Other" so colors never repeat
           const groups = [0, 1, 2, 3, 4].map(g => ({ name: g < 4 ? null : "Other", counts: Array(n).fill(0), color: SERIES[g] || "var(--faint)" }));
-          for (const s of h.series) { const g = groups[slot(s.name)]; if (g.name == null) g.name = s.name; s.counts.forEach((c, i) => g.counts[i] += c || 0); }
+          for (const s of h.series) { const g = groups[slot(s.name)]; if (g.name == null) g.name = s.name; arr(s.counts).slice(0, n).forEach((c, i) => g.counts[i] += num(c) || 0); }
           const used = groups.filter(g => g.name && g.counts.some(c => c));
           const totals = Array.from({ length: n }, (_, i) => used.reduce((a, g) => a + g.counts[i], 0));
           const max = niceMax(Math.max(1, ...totals));
@@ -425,23 +442,23 @@ internal static class Ui
           $("sessions").innerHTML = list.length ? list.map(x => `<div class="sess">
               <div class="line"><span class="dot ok"></span><b>${esc(x.client || x.ip)}</b><span class="arrow">→</span>
                 <span>${key(x.pc)}${esc(x.pc)}</span>
-                ${x.app ? `<span class="tag">app</span>` : x.tunnel ? `<span class="tag">port forward</span>` : ""}<span class="when">${ago(x.start)}</span></div>
-              ${(x.agents || []).map(a => `<div class="cmd"><span class="kind setup">AI agent</span> ${esc(a)} (${esc(x.client || x.ip)})</div>`).join("")}
-              ${x.commands.map(c => `<div class="cmd" title="${esc(c.summary)}"><span class="kind ${esc(c.kind)}">${esc(c.kind)}</span> ${esc(c.summary)}</div>`).join("")}
+                ${x.app ? `<span class="tag">app</span>` : x.tunnel ? `<span class="tag">port forward</span>` : ""}<span class="when">${esc(ago(x.start))}</span></div>
+              ${arr(x.agents).map(a => `<div class="cmd"><span class="kind setup">AI agent</span> ${esc(a)} (${esc(x.client || x.ip)})</div>`).join("")}
+              ${arr(x.commands).map(c => `<div class="cmd" title="${esc(c.summary)}"><span class="kind ${esc(c.kind)}">${esc(c.kind)}</span> ${esc(c.summary)}</div>`).join("")}
             </div>`).join("") : `<div class="none">No one is connected over SSH to any PC right now.</div>`;
         }
         function label(a) {
           if (a.kind === "command") return { kind: a.type || "command", text: a.summary || "" };
           if (a.kind === "action") return { kind: "run", text: (a.title || "") + (a.status && a.status !== "done" ? ` (${a.status})` : "") };
           if (a.kind === "setup") {
-            const t = { settings: `Changed settings (${(a.changed || []).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
+            const t = { settings: `Changed settings (${arr(a.changed).join(", ")})`, "key-added": `Allowed SSH key ${a.label || a.fingerprint}`,
               "key-removed": `Removed SSH key ${a.label || a.fingerprint}`, "pair-requested": `Asked ${a.target} for access`,
               "pair-allowed": `${a.target} allowed access`, "pair-denied": `${a.target} denied access`, "screen-viewed": "Viewed the screen",
               "approval-requested": `Asked for approval to run "${a.title}"`, "approval-allowed": `Allowed ${a.requested_by || "an AI agent"} to run "${a.title}"`,
               "approval-denied": `Denied ${a.requested_by || "an AI agent"} running "${a.title}"`, "approval-unanswered": `"${a.title}" not run: nobody approved it` }[a.action] || a.action;
             return { kind: "setup", text: t };
           }
-          const p = a.path || (a.paths || []).join(", ");
+          const p = a.path || arr(a.paths).join(", ");
           const verbs = { upload: "Received", download: "Sent", "download-zip": "Sent (zip)", mkdir: "Created folder", rename: "Renamed", delete: "Deleted" };
           return { kind: "file", text: `${verbs[a.action] || a.action || ""} ${p}${a.to ? " → " + a.to : ""}${a.size != null ? " (" + bytes(a.size) + ")" : ""}` };
         }
@@ -450,7 +467,7 @@ internal static class Ui
           const list = acts.filter(a => (!pc || a.pc === pc) && (!fKind || a.kind === fKind) && (!q || JSON.stringify(a).toLowerCase().includes(q)));
           $("acts").innerHTML = list.length ? list.map(a => {
             const l = label(a);
-            return `<div class="act" data-i="${acts.indexOf(a)}"><span class="t">${when(a.ts)}</span>
+            return `<div class="act" data-i="${acts.indexOf(a)}"><span class="t">${esc(when(a.ts))}</span>
               <span class="pc">${key(a.pc)}${esc(a.pc)}</span>
               <span class="kind ${esc(l.kind)}">${esc(l.kind)}</span><span class="who">${esc(a.client || "")}</span>
               <span class="what" title="${esc(l.text)}">${esc(l.text)}</span></div>`;

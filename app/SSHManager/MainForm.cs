@@ -9,26 +9,6 @@ using Microsoft.Win32;
 
 namespace SSHManager;
 
-/// <summary>Reading JSON from PCs without trusting its shape: a missing or odd value gives a default.</summary>
-internal static class J
-{
-    public static bool Has(JsonElement e, string n, out JsonElement v)
-    {
-        v = default;
-        return e.ValueKind == JsonValueKind.Object && e.TryGetProperty(n, out v);
-    }
-
-    public static string S(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
-    public static bool B(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.True;
-    public static int I(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var x) ? x : 0;
-    public static long L(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt64(out var x) ? x : 0;
-    public static double D(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetDouble(out var x) ? x : 0;
-    public static JsonElement O(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.Object ? v : default;
-    public static IEnumerable<JsonElement> A(JsonElement e, string n) =>
-        Has(e, n, out var v) && v.ValueKind == JsonValueKind.Array ? v.EnumerateArray() : [];
-    public static int Len(JsonElement e, string n) => Has(e, n, out var v) && v.ValueKind == JsonValueKind.Array ? v.GetArrayLength() : 0;
-}
-
 /// <summary>
 /// The app window: one WebView2 that shows either a PC's dashboard (served by that PC through its
 /// SSH tunnel), the "All PCs" overview, a connection status page or the setup wizard. A tray icon
@@ -671,7 +651,7 @@ internal sealed class MainForm : Form
     {
         type = "pcs",
         current = wizardOpen || appSettingsOpen ? "" : current,
-        pcs = links.Select(l => new { id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString() }),
+        pcs = links.Select(l => new { id = l.Pc.Id, name = PageName(l), state = l.State.ToString() }),
     });
 
     /// <summary>Sync pairs to the views that show them: each PC's dashboard gets only its own pairs.</summary>
@@ -684,8 +664,11 @@ internal sealed class MainForm : Form
 
     /// <summary>A computer that connects to one of the PCs here but has no server of its own (a client),
     /// as that PC reports it: it can't be opened, but All PCs shows its status and stats.</summary>
-    sealed record ClientPc(string Name, string State, string Via, JsonElement? Stats, string Mac, string Ip, string Version,
+    sealed record ClientPc(string Name, string State, string Via, object? Stats, string Mac, string Ip, string Version,
         string Host = "", string Machine = "", string User = "", bool ViaLocal = false, bool CanPair = false);
+
+    /// <summary>A PC's name as the pages show it.</summary>
+    static string PageName(Link l) => J.Cap(l.Pc.DisplayName, PageData.MaxName);
 
     /// <summary>For the setup page: a computer whose app is connected to a PC here, found by its name, computer
     /// name or address. It can approve a pairing request when it is connected to this PC's own server.</summary>
@@ -700,6 +683,9 @@ internal sealed class MainForm : Form
         return c is null ? null
             : new(c.Machine != "" ? c.Machine : c.Name, c.User, c.ViaLocal && c.CanPair && c.State == "Connected");
     }
+
+    /// <summary>At most this many other computers are read from one PC's list.</summary>
+    const int MaxClients = 64;
 
     List<ClientPc> Clients()
     {
@@ -717,23 +703,25 @@ internal sealed class MainForm : Form
         foreach (var l in links.Where(l => l.State == LinkState.Connected && l.Status is not null))
         {
             var s = l.Status!.Value;
-            foreach (var p in J.A(s, "peers"))
+            foreach (var p in J.A(s, "peers").Take(MaxClients))
             {
                 var st = Obj(p, "stats");
-                var name = J.S(p, "name");
-                if (name == "" || Seen(name, st is { } x ? J.S(x, "machine") : "")) continue;
+                var name = J.S(p, "name", PageData.MaxName);
+                var machine = st is { } x ? J.S(x, "machine", PageData.MaxName) : "";
+                if (name == "" || Seen(name, machine)) continue;
                 var state = J.B(p, "connected") ? "Connected" : J.B(p, "online") ? "Online" : "Offline";
-                var ip = J.S(p, "resolved_ip") is { Length: > 0 } r ? r : J.S(p, "ip");
-                list.Add(new(name, state, l.Pc.DisplayName, st, FirstMac(st), ip, st is { } y ? J.S(y, "app_version") : "",
-                    J.S(p, "host"), st is { } z ? J.S(z, "machine") : "", st is { } u ? J.S(u, "user") : "", l.Pc.IsLocal, Pairs(st)));
+                var ip = J.S(p, "resolved_ip", 64) is { Length: > 0 } r ? r : J.S(p, "ip", 64);
+                list.Add(new(name, state, PageName(l), st is { } q ? PageData.ClientStats(q) : null, J.Cap(FirstMac(st), 32), ip,
+                    st is { } y ? J.S(y, "app_version", 32) : "", J.S(p, "host", 255), machine, st is { } u ? J.S(u, "user", 104) : "",
+                    l.Pc.IsLocal, Pairs(st)));
             }
-            foreach (var c in J.A(s, "other_apps"))
+            foreach (var c in J.A(s, "other_apps").Take(MaxClients))
             {
                 if (c.ValueKind != JsonValueKind.Object) continue;
-                var name = J.S(c, "machine");
+                var name = J.S(c, "machine", PageData.MaxName);
                 if (name == "" || Seen(name, name)) continue;
-                list.Add(new(name, "Connected", l.Pc.DisplayName, c, FirstMac(c), "", J.S(c, "app_version"), "", name, J.S(c, "user"),
-                    l.Pc.IsLocal, Pairs(c)));
+                list.Add(new(name, "Connected", PageName(l), PageData.ClientStats(c), J.Cap(FirstMac(c), 32), "", J.S(c, "app_version", 32), "", name,
+                    J.S(c, "user", 104), l.Pc.IsLocal, Pairs(c)));
             }
         }
         return list;
@@ -826,32 +814,30 @@ internal sealed class MainForm : Form
             files = up.Sum(x => J.I(A(x.s), "files")),
             bytes = up.Sum(x => J.L(A(x.s), "bytes")),
         };
+        // every list and text below is cut to a size the page can take, whatever a PC sent
         var series = up.Where(x => J.Len(x.s, "hours") > 0)
-            .Select(x => new { name = x.l.Pc.DisplayName, counts = J.A(x.s, "hours").Select(h => J.I(h, "count")).ToArray() })
+            .Select(x => new { name = PageName(x.l), counts = J.A(x.s, "hours").Take(48).Select(h => Math.Max(0, J.I(h, "count"))).ToArray() })
             .ToList();
         var labels = up.Select(x => x.s).Where(s => J.Len(s, "hours") > 0)
-            .Select(s => J.A(s, "hours").Select(h => J.S(h, "hour")).ToArray()).FirstOrDefault() ?? [];
-        var sessions = up.SelectMany(x => J.A(x.s, "sessions").Select(se => (object)new
+            .Select(s => J.A(s, "hours").Take(48).Select(h => J.S(h, "hour", 40)).ToArray()).FirstOrDefault() ?? [];
+        var sessions = up.SelectMany(x => J.A(x.s, "sessions").Take(100).Select(se => (object)new
         {
-            pc = x.l.Pc.DisplayName, client = J.S(se, "client"), user = J.S(se, "user"), ip = J.S(se, "ip"), start = J.S(se, "start"),
+            pc = PageName(x.l), client = J.S(se, "client", 100), user = J.S(se, "user", 104), ip = J.S(se, "ip", 64), start = J.S(se, "start", 40),
             tunnel = J.B(se, "tunnel"),
-            agents = J.A(se, "agents").Where(a => a.ValueKind == JsonValueKind.String).Select(a => a.GetString() ?? "").ToArray(),
+            agents = J.A(se, "agents").Where(a => a.ValueKind == JsonValueKind.String).Take(10).Select(a => J.Cap(a.GetString() ?? "", 60)).ToArray(),
             app = J.A(se, "commands").Any(c => J.S(c, "kind") == "dashboard"),
-            commands = J.A(se, "commands").Where(c => J.S(c, "kind") != "dashboard")
-                .Select(c => new { kind = J.S(c, "kind"), summary = J.S(c, "summary"), start = J.S(c, "start") }).ToArray(),
+            commands = J.A(se, "commands").Where(c => J.S(c, "kind") != "dashboard").Take(20)
+                .Select(c => new { kind = J.S(c, "kind", 30), summary = J.S(c, "summary", 500), start = J.S(c, "start", 40) }).ToArray(),
         })).ToList();
         var activity = links.Where(l => feeds.ContainsKey(l.Pc.Id))
             .SelectMany(l => feeds[l.Pc.Id].items.Select(it =>
             {
-                var o = System.Text.Json.Nodes.JsonNode.Parse(it.GetRawText())!.AsObject();
-                foreach (var big in new[] { "script", "output" })
-                    if (o[big] is System.Text.Json.Nodes.JsonValue v && v.TryGetValue<string>(out var text) && text.Length > 4000)
-                        o[big] = text[..4000] + "…";
-                o["pc"] = l.Pc.DisplayName;
+                var o = PageData.Activity(it);
+                o["pc"] = PageName(l);
                 return o;
             }))
-            .OrderByDescending(o => o["ts"] is System.Text.Json.Nodes.JsonValue tv && tv.TryGetValue<string>(out var ts)
-                                    && DateTimeOffset.TryParse(ts, out var t) ? t : DateTimeOffset.MinValue)
+            .OrderByDescending(o => o.TryGetValue("ts", out var ts) && ts is string text && DateTimeOffset.TryParse(text, out var t)
+                ? t : DateTimeOffset.MinValue)
             .Take(250).ToList();
         return new { summary, hours = new { labels, series }, sessions, activity };
     }
@@ -868,29 +854,20 @@ internal sealed class MainForm : Form
             var canUpdate = false;
             if (l.State == LinkState.Connected && l.Status is { } s)
             {
-                var host = J.O(s, "host");
-                var ram = J.O(host, "ram");
-                stats = new
-                {
-                    cpu = J.D(host, "cpu"),
-                    ram_total = J.L(ram, "total"),
-                    ram_used = J.L(ram, "used"),
-                    disks = J.A(host, "disks").Select(d => new { mount = J.S(d, "mount"), total = J.L(d, "total"), free = J.L(d, "free") }).ToArray(),
-                    uptime_s = J.L(host, "uptime_s"),
-                };
+                stats = PageData.HostStats(J.O(s, "host"));
                 sessions = J.Len(s, "sessions");
                 failures = J.Len(s, "failures_24h");
                 if (J.O(s, "update") is { ValueKind: JsonValueKind.Object } u)
                 {
-                    latest = J.S(u, "latest");
+                    latest = J.S(u, "latest", 32);
                     canUpdate = J.B(u, "available") && J.B(u, "installable") && J.S(u, "status") == "idle";
                 }
             }
             pcs.Add(new
             {
-                id = l.Pc.Id, name = l.Pc.DisplayName, state = l.State.ToString(), message = l.Message.Split('\n')[0],
-                version = l.Version, stats, sessions, failures, latest, canUpdate, local = l.Pc.IsLocal, kind = "pc",
-                mac = l.Pc.Mac,
+                id = l.Pc.Id, name = PageName(l), state = l.State.ToString(), message = J.Cap(l.Message.Split('\n')[0], 300),
+                version = J.Cap(l.Version, 32), stats, sessions, failures, latest, canUpdate, local = l.Pc.IsLocal, kind = "pc",
+                mac = J.Cap(l.Pc.Mac, 32),
             });
         }
         if (!links.Any(l => l.Pc.IsLocal) && lastLocalStats is not null)

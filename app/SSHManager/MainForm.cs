@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.Net.Http.Json;
 using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -18,6 +20,10 @@ namespace SSHManager;
 /// that PC. Anything that changes this app (settings, PCs, setup, updates, waking PCs) is accepted only
 /// from the app's own shared view; a PC view can only manage its own sync pairs (each new pair confirmed
 /// in a native dialog), switch PCs, and open the app's own pages.
+///
+/// Every PC's dashboard has a browser profile of its own (see PcProfile) and the app's pages have another:
+/// cookies (the PC's access token is one), cache, service workers and stored settings of one PC's pages
+/// are never sent to, or used for, another PC, also when a PC later gets a local port another one had.
 /// </summary>
 internal sealed class MainForm : Form
 {
@@ -47,6 +53,15 @@ internal sealed class MainForm : Form
         public DateTime? HiddenSince;
     }
     readonly Dictionary<string, PcView> pcViews = [];
+    /// <summary>Browser data: the profile of the app's own pages and one profile per PC.</summary>
+    static readonly string BrowserFolder = Path.Combine(AppSettings.Folder, "Browser");
+    /// <summary>Where earlier versions kept the one profile every PC's dashboard shared.</summary>
+    static readonly string OldBrowserFolder = Path.Combine(AppSettings.Folder, "WebView2");
+    const string AppProfile = "app";
+    /// <summary>PCs (by id) whose browser profile has to be emptied before a page is loaded in it again.</summary>
+    readonly HashSet<string> staleProfiles = [];
+    /// <summary>PCs (by id) whose browser profile is being emptied right now.</summary>
+    readonly Dictionary<string, Task> clearing = [];
     WebView2? visible;
     bool mainPending, webWantsSync;
     CoreWebView2Environment? webEnv;
@@ -218,8 +233,8 @@ internal sealed class MainForm : Form
             // --devtools-port=N (testing only) exposes the page to Chrome DevTools Protocol on 127.0.0.1:N
             var port = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--devtools-port="))?.Split('=')[1];
             var options = new CoreWebView2EnvironmentOptions(port is null ? null : $"--remote-debugging-port={int.Parse(port)}");
-            webEnv = await CoreWebView2Environment.CreateAsync(null, Path.Combine(AppSettings.Folder, "WebView2"), options);
-            await web.EnsureCoreWebView2Async(webEnv);
+            webEnv = await CoreWebView2Environment.CreateAsync(null, BrowserFolder, options);
+            await web.EnsureCoreWebView2Async(webEnv, ProfileOptions(AppProfile));
         }
         catch (Exception ex)
         {
@@ -230,6 +245,8 @@ internal sealed class MainForm : Form
         }
         Configure(web, null);
         ApplyColorScheme();
+        RemoveOldBrowserData();
+        RemoveLeftoverProfiles();
         visible = web;
         web.NavigationCompleted += (_, a) => AppLog.Guard("Page loaded", () =>
         {
@@ -260,7 +277,13 @@ internal sealed class MainForm : Form
 
     void ApplyColorScheme()
     {
-        if (web.CoreWebView2 is not { } core) return;
+        foreach (var v in AllViews())
+            if (v.CoreWebView2 is { } core) SetColorScheme(core);
+    }
+
+    /// <summary>The colour scheme is kept per browser profile, so every view gets it.</summary>
+    void SetColorScheme(CoreWebView2 core)
+    {
         try
         {
             core.Profile.PreferredColorScheme = settings.Theme switch
@@ -330,6 +353,97 @@ internal sealed class MainForm : Form
             }
             catch (Exception) { l.Reconnect(resetBackoff: true); }
         }
+    }
+
+    // ---- browser profiles: one per PC, one for the app's own pages ----
+    /// <summary>The name of a PC's own browser profile. Made from the PC's id, which no other PC ever gets
+    /// (a PC that is removed and added again is a new entry with a new id).</summary>
+    static string PcProfile(string pcId) =>
+        "pc-" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(pcId)))[..32].ToLowerInvariant();
+
+    CoreWebView2ControllerOptions ProfileOptions(string profile)
+    {
+        var options = webEnv!.CreateCoreWebView2ControllerOptions();
+        options.ProfileName = profile;
+        return options;
+    }
+
+    /// <summary>Deletes everything a PC's pages stored in the app (cookies with its access token, cache, service
+    /// workers, stored settings): when the PC is removed, and when its entry now points at another computer.
+    /// A view nobody sees opens the profile only for that. The emptied profile's folder is deleted at the next
+    /// start (see RemoveLeftoverProfiles) unless the PC is still in the list.</summary>
+    void ForgetBrowserData(string pcId)
+    {
+        DropPcView(pcId);
+        staleProfiles.Add(pcId);   // until it is done, a page for this PC is not loaded
+        if (webEnv is null || exiting) return;
+        var before = clearing.GetValueOrDefault(pcId, Task.CompletedTask);
+        clearing[pcId] = ClearAsync();
+
+        async Task ClearAsync()
+        {
+            await before;
+            var v = new WebView2 { Size = new Size(1, 1), Visible = false };
+            try
+            {
+                Controls.Add(v);
+                await v.EnsureCoreWebView2Async(webEnv, ProfileOptions(PcProfile(pcId)));
+                await v.CoreWebView2.Profile.ClearBrowsingDataAsync();
+                staleProfiles.Remove(pcId);
+            }
+            catch (Exception e) { AppLog.Write("Deleting a PC's browser data", e); }
+            finally
+            {
+                Controls.Remove(v);
+                v.Dispose();
+            }
+        }
+    }
+
+    /// <summary>Earlier versions showed every PC's dashboard in one browser profile, which still holds all
+    /// their access-token cookies and stored pages. Nothing uses it any more: it is deleted (tried again at
+    /// the next start if something still has its files open).</summary>
+    static void RemoveOldBrowserData() => Task.Run(async () =>
+    {
+        for (var attempt = 1; Directory.Exists(OldBrowserFolder); attempt++)
+        {
+            try { Directory.Delete(OldBrowserFolder, true); }
+            catch (Exception e)
+            {
+                if (attempt == 5)
+                {
+                    AppLog.Write("Deleting the browser data of the earlier version", e);
+                    return;
+                }
+                await Task.Delay(3000);   // its browser process may still be closing
+            }
+        }
+    });
+
+    /// <summary>Deletes the profile folders of PCs that are no longer in the list (they were emptied when the PC
+    /// was removed). None of them is open: a profile is only opened for a PC in the list. Profile folders
+    /// are the ones next to the folder of the app's own profile, named the same way.</summary>
+    void RemoveLeftoverProfiles()
+    {
+        try
+        {
+            var own = web.CoreWebView2.Profile.ProfilePath;
+            var name = Path.GetFileName(own);
+            if (Path.GetDirectoryName(own) is not { } parent || !name.EndsWith(AppProfile, StringComparison.OrdinalIgnoreCase)) return;
+            var prefix = name[..^AppProfile.Length];
+            var keep = links.Select(l => prefix + PcProfile(l.Pc.Id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var leftover = Directory.GetDirectories(parent, prefix + "pc-*").Where(d => !keep.Contains(Path.GetFileName(d))).ToList();
+            if (leftover.Count == 0) return;
+            Task.Run(() =>
+            {
+                foreach (var folder in leftover)
+                {
+                    try { Directory.Delete(folder, true); }
+                    catch (Exception e) { AppLog.Write("Deleting a removed PC's browser profile", e); }
+                }
+            });
+        }
+        catch (Exception e) { AppLog.Write("Looking for browser profiles of removed PCs", e); }
     }
 
     // ---- views: one per connected PC plus the shared one; only the one in front is visible ----
@@ -451,20 +565,33 @@ internal sealed class MainForm : Form
             return;
         }
         if (pv is not null) DropPcView(id);
-        // the server only answers requests that carry its access token; one cookie per local port
-        // (the cookie store is shared by all views); page script can't read it
-        var cookies = web.CoreWebView2.CookieManager;
-        var cookie = cookies.CreateCookie($"sshmgr_token_{link.Port}", link.Token, "localhost", "/");
-        cookie.IsHttpOnly = true;
-        cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
-        cookies.AddOrUpdateCookie(cookie);
         var v = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = PageBack() };
         pv = new PcView(v, link.Url, link.Token, link.Port);
         pcViews[id] = pv;
         Controls.Add(v);
         v.SendToBack();   // load behind the page that is showing now
-        await v.EnsureCoreWebView2Async(webEnv);
-        if (!pcViews.TryGetValue(id, out var still) || still != pv) return;   // dropped while starting
+        bool Dropped() => !pcViews.TryGetValue(id, out var still) || still != pv;   // closed while starting
+        if (clearing.TryGetValue(id, out var emptying)) await emptying;
+        if (Dropped()) return;
+        // this PC's own browser profile: nothing in it comes from, or goes to, another PC's pages
+        await v.EnsureCoreWebView2Async(webEnv, ProfileOptions(PcProfile(id)));
+        if (Dropped()) return;
+        var core = v.CoreWebView2;
+        if (staleProfiles.Contains(id))
+        {
+            // the entry pointed at another computer before and emptying its profile didn't work then
+            await core.Profile.ClearBrowsingDataAsync();
+            staleProfiles.Remove(id);
+            if (Dropped()) return;
+        }
+        // the server only answers requests that carry its access token: a cookie for its local port, kept in
+        // this PC's profile only, so no other PC's server is ever sent it; page script can't read it
+        var cookies = core.CookieManager;
+        var cookie = cookies.CreateCookie($"sshmgr_token_{link.Port}", link.Token, "localhost", "/");
+        cookie.IsHttpOnly = true;
+        cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
+        cookies.AddOrUpdateCookie(cookie);
+        SetColorScheme(core);
         Configure(v, link);
         v.NavigationCompleted += async (_, a) => await AppLog.GuardAsync("PC page loaded", async () =>
         {
@@ -1299,6 +1426,8 @@ internal sealed class MainForm : Form
             if (existing is not null) pc.Id = existing.Id;
             if (existing is not null)
             {
+                // the entry may now lead to another computer: nothing the old one's pages stored is kept for it
+                if (!existing.Host.Trim().Equals(pc.Host.Trim(), StringComparison.OrdinalIgnoreCase)) ForgetBrowserData(existing.Id);
                 lock (settings.Gate)
                 {
                     existing.Host = pc.Host;
@@ -1329,7 +1458,7 @@ internal sealed class MainForm : Form
                 (pairs > 0 ? $"Its {pairs} folder sync{(pairs == 1 ? "" : "s")} stop{(pairs == 1 ? "s" : "")} too (no files are deleted). " : "") +
                 "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings → SSH keys if you want to lock this computer out.",
                 "Remove PC", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-        DropPcView(link.Pc.Id);
+        ForgetBrowserData(link.Pc.Id);
         link.Dispose();
         links.Remove(link);
         linkSnapshot = links.ToArray();

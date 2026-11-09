@@ -73,12 +73,9 @@ internal sealed class MainForm : Form
     readonly Pairing pairing;
     readonly CliPipe cliPipe;
     readonly Approvals approvals;
+    readonly PairRequests pairRequests;
     /// <summary>Recent activity of each PC (by PC id), for the combined timeline in All PCs.</summary>
     readonly Dictionary<string, (long last, List<JsonElement> items)> feeds = [];
-    readonly HashSet<string> pairSeen = [];
-    /// <summary>Pairing requests from a computer whose last request was denied are ignored for a while.</summary>
-    readonly Dictionary<string, DateTime> pairDeniedUntil = [];
-    bool pairPrompting;
     readonly System.Windows.Forms.Timer poll = new() { Interval = 5000 };
     readonly System.Windows.Forms.Timer clipTimer = new() { Interval = 1500 };
     bool clipBusy;
@@ -121,6 +118,8 @@ internal sealed class MainForm : Form
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => linkSnapshot.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(PostSyncState));
         approvals = new Approvals(this, settings, (title, text) => Balloon(title, text, ToolTipIcon.Warning, force: true));
+        pairRequests = new PairRequests(this, settings, () => links.FirstOrDefault(l => l.Pc.IsLocal),
+            (title, text) => Balloon(title, text, ToolTipIcon.Info, force: true));
         cliPipe = new CliPipe(() => linkSnapshot.ToList());
 
         var menu = new ContextMenuStrip();
@@ -882,7 +881,7 @@ internal sealed class MainForm : Form
             if (doc.RootElement.ValueKind != JsonValueKind.Object) return;
             link.Status = doc.RootElement.Clone();
             CheckAlerts(link);
-            if (!link.Pc.IsLocal && !pairPrompting) await CheckPairRequestAsync(link);
+            if (!link.Pc.IsLocal) await pairRequests.CheckAsync(link);   // a PC passes on a request to manage this PC
             await approvals.CheckAsync(link);
             if (current == All) await FetchActivityAsync(link);
         }
@@ -1314,82 +1313,6 @@ internal sealed class MainForm : Form
 
     [DllImport("user32.dll")]
     static extern bool AddClipboardFormatListener(IntPtr hwnd);
-
-    // ---- pairing, approving side: a PC this app is connected to asks to be allowed to manage this PC ----
-    async Task CheckPairRequestAsync(Link link)
-    {
-        using var r = await Link.Http.SendAsync(link.Request(HttpMethod.Get,
-            $"/api/pair/pending?machine={Uri.EscapeDataString(Environment.MachineName)}&machine_id={Uri.EscapeDataString(settings.MachineId)}"));
-        if (!r.IsSuccessStatusCode) return;   // an older server without pairing
-        using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
-        if (J.O(doc.RootElement, "request") is not { ValueKind: JsonValueKind.Object } q) return;
-        var id = J.S(q, "id");
-        if (id == "" || !pairSeen.Add(id)) return;
-        var from = J.S(q, "from") is { Length: > 0 } f ? f : link.Pc.DisplayName;
-        var address = J.S(q, "address");
-        var key = J.S(q, "public_key");
-        var fp = J.S(q, "fingerprint");
-        var who = $"{link.Pc.Id}|{from}|{address}".ToLowerInvariant();
-        if (pairDeniedUntil.TryGetValue(who, out var until) && DateTime.UtcNow < until)
-        {
-            _ = AnswerPairAsync(link, id, false, "Denied recently; try again later.");
-            return;
-        }
-        if (key == "") return;
-        pairPrompting = true;
-        _ = AnswerPairRequestAsync(link, id, from, address, key, fp, who).ContinueWith(_ => pairPrompting = false, TaskScheduler.FromCurrentSynchronizationContext());
-    }
-
-    async Task AnswerPairAsync(Link link, string id, bool allowed, string error = "")
-    {
-        try
-        {
-            using (await Link.Http.SendAsync(link.AppRequest(HttpMethod.Post, $"/api/pair/{Uri.EscapeDataString(id)}/answer",
-                JsonContent.Create(new { machine = Environment.MachineName, machine_id = settings.MachineId, allowed,
-                                         user = allowed ? Environment.UserName : "", error })))) { }
-        }
-        catch (Exception) { }
-    }
-
-    async Task AnswerPairRequestAsync(Link link, string id, string from, string address, string key, string fingerprint, string who)
-    {
-        ShowWindow();
-        var choice = MessageBox.Show(this,
-            $"{from} asks to be allowed to manage this PC.\n\n" +
-            $"If you allow it, {from} can sign in to this PC as {Environment.UserName} over SSH, with the same rights as you: " +
-            "open and change files, run commands and view the screen.\n\n" +
-            $"Requested by: {from}\nIts address: {(address != "" ? address : "unknown")}\nThrough the connection to: {link.Pc.DisplayName}\n" +
-            $"Key fingerprint: {(fingerprint != "" ? fingerprint : "unknown")}\n\n" +
-            $"Allow only if you started this yourself on {from} just now. You can take it back at any time in Settings → SSH keys.",
-            "SSH Manager: allow access?", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
-        if (choice != DialogResult.Yes)
-        {
-            pairDeniedUntil[who] = DateTime.UtcNow.AddMinutes(5);   // a repeated request doesn't pop up again right away
-            await AnswerPairAsync(link, id, false);
-            return;
-        }
-        if (links.FirstOrDefault(l => l.Pc.IsLocal) is not { State: LinkState.Connected } own)
-        {
-            await AnswerPairAsync(link, id, false, "SSH Manager's server isn't running on this PC.");
-            MessageBox.Show(this, "SSH Manager's server isn't running on this PC, so the key could not be added.",
-                "SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-        try
-        {
-            using var r = await Link.Http.SendAsync(own.AppRequest(HttpMethod.Post, "/api/keys/add",
-                JsonContent.Create(new { public_key = key, label = $"{from} (allowed {DateTime.Now:yyyy-MM-dd})" })));
-            if (!r.IsSuccessStatusCode)
-                throw new InvalidOperationException(Pairing.Detail(await r.Content.ReadAsStringAsync()) ?? "The key could not be added.");
-            await AnswerPairAsync(link, id, true);
-            Balloon("SSH Manager", $"{from} can now manage this PC.", ToolTipIcon.Info, force: true);
-        }
-        catch (Exception e)
-        {
-            await AnswerPairAsync(link, id, false, e.Message);
-            MessageBox.Show(this, e.Message, "SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
-        }
-    }
 
     void OpenWizard(PcEntry? edit)
     {

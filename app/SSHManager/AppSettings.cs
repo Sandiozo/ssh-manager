@@ -16,7 +16,8 @@ internal sealed class PcEntry
     /// <summary>Private key to log in with; empty = ssh's defaults / ~/.ssh/config.</summary>
     public string KeyFile { get; set; } = "";
     /// <summary>Optional: look this name up with Windows (LLMNR/mDNS) and connect to that address. Helps
-    /// when ssh can't resolve a LAN computer name that Windows can.</summary>
+    /// when ssh can't resolve a LAN computer name that Windows can. Anyone on the network can answer such a
+    /// lookup, so whoever is at that address must show the host key saved for this PC (see HostKeys).</summary>
     public string LookupName { get; set; } = "";
     /// <summary>Port of the SSH Manager server on the PC (learned when connecting).</summary>
     public int RemotePort { get; set; } = 8765;
@@ -25,6 +26,9 @@ internal sealed class PcEntry
     /// <summary>MAC and addresses of the PC's network card (learned when connecting), for Wake-on-LAN.</summary>
     public string Mac { get; set; } = "";
     public List<string> Ips { get; set; } = [];
+    /// <summary>The PC's host key (its identity) has been saved on this computer (see HostKeys). From then on
+    /// a missing key file is an error, never a reason to trust whoever answers.</summary>
+    public bool KeySaved { get; set; }
 
     [JsonIgnore] public bool IsLocal => Id == LocalId;
     [JsonIgnore] public string Target => User.Trim() != "" ? $"{User.Trim()}@{Host.Trim()}" : Host.Trim();

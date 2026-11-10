@@ -10,8 +10,9 @@ internal enum LinkState { Connecting, Connected, Disconnected }
 /// <summary>
 /// Keeps a connection to the SSH Manager server on one PC. Normally that is an `ssh -L` port forward
 /// (started hidden, restarted with backoff when it drops) whose remote command starts the server if
-/// needed and prints its version, port and access token. For this computer's own server
-/// (<see cref="PcEntry.LocalId"/>) it talks to the local server directly.
+/// needed and prints its version, port and access token. Whoever answers, at the saved address or one
+/// found by looking the PC's name up, must show the host key saved for that PC (<see cref="HostKeys"/>).
+/// For this computer's own server (<see cref="PcEntry.LocalId"/>) it talks to the local server directly.
 /// </summary>
 internal sealed partial class Link : IDisposable
 {
@@ -154,7 +155,9 @@ internal sealed partial class Link : IDisposable
     }
 
     /// <summary>Asks the server for its name and version (also proves the token works).</summary>
-    async Task<bool> LearnNameAsync(CancellationToken ct)
+    /// <param name="learnAddress">Also remember the computer name and the address this connection went to:
+    /// only for a connection to a server that showed the host key saved for the PC.</param>
+    async Task<bool> LearnNameAsync(CancellationToken ct, bool learnAddress)
     {
         try
         {
@@ -177,7 +180,7 @@ internal sealed partial class Link : IDisposable
             var computer = S("computer");
             if (!Ssh.SafeName(computer)) computer = "";
             Computer = computer;
-            var byAddress = IPAddress.TryParse(Pc.Host, out _);
+            var byAddress = learnAddress && IPAddress.TryParse(Pc.Host, out _);
             var lookupName = byAddress && computer != "" ? computer : Pc.LookupName;
             var host = byAddress && IPAddress.TryParse(reachedAt, out _) ? reachedAt : Pc.Host;
             if (name.Length > 64 || name.Any(char.IsControl)) name = "";
@@ -223,8 +226,7 @@ internal sealed partial class Link : IDisposable
             : await Ssh.RunAsync(Path.Combine(folder, @".venv\Scripts\python.exe"), [Path.Combine(folder, "server.py"), "--client-info"], 20000);
         ClearRemote();
         foreach (var line in output.Split('\n')) Keep(line, store: false);
-        if (code != 0 || remoteToken is null || RemotePortSeen is null)
-            return "Couldn't read SSH Manager's settings on this PC:\n\n" + output.Trim();
+        if (code != 0 || remoteToken is null || RemotePortSeen is null) return LocalInfoProblem(output);
         Port = RemotePortSeen.Value;
         if (!await AliveAsync(Port, ct))
         {
@@ -242,12 +244,33 @@ internal sealed partial class Link : IDisposable
         if (PortOwner.CheckServer(Port, folder) is { } wrong) return wrong;
         Token = remoteToken ?? "";
         AppSecret = remoteAppSecret ?? "";
-        await LearnNameAsync(ct);
+        await LearnNameAsync(ct, learnAddress: false);
         Set(LinkState.Connected, "Connected (this PC)");
         string? taken = null;
         // also notice someone else taking the port over while the server is restarting
         await WatchAsync(Port, () => (taken = PortOwner.CheckServer(Port, folder, nothingIsOk: true)) is not null, ct);
         return taken ?? "SSH Manager's server on this PC stopped answering.";
+    }
+
+    /// <summary>Why the local server's --client-info output could not be used. That output holds the access
+    /// token and the app secret, and this text is shown on the status page and handed to the command-line
+    /// tool: it is built only from lines that are not SSHMGR- lines, and kept short.</summary>
+    internal static string LocalInfoProblem(string output)
+    {
+        var lines = output.Split('\n').Select(l => l.Trim()).Where(l => l != "").ToList();
+        var info = lines.Select(l => InfoLine().Match(l)).Where(m => m.Success).ToList();
+        var port = info.FirstOrDefault(m => m.Groups[1].Value == "PORT")?.Groups[2].Value.Trim();
+        if (port is not null && !(int.TryParse(port, out var n) && n is > 0 and < 65536))
+        {
+            port = new string(port.Where(c => !char.IsControl(c)).Take(20).ToArray());
+            return $"SSH Manager's settings on this PC have an invalid port ('{port}'). Fix \"port\" in its config.json.";
+        }
+        var text = string.Join("\n", lines.Where(l => !l.Contains("SSHMGR-", StringComparison.OrdinalIgnoreCase)).TakeLast(12));
+        // should the server ever repeat a secret in another line (an error text, say)
+        foreach (var m in info.Where(m => m.Groups[1].Value is "TOKEN" or "APPSECRET"))
+            if (m.Groups[2].Value.Trim() is { Length: >= 8 } secret) text = text.Replace(secret, "[hidden]");
+        if (text.Length > 1000) text = "…" + text[^1000..];
+        return text == "" ? "Couldn't read SSH Manager's settings on this PC." : "Couldn't read SSH Manager's settings on this PC:\n\n" + text;
     }
 
     static void StartLocalServer(string folder)
@@ -277,8 +300,19 @@ internal sealed partial class Link : IDisposable
     {
         if (!Ssh.SafeName(Pc.Host.Trim()) || (Pc.User.Trim() != "" && !Ssh.SafeName(Pc.User.Trim(), allowSpaces: true)))
             return $"The address or user name saved for {Pc.DisplayName} isn't valid. Use Change connection to fix it.";
+        // Only a server that shows the host key saved for this PC is talked to, at whatever address it is
+        // found. With no key saved yet (a PC from an earlier version that ssh has no record of either), this
+        // connection records it: only at the saved address then, never at one found by looking the name up.
+        HostTrust trust;
+        try { trust = await HostKeys.ForSavedAsync(Pc); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            return $"Couldn't read the identity (host key) saved for {Pc.DisplayName} on this computer.\n\n{e.Message}";
+        }
+        var firstUse = trust.AcceptNew;
+        if (!firstUse) NoteKeySaved();
         Port = Ssh.IsPortFree(preferredPort) ? preferredPort : Ssh.FreePort();
-        StartSsh(lookup);
+        StartSsh(trust, lookup && !firstUse);
         ct.ThrowIfCancellationRequested();   // removed while ssh was starting: finally in RunAsync kills it
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (true)
@@ -292,19 +326,40 @@ internal sealed partial class Link : IDisposable
                 return "";
             }
             if (remoteToken is not null && await AliveAsync(Port, ct)) break;
-            if (SshExited()) return DescribeSshFailure();
+            if (SshExited()) return DescribeSshFailure(firstUse);
             if (DateTime.UtcNow > deadline) return $"Connected over SSH, but SSH Manager on {Pc.DisplayName} did not answer.";
             await Task.Delay(300, ct);
         }
+        // the key ssh recorded on this first connection; without it the PC would be trusted anew every time
+        var recorded = firstUse ? HostKeys.Read(trust.File) : [];
+        if (firstUse && recorded.Count == 0)
+            return $"Couldn't save {Pc.DisplayName}'s identity (host key) on this computer, so the connection was closed.";
         Token = remoteToken!;
         AppSecret = remoteAppSecret ?? "";
-        if (!await LearnNameAsync(ct)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
+        if (!await LearnNameAsync(ct, learnAddress: !firstUse)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
+        if (firstUse)
+        {
+            // it is the PC (it let this computer in and its server answers): this key is its identity from now on.
+            // Unless another key was saved for it meanwhile: then connect again, held to that one
+            if (!HostKeys.Keep(trust, Pc.Id, recorded)) return "";
+            NoteKeySaved();
+            firstUse = false;
+            await LearnNameAsync(ct, learnAddress: true);
+        }
         Set(LinkState.Connected, "Connected over SSH");
         connected();
         Process? proc;
         lock (sshLock) proc = ssh;
         await WatchAsync(Port, () => proc is null || Exited(proc), ct);
-        return proc is not null && Exited(proc) ? DescribeSshFailure() : $"{Pc.DisplayName} stopped answering.";
+        return proc is not null && Exited(proc) ? DescribeSshFailure(firstUse) : $"{Pc.DisplayName} stopped answering.";
+    }
+
+    /// <summary>From now on a missing key file for this PC is an error, not a reason to trust a new key.</summary>
+    void NoteKeySaved()
+    {
+        if (Pc.KeySaved) return;
+        Pc.KeySaved = true;
+        save();
     }
 
     static bool Exited(Process p)
@@ -317,7 +372,7 @@ internal sealed partial class Link : IDisposable
         lock (sshLock) return ssh is null || Exited(ssh);
     }
 
-    void StartSsh(bool lookup = true)
+    void StartSsh(HostTrust trust, bool lookup)
     {
         KillSsh();
         lock (sshOutput) sshOutput.Clear();
@@ -330,7 +385,7 @@ internal sealed partial class Link : IDisposable
         // the PC's current address when its name resolves, else the saved one
         var resolved = lookup && Pc.LookupName.Trim() != "" ? Ssh.Resolve(Pc.LookupName.Trim()) : null;
         reachedAt = resolved ?? Pc.Host;
-        foreach (var a in Ssh.Options(Pc, lookup: false, hostName: resolved)) psi.ArgumentList.Add(a);
+        foreach (var a in Ssh.Options(Pc, trust, hostName: resolved)) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
                                   "-L", $"127.0.0.1:{Port}:127.0.0.1:{Pc.RemotePort}" })
             psi.ArgumentList.Add(a);
@@ -372,11 +427,15 @@ internal sealed partial class Link : IDisposable
                 case "PORT" when int.TryParse(m.Groups[2].Value, out var port) && port is > 0 and < 65536:
                     Volatile.Write(ref remotePortValue, port);
                     break;
-                case "ERROR": remoteError = m.Groups[2].Value; break;
+                // the PC's script quotes a line of the server's output here: never a token line that slipped in
+                case "ERROR": remoteError = SecretInText().Replace(m.Groups[2].Value, "[hidden]"); break;
             }
             return;   // never keep the token in the error text
         }
+        // nor an info line that has something printed in front of it
+        if (line.Contains("SSHMGR-")) return;
         if (!store || line.Contains("post-quantum", StringComparison.OrdinalIgnoreCase) || line.StartsWith("**")) return;
+        if (Ssh.KeyAddedNote(line)) return;
         lock (sshOutput)
         {
             sshOutput.Add(line);
@@ -387,13 +446,31 @@ internal sealed partial class Link : IDisposable
     [GeneratedRegex("^SSHMGR-(TOKEN|APPSECRET|PORT|ERROR|VERSION):(.*)$")]
     private static partial Regex InfoLine();
 
-    string DescribeSshFailure()
+    [GeneratedRegex(@"SSHMGR-(TOKEN|APPSECRET):\S*")]
+    private static partial Regex SecretInText();
+
+    /// <param name="firstUse">No host key is saved for the PC yet, so it was not looked for by name.</param>
+    string DescribeSshFailure(bool firstUse)
     {
         string text;
         lock (sshOutput) text = string.Join("\n", sshOutput);
-        var why = Ssh.Explain(text, Pc.DisplayName);
-        if (why != "") return why + "\n\n" + text;
-        return string.IsNullOrWhiteSpace(text) ? "The SSH connection closed." : "The SSH connection closed:\n\n" + text;
+        return FailureText(text, Pc, firstUse);
+    }
+
+    /// <summary>What the status page says after ssh ended: the reason in plain words, then ssh's own lines.</summary>
+    internal static string FailureText(string text, PcEntry pc, bool firstUse)
+    {
+        var why = Ssh.Explain(text, pc.DisplayName);
+        var refused = Ssh.KeyRefused(text);
+        // ssh's own advice for another host key is to edit the key file: show only the key that was offered
+        if (refused)
+            text = string.Join("\n", text.Split('\n').Where(l => l.Contains("SHA256:")).Select(l => "The key it answered with: " + l.Trim().TrimEnd('.')));
+        var message = why != "" ? why : string.IsNullOrWhiteSpace(text) ? "The SSH connection closed." : "The SSH connection closed:";
+        if (!string.IsNullOrWhiteSpace(text)) message += "\n\n" + text;
+        if (firstUse && !refused && pc.LookupName.Trim() != "" && !text.Contains("Permission denied", StringComparison.OrdinalIgnoreCase))
+            message += $"\n\nSSH Manager has no identity (host key) on record for this PC yet, so it only tries the saved address ({pc.Host.Trim()}) " +
+                       "and does not look for the PC by its name. If its address changed, use Change connection and enter the current one.";
+        return message;
     }
 
     void KillSsh()

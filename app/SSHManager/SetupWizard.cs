@@ -8,8 +8,9 @@ namespace SSHManager;
 /// (the app's own, or one of the user's in ~/.ssh) is used as it is. Otherwise the user allows this
 /// computer once, in one of three ways: approve the request on the other PC (when its app is connected
 /// to this PC), sign in with a Windows password (typed on the page, never stored), or copy the public
-/// key over by hand. Finally it checks that SSH Manager is installed there. Runs as a page in the app
-/// window; talks to MainForm through page messages.
+/// key over by hand. Finally it checks that SSH Manager is installed there and saves the host key the PC
+/// showed as its identity (see <see cref="HostKeys"/>). Runs as a page in the app window; talks to MainForm
+/// through page messages.
 /// </summary>
 internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Func<string, SetupWizard.Peer?> findPeer, Pairing pairing)
 {
@@ -22,8 +23,25 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
     bool busy, canCancel, isOpen;
     List<Discovery.Found>? found;
 
+    // The host keys the PC is held to while it is being added or changed: the identity saved for the PC
+    // being changed, else what ssh already has on record for that name. With neither, the first contact
+    // records the key it sees. ssh checks them in a file of the wizard's own (the user's known_hosts is only
+    // read), and they become the PC's saved identity when the wizard finishes.
+    List<string> trusted = [];
+    string newId = "", trustFor = "";
+    /// <summary>The key was on record before this wizard met the PC, or the user confirmed it here.</summary>
+    bool keyKnown;
+    /// <summary>The user said Yes to another key than the one on record.</summary>
+    bool keyReplaced;
+    /// <summary>Counts opening and cancelling: an attempt still running from before then saves and shows nothing.</summary>
+    int opened;
+    string TrustFile => Path.Combine(HostKeys.Folder, $"adding-{opened}");
+    string TrustName => HostKeys.Alias(editing?.Id ?? newId);
+
     public void Open(PcEntry? edit, bool canCancel)
     {
+        opened++;
+        busy = false;
         editing = edit;
         this.canCancel = canCancel;
         isOpen = true;
@@ -33,6 +51,8 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
         step = "pick";
         error = "";
         found = null;
+        newId = new PcEntry().Id;
+        ForgetTrust();
         Render();
     }
 
@@ -83,8 +103,10 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             case "setup-cancel":
                 if (pairId != "") await pairing.CancelAsync(pairId);
                 pairId = "";
+                opened++;
                 busy = false;
                 isOpen = false;
+                ForgetTrust();
                 done(null);
                 break;
         }
@@ -96,8 +118,70 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
         var pc = alias != ""
             ? new PcEntry { Host = alias, LookupName = editing?.Host == alias ? editing.LookupName : "" }
             : new PcEntry { Host = host, User = user, KeyFile = File.Exists(Ssh.AppKey) ? Ssh.AppKey : "" };
-        if (editing is not null) pc.Id = editing.Id;
+        pc.Id = editing?.Id ?? newId;
         return pc;
+    }
+
+    /// <summary>Stops an attempt that was running when the wizard was cancelled or opened again.</summary>
+    void StillOpen(int session)
+    {
+        if (session != opened) throw new OperationCanceledException();
+    }
+
+    /// <summary>Looks up which keys the PC is held to, once per PC tried.</summary>
+    async Task PrepareTrustAsync(PcEntry c, int session)
+    {
+        var target = alias != "" ? "config:" + alias : host;
+        if (trustFor.Equals(target, StringComparison.OrdinalIgnoreCase)) return;
+        ForgetTrust();
+        var keys = editing is null ? [] : HostKeys.Read(HostKeys.FileFor(editing.Id));
+        if (keys.Count == 0) keys = await HostKeys.OnRecordAsync(c);
+        StillOpen(session);
+        trusted = keys;
+        keyKnown = keys.Count > 0;
+        trustFor = target;
+    }
+
+    void ForgetTrust()
+    {
+        trustFor = "";
+        trusted = [];
+        keyKnown = keyReplaced = false;
+        try
+        {
+            foreach (var f in Directory.GetFiles(HostKeys.Folder, "adding-*")) File.Delete(f);
+        }
+        catch (Exception) { }
+    }
+
+    /// <summary>Runs ssh for the PC being added, held to the keys this wizard has for it. With none yet, the
+    /// first contact records the key it sees. Only a host from the user's ssh config with nothing on record
+    /// is left to the user's own ssh settings.</summary>
+    async Task<string> SshAsync(int session, PcEntry c, IEnumerable<string> more, int timeoutMs = 20000, bool batch = true,
+        IDictionary<string, string>? env = null)
+    {
+        StillOpen(session);
+        HostTrust? trust = null;
+        if (trusted.Count > 0 || alias == "")
+        {
+            // written anew each time: ssh must never find it missing or changed and take that for "no key yet"
+            HostKeys.Write(TrustFile, TrustName, trusted);
+            trust = new(TrustName, TrustFile, AcceptNew: trusted.Count == 0);
+        }
+        var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c, trust, batch), .. more], timeoutMs, env);
+        StillOpen(session);
+        if (trust is { AcceptNew: true }) trusted = HostKeys.Read(trust.File);
+        return output;
+    }
+
+    /// <summary>What went wrong in an ssh run, for the page.</summary>
+    string Problem(string output, string name, string otherwise = "")
+    {
+        var why = Ssh.KeyRefused(output) && trusted.Count > 0
+            ? $"{name} answered with a different identity (host key) than the one on record. Nothing was changed."
+            : Ssh.Explain(output, name, ownConfig: true);
+        if (why == "") why = otherwise;
+        return (why != "" ? why + "\n\n" : "") + Ssh.Shown(output);
     }
 
     async Task SearchAsync()
@@ -146,6 +230,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             return;
         }
         if (alias == "" && user == Environment.UserName && findPeer(host) is { User: not "" } peer) user = peer.User;
+        var session = opened;
         busy = true;
         error = "";
         step = "working";
@@ -162,15 +247,29 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
                     ["-q", "-t", "ed25519", "-N", "", "-C", $"ssh-manager@{Environment.MachineName}", "-f", Ssh.AppKey]);
                 if (kc != 0) throw new InvalidOperationException("Couldn't create an SSH key:\n" + ko);
             }
+            StillOpen(session);
             var c = Candidate();
-            // whether ssh knew this PC before (its first contact below records the host key)
-            if (alias == "" && !hostKeyChecked.Contains(host) && (await Ssh.KnownFingerprintsAsync(host)).Count > 0) hostKeyChecked.Add(host);
-            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), "--", c.Target, "echo SSHMGR-OK"], 20000);
+            await PrepareTrustAsync(c, session);
+            var output = await SshAsync(session, c, ["--", c.Target, "echo SSHMGR-OK"]);
+            if (trusted.Count > 0 && Ssh.KeyRefused(output))
+            {
+                // not the key on record: go on with the one it shows now only when the user says it is that PC
+                var shown = await ShownKeysAsync(session, c);
+                if (shown.Count == 0)
+                    throw new InvalidOperationException($"{c.Host} answered with a different identity (host key) than the one on record, " +
+                        "and the one it shows now couldn't be read. Nothing was changed.");
+                if (!AskChangedKey(c, shown))
+                    throw new InvalidOperationException($"{c.Host} answered with a different identity (host key) than the one on record, " +
+                        "and the new one was not accepted. Nothing was changed.");
+                trusted = shown;
+                keyKnown = keyReplaced = true;
+                output = await SshAsync(session, c, ["--", c.Target, "echo SSHMGR-OK"]);
+            }
             if (!output.Contains("SSHMGR-OK") && alias == "" && Denied(output))
             {
                 // maybe one of the user's own keys (~/.ssh, ssh config) is already allowed there
                 var own = new PcEntry { Id = c.Id, Host = host, User = user };
-                var (_, output2) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(own), "--", own.Target, "echo SSHMGR-OK"], 20000);
+                var output2 = await SshAsync(session, own, ["--", own.Target, "echo SSHMGR-OK"]);
                 if (output2.Contains("SSHMGR-OK")) (c, output) = (own, output2);
             }
             if (!output.Contains("SSHMGR-OK"))
@@ -181,18 +280,21 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
                     Render();
                     return;
                 }
-                var why = Ssh.Explain(output, c.Host);
-                throw new InvalidOperationException((why != "" ? why : "Couldn't connect.") + "\n\n" + output.Trim());
+                throw new InvalidOperationException(Problem(output, c.Host, "Couldn't connect."));
             }
-            await FinishAsync(c);
+            await FinishAsync(c, session);
         }
         catch (Exception e)
         {
+            if (session != opened) return;   // cancelled or opened again meanwhile: that attempt shows nothing
             step = "pick";
             error = e.Message;
             Render();
         }
-        finally { busy = false; }
+        finally
+        {
+            if (session == opened) busy = false;
+        }
     }
 
     static bool Denied(string output) => output.Contains("Permission denied", StringComparison.OrdinalIgnoreCase);
@@ -206,6 +308,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             Render();
             return;
         }
+        var session = opened;
         busy = true;
         error = "";
         try
@@ -219,6 +322,7 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
                 await Task.Delay(1500);
                 if (pairId != id) break;   // cancelled
                 var s = await pairing.StatusAsync(id);
+                if (session != opened) return;   // the wizard was opened again meanwhile
                 if (s.State == "pending") continue;
                 pairId = "";
                 if (s.State == "allowed")
@@ -234,8 +338,17 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
                 break;
             }
         }
-        catch (Exception e) { error = e.Message; pairId = ""; }
-        finally { busy = false; }
+        catch (Exception e)
+        {
+            if (session != opened) return;
+            error = e.Message;
+            pairId = "";
+        }
+        finally
+        {
+            if (session == opened) busy = false;
+        }
+        if (session != opened) return;
         step = "key";
         Render();
     }
@@ -256,12 +369,14 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             Render();
             return;
         }
+        var session = opened;
         busy = true;   // no second click while the identity question is open
-        bool trusted;
-        try { trusted = await ConfirmHostKeyAsync(); }
-        catch (Exception e) { error = e.Message; trusted = false; }
-        finally { busy = false; }
-        if (!trusted)
+        bool confirmed;
+        try { confirmed = await ConfirmHostKeyAsync(session); }
+        catch (Exception e) { error = e.Message; confirmed = false; }
+        if (session != opened) return;
+        busy = false;
+        if (!confirmed)
         {
             if (error == "") error = $"The password was not sent. Check {host}'s identity first, then try again.";
             step = "key";
@@ -294,13 +409,14 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
             };
             string[] once = ["-o", "NumberOfPasswordPrompts=1", "-o", "PubkeyAuthentication=no",
                              "-o", "PreferredAuthentications=password,keyboard-interactive"];
-            var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c, batch: false), .. once, "--", c.Target, Ssh.PowerShell(script)], 30000, env);
+            // held to the key that was on record or that the user just confirmed, like every other step
+            var output = await SshAsync(session, c, [.. once, "--", c.Target, Ssh.PowerShell(script)], 30000, batch: false, env);
             if (!output.Contains("SSHMGR-KEY-ADDED"))
             {
                 step = "key";
-                error = Denied(output)
-                    ? $"{host} did not accept the user name \"{user}\" with that password."
-                    : (Ssh.Explain(output, host) is { Length: > 0 } why ? why + "\n\n" : "") + output.Trim();
+                error = Denied(output) ? $"{host} did not accept the user name \"{user}\" with that password."
+                    : Ssh.KeyRefused(output) ? $"{host} answered with a different identity (host key) than a moment ago, so the password was not sent."
+                    : Problem(output, host);
                 Render();
                 return;
             }
@@ -309,32 +425,31 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
         }
         catch (Exception e)
         {
+            if (session != opened) return;
             step = "key";
             error = e.Message;
             Render();
         }
-        finally { busy = false; }
+        finally
+        {
+            if (session == opened) busy = false;
+        }
     }
 
-    /// <summary>Host names whose key ssh already knew, or whose key the user confirmed in this app.</summary>
-    readonly HashSet<string> hostKeyChecked = new(StringComparer.OrdinalIgnoreCase);
+    const string ShowFingerprints = "Get-ChildItem $env:ProgramData\\ssh\\ssh_host_*_key.pub | ForEach-Object { ssh-keygen -lf $_ }";
 
-    /// <summary>Before a password goes to a PC that ssh met for the first time just now (its key was accepted
-    /// on that first contact), the user compares its host key fingerprint: a wrong one means another computer
+    /// <summary>Before a password goes to a PC this wizard met for the first time (its key was accepted on
+    /// that first contact), the user compares its host key fingerprint: a wrong one means another computer
     /// answers under that name and would receive the password.</summary>
-    async Task<bool> ConfirmHostKeyAsync()
+    async Task<bool> ConfirmHostKeyAsync(int session)
     {
         error = "";
-        if (hostKeyChecked.Contains(host)) return true;
-        var fingerprints = await Ssh.KnownFingerprintsAsync(host);
-        if (fingerprints.Count == 0)
-        {
-            // not met yet (e.g. the first try timed out): one contact without a password records the key
-            var probe = new PcEntry { Host = host, User = user };
-            await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(probe), "-o", "PreferredAuthentications=none", "--", probe.Target, "exit"], 20000);
-            fingerprints = await Ssh.KnownFingerprintsAsync(host);
-        }
-        if (fingerprints.Count == 0)
+        var probe = new PcEntry { Host = host, User = user };
+        await PrepareTrustAsync(probe, session);
+        if (keyKnown) return true;
+        // not met yet (e.g. the first try timed out): one contact without a password records the key
+        if (trusted.Count == 0) await SshAsync(session, probe, ["-o", "PreferredAuthentications=none", "--", probe.Target, "exit"]);
+        if (trusted.Count == 0)
         {
             error = $"Couldn't read {host}'s identity (host key), so the password was not sent.";
             return false;
@@ -342,31 +457,85 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
         var owner = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
         var answer = MessageBox.Show(owner,
             $"This is the first time this computer connects to {host}. Before your password is sent, make sure it is really that PC.\n\n" +
-            $"{host} identifies itself with:\n{string.Join("\n", fingerprints)}\n\n" +
-            $"On {host}, run this in PowerShell to see its fingerprints:\n" +
-            "Get-ChildItem $env:ProgramData\\ssh\\ssh_host_*_key.pub | ForEach-Object { ssh-keygen -lf $_ }\n\n" +
+            $"{host} identifies itself with:\n{string.Join("\n", HostKeys.Fingerprints(trusted))}\n\n" +
+            $"On {host}, run this in PowerShell to see its fingerprints:\n{ShowFingerprints}\n\n" +
             "Send the password only if one of them matches. (On your own home network this is usually fine.)",
             "SSH Manager: check the PC's identity", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2);
         if (answer != DialogResult.Yes)
         {
-            await Ssh.ForgetHostAsync(host);   // not trusted: asked again next time
+            ForgetTrust();   // not trusted: asked again next time
             return false;
         }
-        hostKeyChecked.Add(host);
+        keyKnown = true;
         return true;
     }
 
-    async Task FinishAsync(PcEntry c)
+    /// <summary>The key a PC shows right now: one contact that sends nothing, checked against nothing,
+    /// recorded in an empty file of its own.</summary>
+    async Task<List<string>> ShownKeysAsync(int session, PcEntry c)
+    {
+        StillOpen(session);
+        var (file, name) = (TrustFile + ".seen", TrustName);
+        HostKeys.Write(file, name, []);
+        await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c, new HostTrust(name, file, AcceptNew: true)), "-o", "PreferredAuthentications=none", "--", c.Target, "exit"], 20000);
+        StillOpen(session);
+        var keys = HostKeys.Read(file);
+        HostKeys.Write(file, name, []);
+        return keys;
+    }
+
+    /// <summary>The PC answers with another host key than the one on record for it. Only when the user says
+    /// Yes here does the new key replace it: the way through after a PC was reinstalled.</summary>
+    bool AskChangedKey(PcEntry c, List<string> keys)
+    {
+        if (keys.Count == 0) return false;
+        var who = editing is not null && editing.DisplayName != c.Host ? $"{editing.DisplayName} ({c.Host})" : c.Host;
+        var owner = Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null;
+        return MessageBox.Show(owner,
+            $"{who} does not identify itself the way it did before.\n\n" +
+            "That is expected after Windows or OpenSSH Server was reinstalled on that PC, or when this address now belongs to " +
+            "another PC that you want to use instead. If neither is the case, another computer may be answering in its place: " +
+            "it would receive what SSH Manager sends to this PC.\n\n" +
+            $"It now identifies itself with:\n{string.Join("\n", HostKeys.Fingerprints(keys))}\n\n" +
+            $"On {c.Host}, run this in PowerShell to see its fingerprints:\n{ShowFingerprints}\n\n" +
+            "Trust this identity from now on? Choose Yes only if one of them matches.",
+            "SSH Manager: the PC's identity changed", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+    }
+
+    async Task FinishAsync(PcEntry c, int session)
     {
         working = "Checking SSH Manager on the PC…";
         Render();
         var check = Ssh.PowerShell("if (Test-Path (Join-Path $env:ProgramData 'SSHManager\\install-path.txt')) { 'SSHMGR-INSTALLED' } else { 'SSHMGR-MISSING' }");
-        var (_, output) = await Ssh.RunAsync("ssh.exe", [.. Ssh.Options(c), "--", c.Target, check], 20000);
+        var output = await SshAsync(session, c, ["--", c.Target, check]);
         if (!output.Contains("SSHMGR-INSTALLED"))
             throw new InvalidOperationException($"This computer can sign in to {c.Host}, but SSH Manager's server isn't installed there. " +
                 $"Install SSH Manager on {c.Host}, choose \"Client and server\", then click Add PC again.");
+        SaveIdentity(c);
         isOpen = false;
+        ForgetTrust();
         done(c);
+    }
+
+    /// <summary>Saves the keys the PC was held to in this wizard as its identity: from now on the app only
+    /// talks to a server that shows one of them, at whatever address the PC is found.</summary>
+    void SaveIdentity(PcEntry c)
+    {
+        if (trusted.Count == 0)
+        {
+            // only a host from the ssh config that the user's own ssh settings checked, with no key on record
+            // anywhere: its first connection records the key
+            if (alias == "") throw new InvalidOperationException($"Couldn't save {c.Host}'s identity (host key) on this computer. Try again.");
+            return;
+        }
+        // a key saved for this PC while the wizard was open (by its connection in the background), and it is
+        // another one: only with the user's word
+        var saved = HostKeys.Read(HostKeys.FileFor(c.Id));
+        if (saved.Count > 0 && !keyReplaced && !saved.Intersect(trusted).Any() && !AskChangedKey(c, trusted))
+            throw new InvalidOperationException($"{c.Host} shows a different identity (host key) than the one saved for it, " +
+                "and the new one was not accepted. Nothing was changed.");
+        HostKeys.Write(HostKeys.FileFor(c.Id), HostKeys.Alias(c.Id), trusted);
+        c.KeySaved = true;
     }
 
     void Render()

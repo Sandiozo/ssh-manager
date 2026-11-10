@@ -70,19 +70,34 @@ internal static class Ssh
     public const string MissingClient = "Windows' OpenSSH Client isn't installed on this computer. Install it in Settings → System → " +
                                         "Optional features → Add a feature → \"OpenSSH Client\", then try again.";
 
-    /// <summary>Common options for non-interactive use. New host keys are accepted on first contact
-    /// (trust on first use) and checked from then on.</summary>
-    /// <summary>`hostName`: the address to connect to instead of looking the PC's name up.</summary>
-    public static List<string> Options(PcEntry s, bool batch = true, bool lookup = true, string? hostName = null)
+    /// <summary>Common options for non-interactive use.</summary>
+    /// <param name="trust">Where the PC's host key is on record (see <see cref="HostKeys"/>): ssh checks that
+    /// file and name instead of the user's known_hosts, strictly, whatever StrictHostKeyChecking their ssh
+    /// config has. Null leaves the check to the user's own ssh settings and known_hosts, with a new key
+    /// accepted on first contact: only for a host from the user's ssh config, while it is being added and
+    /// nothing is on record for it.</param>
+    /// <param name="hostName">The address to connect to instead of the saved one.</param>
+    public static List<string> Options(PcEntry s, HostTrust? trust, bool batch = true, string? hostName = null)
     {
         var a = new List<string>();
         if (batch) a.AddRange(["-o", "BatchMode=yes"]);
-        a.AddRange(["-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=10"]);
+        a.AddRange(["-o", "ConnectTimeout=10"]);
+        if (trust is null) a.AddRange(["-o", "StrictHostKeyChecking=accept-new"]);
+        else
+        {
+            // the key is looked up under the PC's own name, so it is the same check at any address
+            a.AddRange(["-o", $"HostKeyAlias={trust.Alias}", "-o", $"UserKnownHostsFile={FileOption(trust.File)}",
+                        "-o", "GlobalKnownHostsFile=NUL", "-o", "HashKnownHosts=no", "-o", "CheckHostIP=no", "-o", "VerifyHostKeyDNS=no",
+                        "-o", $"StrictHostKeyChecking={(trust.AcceptNew ? "accept-new" : "yes")}"]);
+        }
         if (s.KeyFile.Trim() != "") a.AddRange(["-i", s.KeyFile.Trim(), "-o", "IdentitiesOnly=yes"]);
         if (hostName is not null) a.AddRange(["-o", $"HostName={hostName}"]);
-        else if (lookup && s.LookupName.Trim() != "" && Resolve(s.LookupName.Trim()) is { } ip) a.AddRange(["-o", $"HostName={ip}"]);
         return a;
     }
+
+    /// <summary>A file path as the value of an ssh option: quoted (it may contain spaces), with forward
+    /// slashes (a backslash can be read as an escape) and "%" doubled (it starts a token).</summary>
+    static string FileOption(string path) => "\"" + path.Replace('\\', '/').Replace("%", "%%") + "\"";
 
     public static string? Resolve(string name)
     {
@@ -98,15 +113,18 @@ internal static class Ssh
         "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " +
         Convert.ToBase64String(Encoding.Unicode.GetBytes("$ProgressPreference = 'SilentlyContinue'\n" + script));
 
-    /// <summary>Runs ssh (or another tool) without a window; returns exit code and combined output.</summary>
+    /// <summary>Runs ssh (or another tool) without a window; returns exit code and combined output
+    /// (-1 and "Timed out." when it took too long).</summary>
+    /// <param name="output">How the tool writes its output, when that isn't Windows' own encoding.</param>
     public static async Task<(int code, string output)> RunAsync(string exe, IEnumerable<string> args, int timeoutMs = 30000,
-        IDictionary<string, string>? env = null)
+        IDictionary<string, string>? env = null, Encoding? output = null)
     {
         if (exe.StartsWith("ssh", StringComparison.OrdinalIgnoreCase) && !Path.IsPathRooted(exe)) exe = Tool(exe);
         var psi = new ProcessStartInfo(exe)
         {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true,
             RedirectStandardError = true, RedirectStandardInput = true,
+            StandardOutputEncoding = output, StandardErrorEncoding = output,
         };
         foreach (var a in args) psi.ArgumentList.Add(a);
         if (env is not null) foreach (var (k, v) in env) psi.Environment[k] = v;
@@ -145,7 +163,9 @@ internal static class Ssh
     }
 
     /// <summary>Plain-language reason for a failed ssh run.</summary>
-    public static string Explain(string output, string host)
+    /// <param name="ownConfig">The host key was checked by the user's own ssh settings, not against the
+    /// identity the app saved for the PC.</param>
+    public static string Explain(string output, string host, bool ownConfig = false)
     {
         var o = output.ToLowerInvariant();
         if (o.Contains("could not resolve hostname"))
@@ -156,27 +176,28 @@ internal static class Ssh
             return $"{host} refused the connection. OpenSSH Server isn't running there: run Setup.cmd on that PC.";
         if (o.Contains("permission denied"))
             return $"{host} didn't accept this computer's key.";
-        if (o.Contains("host key verification failed") || o.Contains("remote host identification has changed"))
-            return $"{host}'s identity (host key) is different from last time. If the PC was reinstalled, remove its line from ~/.ssh/known_hosts.";
+        if (KeyRefused(output))
+            return ownConfig
+                ? $"{host}'s identity (host key) is different from the one in your SSH files. This PC is used through your own SSH config: " +
+                  "if the PC was reinstalled, remove its old line from known_hosts (ssh-keygen -R), then try again."
+                : $"{host} answered with a different identity (host key) than the one saved for it, so SSH Manager did not connect.\n\n" +
+                  "If Windows or OpenSSH Server was reinstalled on that PC, click Change connection and save it again: " +
+                  "you are shown the new identity and asked whether to trust it. If not, another computer may be answering in its place.";
         return "";
     }
 
-    /// <summary>Lines of known_hosts for this host (with fingerprints), empty when ssh has never seen it.</summary>
-    public static async Task<List<string>> KnownFingerprintsAsync(string host)
-    {
-        var known = Path.Combine(SshFolder, "known_hosts");
-        if (!File.Exists(known)) return [];
-        var (code, output) = await RunAsync("ssh-keygen.exe", ["-l", "-F", host, "-f", known], 10000);
-        if (code != 0) return [];
-        return output.Split('\n').Select(l => l.Trim()).Where(l => l != "" && !l.StartsWith('#'))
-            .Select(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            .Where(p => p.Length >= 3 && p[^1].StartsWith("SHA256:"))
-            .Select(p => $"{p[^2]} {p[^1]}").Distinct().ToList();   // "ED25519 SHA256:…"
-    }
+    /// <summary>ssh's note that it recorded a host key on a first contact: it names the key's internal name,
+    /// which means nothing to the user.</summary>
+    public static bool KeyAddedNote(string line) => line.TrimStart().StartsWith("Warning: Permanently added", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Forgets a host key (when the user doesn't trust it).</summary>
-    public static Task ForgetHostAsync(string host) =>
-        RunAsync("ssh-keygen.exe", ["-R", host, "-f", Path.Combine(SshFolder, "known_hosts")], 10000);
+    /// <summary>A tool's output for an error message, without that note.</summary>
+    public static string Shown(string output) =>
+        string.Join("\n", output.Split('\n').Select(l => l.TrimEnd()).Where(l => !KeyAddedNote(l))).Trim();
+
+    /// <summary>ssh stopped because the computer that answered did not show the host key on record.</summary>
+    public static bool KeyRefused(string output) =>
+        output.Contains("host key verification failed", StringComparison.OrdinalIgnoreCase)
+        || output.Contains("remote host identification has changed", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Free on both 127.0.0.1 and ::1, so nobody else can answer for "localhost" on that port.</summary>
     public static bool IsPortFree(int port)

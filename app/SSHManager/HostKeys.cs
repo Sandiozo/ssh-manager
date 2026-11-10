@@ -9,6 +9,14 @@ namespace SSHManager;
 /// (trust on first use); otherwise only a key that is in the file is accepted.</summary>
 internal sealed record HostTrust(string Alias, string File, bool AcceptNew);
 
+/// <summary>A PC's host key can't be looked up or saved right now, so nothing is trusted. The message is for
+/// the user: what is wrong and what they can do about it.</summary>
+/// <param name="passes">It may go away by itself (a file another program is using).</param>
+internal sealed class HostKeyProblem(string message, bool passes = true) : Exception(message)
+{
+    public bool Passes { get; } = passes;
+}
+
 /// <summary>
 /// The host keys (identities) of the PCs the app connects to. Every saved PC has a small known-hosts file
 /// of its own in the app's folder, with its key filed under a name made from the PC's id instead of its
@@ -21,11 +29,14 @@ internal static partial class HostKeys
     /// <summary>Where the files are (a test can point it somewhere else).</summary>
     public static string Folder { get; set; } = Path.Combine(AppSettings.Folder, "hostkeys");
 
-    /// <summary>Another ssh config file than the user's, to look their known-hosts files up with (for tests).</summary>
-    public static string? SshConfig { get; set; }
-
     /// <summary>Held while a file is checked and replaced: connections and the setup wizard write from different threads.</summary>
     static readonly object Gate = new();
+
+    static bool FileTrouble(Exception e) => e is IOException or UnauthorizedAccessException or System.Security.SecurityException;
+
+    /// <summary>For the user, when a file in the app's folder can't be written.</summary>
+    public static string CantWrite =>
+        $"SSH Manager can't write to its folder for host keys ({Folder}). Check that the disk is not full and that your Windows account may write to that folder.";
 
     /// <summary>The name a PC's key is filed under: safe on a command line and as a file name.</summary>
     public static string Alias(string pcId) =>
@@ -34,39 +45,86 @@ internal static partial class HostKeys
 
     public static string FileFor(string pcId) => Path.Combine(Folder, Alias(pcId));
 
+    /// <summary>The file of a PC and what may be left next to it: a half-written copy, a first connection's record.</summary>
+    static string[] Variants(string file) => [file, file + ".tmp", file + ".new"];
+
     /// <summary>The keys in one of the app's files, each as "type base64". A file that exists but can't be
     /// read is an error, not "no key": the caller must not fall back to trusting a new one.</summary>
     public static List<string> Read(string file)
     {
         try { return Keys(File.ReadAllLines(file)); }
         catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return []; }
+        catch (Exception e) when (FileTrouble(e))
+        {
+            throw new HostKeyProblem($"A file in SSH Manager's folder for host keys ({Folder}) can't be read: another program (a virus scanner, " +
+                "a backup) may be using it. If this message stays, restart this computer. If it is still there after that, delete that folder " +
+                "and save each PC again with Change connection: you are shown its identity and asked whether to trust it.");
+        }
     }
+
+    /// <summary>The identity saved for a PC; empty when there is none.</summary>
+    public static List<string> Saved(string pcId) => Read(FileFor(pcId));
 
     /// <summary>Replaces a file's keys (written next to it, then swapped in). No keys: the file is removed.</summary>
     public static void Write(string file, string alias, IReadOnlyCollection<string> keys)
     {
         lock (Gate)
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(file)!);
-            if (keys.Count == 0)
+            try
             {
-                File.Delete(file);
-                return;
-            }
-            var tmp = file + ".tmp";
-            File.WriteAllText(tmp, string.Concat(keys.Select(k => $"{alias} {k}\n")));
-            for (var attempt = 0; ; attempt++)
-            {
-                try
+                Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+                if (keys.Count == 0)
                 {
-                    File.Move(tmp, file, overwrite: true);
+                    File.Delete(file);
                     return;
                 }
-                catch (Exception e) when (e is IOException or UnauthorizedAccessException && attempt < 5)
+                var tmp = file + ".tmp";
+                File.WriteAllText(tmp, string.Concat(keys.Select(k => $"{alias} {k}\n")));
+                for (var attempt = 0; ; attempt++)
                 {
-                    Thread.Sleep(100);   // ssh is reading it right now
+                    try
+                    {
+                        File.Move(tmp, file, overwrite: true);
+                        return;
+                    }
+                    catch (Exception e) when (e is IOException or UnauthorizedAccessException && attempt < 5)
+                    {
+                        Thread.Sleep(100);   // ssh is reading it right now
+                    }
                 }
             }
+            catch (Exception e) when (FileTrouble(e)) { throw new HostKeyProblem(CantWrite); }
+        }
+    }
+
+    /// <summary>Removes what is kept for a PC (it was removed from the app).</summary>
+    public static void Forget(string pcId)
+    {
+        lock (Gate)
+        {
+            foreach (var f in Variants(FileFor(pcId)))
+            {
+                try { File.Delete(f); } catch (Exception e) when (FileTrouble(e)) { }
+            }
+        }
+    }
+
+    /// <summary>For start-up: removes the files of PCs that are not in the list any more. The setup wizard's
+    /// files for a PC that is being added are left alone.</summary>
+    public static void Sweep(IEnumerable<string> keepIds)
+    {
+        var keep = keepIds.SelectMany(id => Variants(Alias(id))).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        lock (Gate)
+        {
+            try
+            {
+                foreach (var f in Directory.GetFiles(Folder, "sshmgr-*"))
+                {
+                    if (keep.Contains(Path.GetFileName(f))) continue;
+                    try { File.Delete(f); } catch (Exception e) when (FileTrouble(e)) { }
+                }
+            }
+            catch (Exception e) when (FileTrouble(e)) { }   // no folder yet
         }
     }
 
@@ -108,20 +166,35 @@ internal static partial class HostKeys
     }).Distinct().ToList();
 
     /// <summary>How ssh checks a saved PC. A PC saved by an earlier version gets its file here, once, from
-    /// the keys ssh already has on record for its saved address (read from known_hosts, not fetched from
-    /// the network). With nothing on record the first connection may record the key: in a separate file,
-    /// kept by <see cref="Keep"/> only once that connection turned out to be the PC. A PC that had a key
-    /// saved before (<see cref="PcEntry.KeySaved"/>) is never trusted anew: its missing file is an error.</summary>
+    /// the keys ssh already has on record for it (read from known_hosts, not fetched from the network): for
+    /// its saved address, else for the address its name is found at now. With nothing on record the first
+    /// connection may record the key: in a separate file, kept by <see cref="Keep"/> only once that
+    /// connection turned out to be the PC. A PC that had a key saved before
+    /// (<see cref="PcEntry.KeySaved"/>) is never trusted anew: its missing file is an error. So is anything
+    /// that can't be read: <see cref="HostKeyProblem"/>.</summary>
     public static async Task<HostTrust> ForSavedAsync(PcEntry pc)
     {
         var (alias, file) = (Alias(pc.Id), FileFor(pc.Id));
         var fresh = file + ".new";
-        Directory.CreateDirectory(Folder);
-        File.Delete(fresh);   // left by a first connection that didn't work out
+        try
+        {
+            Directory.CreateDirectory(Folder);
+            File.Delete(fresh);   // left by a first connection that didn't work out
+        }
+        catch (Exception e) when (FileTrouble(e)) { throw new HostKeyProblem(CantWrite); }
         if (Read(file).Count > 0) return new(alias, file, AcceptNew: false);
         if (pc.KeySaved)
-            throw new IOException("The file with its host key is missing or empty. Use Change connection and save the PC again to check its identity.");
+            throw new HostKeyProblem("The identity that was saved for this PC is no longer on this computer. Click Change connection and " +
+                "save the PC again: you are shown its identity and asked whether to trust it.", passes: false);
         var known = await OnRecordAsync(pc);
+        if (known.Count == 0 && pc.LookupName.Trim() != "")
+        {
+            // a PC that was only ever reached at the address its name gave (through a VPN, say): ssh has its
+            // key on record under that address. Only a key that is already on record counts here; at an
+            // address found by a name lookup a new key is never accepted
+            var address = await Task.Run(() => Ssh.Resolve(pc.LookupName.Trim()));
+            if (address is not null) known = await OnRecordAsync(pc, address);
+        }
         lock (Gate)
         {
             if (Read(file).Count > 0) return new(alias, file, AcceptNew: false);   // saved meanwhile (the setup wizard)
@@ -135,10 +208,10 @@ internal static partial class HostKeys
     /// key was saved for the PC meanwhile (the setup wizard): that one stays.</summary>
     public static bool Keep(HostTrust firstUse, string pcId, IReadOnlyCollection<string> keys)
     {
-        try { File.Delete(firstUse.File); } catch (Exception) { }
+        try { File.Delete(firstUse.File); } catch (Exception e) when (FileTrouble(e)) { }
         lock (Gate)
         {
-            var saved = Read(FileFor(pcId));
+            var saved = Saved(pcId);
             if (saved.Count > 0) return saved.Intersect(keys).Any();
             Write(FileFor(pcId), Alias(pcId), keys);
             return true;
@@ -147,28 +220,55 @@ internal static partial class HostKeys
 
     /// <summary>The keys the user's own ssh has on record for this PC's saved address or ssh-config host:
     /// looked up the way ssh would (its known-hosts files, port and HostKeyAlias from the ssh config), by
-    /// ssh-keygen, so hashed names are found too.</summary>
-    public static async Task<List<string>> OnRecordAsync(PcEntry pc)
+    /// ssh-keygen, so hashed names are found too. When that can't be found out (a file that can't be read,
+    /// a tool that doesn't answer) it is an error, not "nothing on record".</summary>
+    /// <param name="hostName">The address ssh connected to instead of the saved one (found by name).</param>
+    public static async Task<List<string>> OnRecordAsync(PcEntry pc, string? hostName = null)
     {
         var args = new List<string>();
-        if (SshConfig is not null) args.AddRange(["-F", SshConfig]);
+        if (Ssh.Config is not null) args.AddRange(["-F", Ssh.Config]);
+        if (hostName is not null) args.AddRange(["-o", $"HostName={hostName}"]);
         args.AddRange(["-G", "--", pc.Target]);
         // ssh prints paths as UTF-8 (a profile folder with other than English letters)
         var (code, effective) = await Ssh.RunAsync("ssh.exe", args, 15000, output: Encoding.UTF8);
-        if (code == -1) throw new IOException("Reading the ssh settings took too long.");
-        var (name, files) = Place(code == 0 ? effective : "", pc.Host);
+        if (code == -1)
+            throw new HostKeyProblem("Windows' ssh did not answer when asked for its settings. If this message stays, restart this computer.");
+        if (code != 0)
+            throw new HostKeyProblem("Windows' ssh can't read its settings, so SSH Manager can't look up which identity is on record for this PC:\n\n" +
+                string.Join("\n", effective.Split('\n').Select(l => l.Trim()).Where(l => l != "").Take(4)) +
+                "\n\nFix the config file in your .ssh folder; SSH Manager then connects by itself.", passes: false);
+        var (name, files) = Place(effective, hostName ?? pc.Host);
         var lines = new List<string>();
-        foreach (var f in files.Where(File.Exists))
+        foreach (var f in files)
         {
+            if (!Exists(f)) continue;
+            // 0: found, 1: not in this file. Anything else: the file could not be read
             var (found, text) = await Ssh.RunAsync("ssh-keygen.exe", ["-F", name, "-f", f], 15000);
-            if (found == -1) throw new IOException("Reading the host keys ssh has on record took too long.");
+            if (found is not (0 or 1)) throw CantRead(f);
             lines.AddRange(text.Split('\n'));
         }
         return Keys(lines);
     }
 
+    /// <summary>A known-hosts file is there. When that can't be told, it is an error.</summary>
+    static bool Exists(string file)
+    {
+        try
+        {
+            File.GetAttributes(file);
+            return true;
+        }
+        catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return false; }
+        catch (Exception e) when (FileTrouble(e)) { throw CantRead(file); }
+    }
+
+    static HostKeyProblem CantRead(string knownHosts) =>
+        new($"The file {knownHosts}, where Windows' ssh keeps the identities (host keys) of the computers it knows, can't be read, so SSH Manager " +
+            "can't look up which one is on record for this PC. Another program may be using that file, or your Windows account may not be " +
+            "allowed to read it. Close programs that may be using it, or restart this computer.");
+
     /// <summary>From what `ssh -G` prints for a host: the name ssh files its key under, and the known-hosts
-    /// files it looks in. Empty input (ssh -G failed): ssh's defaults.</summary>
+    /// files it looks in. Empty input: ssh's defaults.</summary>
     public static (string name, List<string> files) Place(string effective, string host)
     {
         string hostname = host.Trim(), alias = "";

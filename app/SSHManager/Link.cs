@@ -51,6 +51,7 @@ internal sealed partial class Link : IDisposable
     int? RemotePortSeen => Volatile.Read(ref remotePortValue) is var p && p >= 0 ? p : null;
     volatile bool resetBackoff;
     volatile string reachedAt = "";   // the address the current SSH connection went to
+    int unsavedPort;                  // the server's port as a first connection reported it, while its host key isn't saved yet
 
     public PcEntry Pc { get; }
     public event Action<Link, LinkState, string>? Changed;
@@ -155,14 +156,16 @@ internal sealed partial class Link : IDisposable
     }
 
     /// <summary>Asks the server for its name and version (also proves the token works).</summary>
-    /// <param name="learnAddress">Also remember the computer name and the address this connection went to:
-    /// only for a connection to a server that showed the host key saved for the PC.</param>
-    async Task<bool> LearnNameAsync(CancellationToken ct, bool learnAddress)
+    /// <param name="learnAddress">Also remember the computer name and the address this connection went to.</param>
+    /// <param name="checkOnly">Only check that the token works and keep nothing of what the server says about
+    /// itself: for a first connection, as long as its host key isn't saved as the PC's identity.</param>
+    async Task<bool> LearnNameAsync(CancellationToken ct, bool learnAddress, bool checkOnly = false)
     {
         try
         {
             using var r = await Http.SendAsync(Request(HttpMethod.Get, "/api/whoami"), ct);
             if (r.StatusCode != HttpStatusCode.OK) return false;
+            if (checkOnly) return true;
             using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync(ct));
             var root = doc.RootElement;
             string S(string n) => root.TryGetProperty(n, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? "" : "";
@@ -305,24 +308,35 @@ internal sealed partial class Link : IDisposable
         // connection records it: only at the saved address then, never at one found by looking the name up.
         HostTrust trust;
         try { trust = await HostKeys.ForSavedAsync(Pc); }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        catch (HostKeyProblem e)
         {
-            return $"Couldn't read the identity (host key) saved for {Pc.DisplayName} on this computer.\n\n{e.Message}";
+            return $"Couldn't check {Pc.DisplayName}'s identity (host key), so SSH Manager did not connect.\n\n{e.Message}" +
+                   (e.Passes ? "\n\nSSH Manager tries again by itself." : "");
         }
         var firstUse = trust.AcceptNew;
-        if (!firstUse) NoteKeySaved();
+        if (!firstUse)
+        {
+            NoteKeySaved();
+            unsavedPort = 0;
+        }
+        // Until a first connection's key is saved, nothing its server says is: the port it reports is used, not kept
+        var remotePort = firstUse && unsavedPort > 0 ? unsavedPort : Pc.RemotePort;
         Port = Ssh.IsPortFree(preferredPort) ? preferredPort : Ssh.FreePort();
-        StartSsh(trust, lookup && !firstUse);
+        StartSsh(trust, lookup && !firstUse, remotePort);
         ct.ThrowIfCancellationRequested();   // removed while ssh was starting: finally in RunAsync kills it
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (true)
         {
             if (remoteError is { } err) return err;
-            if (RemotePortSeen is { } rp && rp != Pc.RemotePort)
+            if (RemotePortSeen is { } rp && rp != remotePort)
             {
                 // the server uses another port than we forwarded to: remember it and start over
-                Pc.RemotePort = rp;
-                save();
+                if (firstUse) unsavedPort = rp;
+                else
+                {
+                    Pc.RemotePort = rp;
+                    save();
+                }
                 return "";
             }
             if (remoteToken is not null && await AliveAsync(Port, ct)) break;
@@ -331,20 +345,30 @@ internal sealed partial class Link : IDisposable
             await Task.Delay(300, ct);
         }
         // the key ssh recorded on this first connection; without it the PC would be trusted anew every time
-        var recorded = firstUse ? HostKeys.Read(trust.File) : [];
-        if (firstUse && recorded.Count == 0)
-            return $"Couldn't save {Pc.DisplayName}'s identity (host key) on this computer, so the connection was closed.";
+        List<string> recorded = [];
+        if (firstUse)
+        {
+            try { recorded = HostKeys.Read(trust.File); } catch (HostKeyProblem) { }
+            if (recorded.Count == 0) return CantSaveKey();
+        }
         Token = remoteToken!;
         AppSecret = remoteAppSecret ?? "";
-        if (!await LearnNameAsync(ct, learnAddress: !firstUse)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
+        if (!await LearnNameAsync(ct, learnAddress: true, checkOnly: firstUse)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
         if (firstUse)
         {
             // it is the PC (it let this computer in and its server answers): this key is its identity from now on.
             // Unless another key was saved for it meanwhile: then connect again, held to that one
-            if (!HostKeys.Keep(trust, Pc.Id, recorded)) return "";
-            NoteKeySaved();
+            try
+            {
+                if (!HostKeys.Keep(trust, Pc.Id, recorded)) return "";
+            }
+            catch (HostKeyProblem) { return CantSaveKey(); }
             firstUse = false;
-            await LearnNameAsync(ct, learnAddress: true);
+            unsavedPort = 0;
+            Pc.KeySaved = true;
+            Pc.RemotePort = remotePort;
+            save();
+            if (!await LearnNameAsync(ct, learnAddress: true)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
         }
         Set(LinkState.Connected, "Connected over SSH");
         connected();
@@ -362,6 +386,12 @@ internal sealed partial class Link : IDisposable
         save();
     }
 
+    /// <summary>A first connection worked, but its host key could not be kept: the PC would be trusted anew
+    /// every time, so the connection is given up.</summary>
+    string CantSaveKey() =>
+        $"Couldn't save {Pc.DisplayName}'s identity (host key) on this computer, so the connection was closed.\n\n{HostKeys.CantWrite}" +
+        "\n\nSSH Manager tries again by itself.";
+
     static bool Exited(Process p)
     {
         try { return p.HasExited; } catch (Exception) { return true; }
@@ -372,7 +402,8 @@ internal sealed partial class Link : IDisposable
         lock (sshLock) return ssh is null || Exited(ssh);
     }
 
-    void StartSsh(HostTrust trust, bool lookup)
+    /// <param name="remotePort">The port of SSH Manager's server on the PC.</param>
+    void StartSsh(HostTrust trust, bool lookup, int remotePort)
     {
         KillSsh();
         lock (sshOutput) sshOutput.Clear();
@@ -387,14 +418,14 @@ internal sealed partial class Link : IDisposable
         reachedAt = resolved ?? Pc.Host;
         foreach (var a in Ssh.Options(Pc, trust, hostName: resolved)) psi.ArgumentList.Add(a);
         foreach (var a in new[] { "-o", "ExitOnForwardFailure=yes", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3",
-                                  "-L", $"127.0.0.1:{Port}:127.0.0.1:{Pc.RemotePort}" })
+                                  "-L", $"127.0.0.1:{Port}:127.0.0.1:{remotePort}" })
             psi.ArgumentList.Add(a);
         // the page view opens http://localhost:port/, which may go to [::1]: hold that address too, so no
         // other program can listen there and receive the page's token cookie
         if (Ssh.Ipv6Loopback())
         {
             psi.ArgumentList.Add("-L");
-            psi.ArgumentList.Add($"[::1]:{Port}:127.0.0.1:{Pc.RemotePort}");
+            psi.ArgumentList.Add($"[::1]:{Port}:127.0.0.1:{remotePort}");
         }
         foreach (var a in new[] { "--", Pc.Target, Ssh.PowerShell(RemoteScript) }) psi.ArgumentList.Add(a);
 

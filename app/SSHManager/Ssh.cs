@@ -8,9 +8,13 @@ namespace SSHManager;
 /// <summary>Helpers around the Windows OpenSSH client (ssh.exe, ssh-keygen.exe).</summary>
 internal static class Ssh
 {
-    public static readonly string SshFolder =
+    /// <summary>The user's .ssh folder (a test can point it somewhere else).</summary>
+    public static string SshFolder { get; set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".ssh");
-    public static readonly string AppKey = Path.Combine(SshFolder, "id_ed25519_sshmanager");
+    public static string AppKey => Path.Combine(SshFolder, "id_ed25519_sshmanager");
+
+    /// <summary>Another ssh config file than the user's, for every ssh run (for tests).</summary>
+    public static string? Config { get; set; }
 
     /// <summary>Where Setup.cmd installed the server on this computer, if it did. The record is only trusted
     /// when an administrator (or Windows) wrote it: a standard user could otherwise point it elsewhere.</summary>
@@ -72,24 +76,21 @@ internal static class Ssh
 
     /// <summary>Common options for non-interactive use.</summary>
     /// <param name="trust">Where the PC's host key is on record (see <see cref="HostKeys"/>): ssh checks that
-    /// file and name instead of the user's known_hosts, strictly, whatever StrictHostKeyChecking their ssh
-    /// config has. Null leaves the check to the user's own ssh settings and known_hosts, with a new key
-    /// accepted on first contact: only for a host from the user's ssh config, while it is being added and
-    /// nothing is on record for it.</param>
+    /// file and name instead of the user's known_hosts, strictly, whatever their ssh config says about
+    /// host keys.</param>
     /// <param name="hostName">The address to connect to instead of the saved one.</param>
-    public static List<string> Options(PcEntry s, HostTrust? trust, bool batch = true, string? hostName = null)
+    public static List<string> Options(PcEntry s, HostTrust trust, bool batch = true, string? hostName = null)
     {
         var a = new List<string>();
+        if (Config is not null) a.AddRange(["-F", Config]);
         if (batch) a.AddRange(["-o", "BatchMode=yes"]);
         a.AddRange(["-o", "ConnectTimeout=10"]);
-        if (trust is null) a.AddRange(["-o", "StrictHostKeyChecking=accept-new"]);
-        else
-        {
-            // the key is looked up under the PC's own name, so it is the same check at any address
-            a.AddRange(["-o", $"HostKeyAlias={trust.Alias}", "-o", $"UserKnownHostsFile={FileOption(trust.File)}",
-                        "-o", "GlobalKnownHostsFile=NUL", "-o", "HashKnownHosts=no", "-o", "CheckHostIP=no", "-o", "VerifyHostKeyDNS=no",
-                        "-o", $"StrictHostKeyChecking={(trust.AcceptNew ? "accept-new" : "yes")}"]);
-        }
+        // the key is looked up under the PC's own name, so it is the same check at any address. Nothing else
+        // may vouch for a key or add one: not DNS, not a command from the user's ssh config, not the server
+        a.AddRange(["-o", $"HostKeyAlias={trust.Alias}", "-o", $"UserKnownHostsFile={FileOption(trust.File)}",
+                    "-o", "GlobalKnownHostsFile=NUL", "-o", "HashKnownHosts=no", "-o", "CheckHostIP=no", "-o", "VerifyHostKeyDNS=no",
+                    "-o", "UpdateHostKeys=no", "-o", $"StrictHostKeyChecking={(trust.AcceptNew ? "accept-new" : "yes")}"]);
+        if (HasKnownHostsCommand()) a.AddRange(["-o", "KnownHostsCommand=none"]);
         if (s.KeyFile.Trim() != "") a.AddRange(["-i", s.KeyFile.Trim(), "-o", "IdentitiesOnly=yes"]);
         if (hostName is not null) a.AddRange(["-o", $"HostName={hostName}"]);
         return a;
@@ -98,6 +99,30 @@ internal static class Ssh
     /// <summary>A file path as the value of an ssh option: quoted (it may contain spaces), with forward
     /// slashes (a backslash can be read as an escape) and "%" doubled (it starts a token).</summary>
     static string FileOption(string path) => "\"" + path.Replace('\\', '/').Replace("%", "%%") + "\"";
+
+    static bool? knownHostsCommand;
+
+    /// <summary>This ssh has the KnownHostsCommand option (OpenSSH 8.5 and later), so it must be switched
+    /// off. An older ssh stops at an option it doesn't know, and has nothing there to switch off.</summary>
+    static bool HasKnownHostsCommand()
+    {
+        if (knownHostsCommand is { } known) return known;
+        try
+        {
+            // asked off the calling thread: this may be the window's
+            var (code, output) = Task.Run(() => RunAsync("ssh.exe", ["-F", "none", "-G", "-o", "KnownHostsCommand=none", "--", "localhost"], 10000))
+                .GetAwaiter().GetResult();
+            var answer = OptionKnown(code, output);
+            if (answer is not null) knownHostsCommand = answer;
+            return answer ?? true;
+        }
+        catch (Exception) { return true; }
+    }
+
+    /// <summary>What an ssh run with an option says about knowing it; null when it says nothing clear (then
+    /// the option is passed: an ssh that doesn't know it refuses to run, which is the safe way to be wrong).</summary>
+    internal static bool? OptionKnown(int code, string output) =>
+        code == 0 ? true : output.Contains("Bad configuration option", StringComparison.OrdinalIgnoreCase) ? false : null;
 
     public static string? Resolve(string name)
     {
@@ -163,9 +188,7 @@ internal static class Ssh
     }
 
     /// <summary>Plain-language reason for a failed ssh run.</summary>
-    /// <param name="ownConfig">The host key was checked by the user's own ssh settings, not against the
-    /// identity the app saved for the PC.</param>
-    public static string Explain(string output, string host, bool ownConfig = false)
+    public static string Explain(string output, string host)
     {
         var o = output.ToLowerInvariant();
         if (o.Contains("could not resolve hostname"))
@@ -177,12 +200,9 @@ internal static class Ssh
         if (o.Contains("permission denied"))
             return $"{host} didn't accept this computer's key.";
         if (KeyRefused(output))
-            return ownConfig
-                ? $"{host}'s identity (host key) is different from the one in your SSH files. This PC is used through your own SSH config: " +
-                  "if the PC was reinstalled, remove its old line from known_hosts (ssh-keygen -R), then try again."
-                : $"{host} answered with a different identity (host key) than the one saved for it, so SSH Manager did not connect.\n\n" +
-                  "If Windows or OpenSSH Server was reinstalled on that PC, click Change connection and save it again: " +
-                  "you are shown the new identity and asked whether to trust it. If not, another computer may be answering in its place.";
+            return $"{host} answered with a different identity (host key) than the one saved for it, so SSH Manager did not connect.\n\n" +
+                   "If Windows or OpenSSH Server was reinstalled on that PC, click Change connection and save it again: " +
+                   "you are shown the new identity and asked whether to trust it. If not, another computer may be answering in its place.";
         return "";
     }
 

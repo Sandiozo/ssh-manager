@@ -162,16 +162,18 @@ internal static class Ui
 
     static string Esc(string s) => WebUtility.HtmlEncode(s);
 
-    public static string StatusPage(PcEntry pc, LinkState state, string message)
+    /// <summary>A PC that can't be shown. <paramref name="note"/> replaces the line about retrying in the
+    /// background, and leaves only the Retry button.</summary>
+    public static string StatusPage(PcEntry pc, LinkState state, string message, string? note = null)
     {
         var connecting = state == LinkState.Connecting;
         var lines = message.Split('\n', 2);
         var detail = lines.Length > 1 ? $"<pre>{Esc(lines[1].Trim())}</pre>" : "";
         var id = Esc(pc.Id);
         var buttons = connecting ? "" :
-            $"<button class=\"primary\" data-act=\"retry\" data-id=\"{id}\">Retry now</button>" +
+            $"<button class=\"primary\" data-act=\"retry\" data-id=\"{id}\">Retry now</button>" + (note is not null ? "" :
             (pc.Mac != "" && !pc.IsLocal ? $"<button data-act=\"wake-pc\" data-id=\"{id}\">Wake up PC</button>" : "") +
-            (pc.IsLocal ? "" : $"<button data-act=\"edit-pc\" data-id=\"{id}\">Change connection…</button>");
+            (pc.IsLocal ? "" : $"<button data-act=\"edit-pc\" data-id=\"{id}\">Change connection…</button>"));
         const string css = """
             .box { width:min(560px, 100%); padding:22px 24px; background:var(--surface); border:1px solid var(--rule); border-radius:var(--r);
                    border-left:3px solid var(--critical); }
@@ -186,7 +188,7 @@ internal static class Ui
         return Shell(pc.DisplayName, css, $"""
             <div class="box{(connecting ? " busy" : "")}">
               <div class="state">{icon}{Esc(lines[0])}</div>
-              <p>{(connecting ? "Opening an SSH connection." : "SSH Manager keeps retrying in the background.")}</p>
+              <p>{(connecting ? "Opening an SSH connection." : Esc(note ?? "SSH Manager keeps retrying in the background."))}</p>
               {detail}
               <div class="buttons">{buttons}</div>
             </div>

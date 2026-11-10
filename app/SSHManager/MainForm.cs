@@ -22,8 +22,10 @@ namespace SSHManager;
 /// in a native dialog), switch PCs, and open the app's own pages.
 ///
 /// Every PC's dashboard has a browser profile of its own (see PcProfile) and the app's pages have another:
-/// cookies (the PC's access token is one), cache, service workers and stored settings of one PC's pages
-/// are never sent to, or used for, another PC, also when a PC later gets a local port another one had.
+/// cookies, cache, service workers and stored settings of one PC's pages are never sent to, or used for,
+/// another PC, also when a PC later gets a local port another one had. A PC's access token cookie is tied
+/// to its port, and its view is held to that PC's own server (see OwnServerOnly), so the token isn't sent
+/// to another PC's port.
 /// </summary>
 internal sealed class MainForm : Form
 {
@@ -58,10 +60,16 @@ internal sealed class MainForm : Form
     /// <summary>Where earlier versions kept the one profile every PC's dashboard shared.</summary>
     static readonly string OldBrowserFolder = Path.Combine(AppSettings.Folder, "WebView2");
     const string AppProfile = "app";
-    /// <summary>PCs (by id) whose browser profile has to be emptied before a page is loaded in it again.</summary>
-    readonly HashSet<string> staleProfiles = [];
+    /// <summary>Which PC profiles have to be emptied before a page is loaded in them again, and which belong
+    /// to removed PCs. On disk, so it still happens when the app closes first.</summary>
+    readonly ProfileMarks profileMarks = new(Path.Combine(BrowserFolder, "profiles-to-clean.json"));
     /// <summary>PCs (by id) whose browser profile is being emptied right now.</summary>
     readonly Dictionary<string, Task> clearing = [];
+    /// <summary>Deleting the profile folders of removed PCs at the start.</summary>
+    Task leftoverProfiles = Task.CompletedTask;
+    /// <summary>PCs (by id) whose entry was just changed: until the old connection is seen to end, the link
+    /// still reports the old computer's address and token, so no page is loaded for it.</summary>
+    readonly HashSet<string> reconnecting = [];
     WebView2? visible;
     bool mainPending, webWantsSync;
     CoreWebView2Environment? webEnv;
@@ -92,6 +100,8 @@ internal sealed class MainForm : Form
     DateTime muteBalloonsUntil = DateTime.MinValue;
     bool webReady, exiting, wizardOpen, appSettingsOpen, polling, darkNow, syncAddOpen;
     string current = "", mainShown = "";
+    /// <summary>The PC whose page failed to open the last time: its status page says so until it is tried again.</summary>
+    string? viewFailed;
     int downloadSeq;
     object? lastLocalStats;
     System.Threading.Timer? networkSettle;
@@ -231,9 +241,21 @@ internal sealed class MainForm : Form
         {
             // --devtools-port=N (testing only) exposes the page to Chrome DevTools Protocol on 127.0.0.1:N
             var port = Environment.GetCommandLineArgs().FirstOrDefault(a => a.StartsWith("--devtools-port="))?.Split('=')[1];
-            var options = new CoreWebView2EnvironmentOptions(port is null ? null : $"--remote-debugging-port={int.Parse(port)}");
-            webEnv = await CoreWebView2Environment.CreateAsync(null, BrowserFolder, options);
-            await web.EnsureCoreWebView2Async(webEnv, ProfileOptions(AppProfile));
+            var options = new CoreWebView2EnvironmentOptions(OwnServerOnly.BrowserArguments + (port is null ? "" : $" --remote-debugging-port={int.Parse(port)}"));
+            for (var attempt = 1; ; attempt++)
+            {
+                try
+                {
+                    webEnv = await CoreWebView2Environment.CreateAsync(null, BrowserFolder, options);
+                    await web.EnsureCoreWebView2Async(webEnv, ProfileOptions(AppProfile));
+                    break;
+                }
+                // the browser of the app's last start, started with other settings (an earlier version), is still closing
+                catch (COMException e) when (e.HResult == unchecked((int)0x8007139F) && attempt < 30)
+                {
+                    await Task.Delay(500);
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -367,14 +389,16 @@ internal sealed class MainForm : Form
         return options;
     }
 
-    /// <summary>Deletes everything a PC's pages stored in the app (cookies with its access token, cache, service
-    /// workers, stored settings): when the PC is removed, and when its entry now points at another computer.
-    /// A view nobody sees opens the profile only for that. The emptied profile's folder is deleted at the next
-    /// start (see RemoveLeftoverProfiles) unless the PC is still in the list.</summary>
-    void ForgetBrowserData(string pcId)
+    /// <summary>Deletes everything a PC's pages stored in the app (cookies, cache, service workers, stored
+    /// settings): when the PC is removed, and when its entry now leads to another computer. A view nobody
+    /// sees opens the profile only for that. It is written down first (see ProfileMarks): if emptying fails
+    /// or the app closes before it is done, the profile is emptied before its next use, and a removed PC's
+    /// profile folder is deleted at the next start.</summary>
+    void ForgetBrowserData(string pcId, bool pcRemoved)
     {
         DropPcView(pcId);
-        staleProfiles.Add(pcId);   // until it is done, a page for this PC is not loaded
+        var profile = PcProfile(pcId);
+        profileMarks.MustEmpty(profile, pcRemoved);   // until it is done, a page for this PC is not loaded
         if (webEnv is null || exiting) return;
         var before = clearing.GetValueOrDefault(pcId, Task.CompletedTask);
         clearing[pcId] = ClearAsync();
@@ -386,9 +410,9 @@ internal sealed class MainForm : Form
             try
             {
                 Controls.Add(v);
-                await v.EnsureCoreWebView2Async(webEnv, ProfileOptions(PcProfile(pcId)));
+                await v.EnsureCoreWebView2Async(webEnv, ProfileOptions(profile));
                 await v.CoreWebView2.Profile.ClearBrowsingDataAsync();
-                staleProfiles.Remove(pcId);
+                profileMarks.Emptied(profile);
             }
             catch (Exception e) { AppLog.Write("Deleting a PC's browser data", e); }
             finally
@@ -419,26 +443,40 @@ internal sealed class MainForm : Form
         }
     });
 
-    /// <summary>Deletes the profile folders of PCs that are no longer in the list (they were emptied when the PC
-    /// was removed). None of them is open: a profile is only opened for a PC in the list. Profile folders
-    /// are the ones next to the folder of the app's own profile, named the same way.</summary>
+    /// <summary>Deletes the profile folders of PCs that were removed from the list (see ProfileMarks). Only those:
+    /// a profile is not deleted because its PC is missing from the list right now, which also happens when
+    /// the settings file couldn't be read or this PC's own server isn't installed at the moment. None of
+    /// the folders is open: a profile is only opened for a PC in the list. Profile folders are next to the
+    /// folder of the app's own profile and named the same way.</summary>
     void RemoveLeftoverProfiles()
     {
         try
         {
+            var removed = profileMarks.Removed();
+            if (removed.Length == 0) return;
             var own = web.CoreWebView2.Profile.ProfilePath;
             var name = Path.GetFileName(own);
             if (Path.GetDirectoryName(own) is not { } parent || !name.EndsWith(AppProfile, StringComparison.OrdinalIgnoreCase)) return;
             var prefix = name[..^AppProfile.Length];
-            var keep = links.Select(l => prefix + PcProfile(l.Pc.Id)).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            var leftover = Directory.GetDirectories(parent, prefix + "pc-*").Where(d => !keep.Contains(Path.GetFileName(d))).ToList();
-            if (leftover.Count == 0) return;
-            Task.Run(() =>
+            var inUse = links.Select(l => PcProfile(l.Pc.Id)).ToHashSet();
+            var leftover = new List<(string Profile, string Folder)>();
+            foreach (var profile in removed)
             {
-                foreach (var folder in leftover)
+                // in the list again (this PC's own entry always has the same id): the folder stays and is emptied before use
+                if (inUse.Contains(profile)) profileMarks.InUse(profile);
+                else leftover.Add((profile, Path.Combine(parent, prefix + profile)));
+            }
+            if (leftover.Count == 0) return;
+            leftoverProfiles = Task.Run(() =>
+            {
+                foreach (var (profile, folder) in leftover)
                 {
-                    try { Directory.Delete(folder, true); }
-                    catch (Exception e) { AppLog.Write("Deleting a removed PC's browser profile", e); }
+                    try
+                    {
+                        if (Directory.Exists(folder)) Directory.Delete(folder, true);
+                        profileMarks.Deleted(profile);
+                    }
+                    catch (Exception e) { AppLog.Write("Deleting a removed PC's browser profile", e); }   // tried again at the next start
                 }
             });
         }
@@ -473,17 +511,16 @@ internal sealed class MainForm : Form
     {
         if (v == web) return uri.StartsWith("about:blank", StringComparison.OrdinalIgnoreCase) || uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase);
         var pv = pcViews.Values.FirstOrDefault(p => p.View == v);
-        return pv is not null && SameOrigin(uri, pv.Port);
+        return pv is not null && OwnServerOnly.Own(uri, pv.Port);
     }
-
-    static bool SameOrigin(string uri, int port) =>
-        Uri.TryCreate(uri, UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttp
-        && u.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) && u.Port == port;
 
     IEnumerable<WebView2> AllViews() => pcViews.Values.Select(p => p.View).Prepend(web);
 
     /// <summary>The shared view is wanted: setup, app settings, All PCs, or a PC that isn't connected.</summary>
-    bool WantsMain() => wizardOpen || appSettingsOpen || current == All || CurrentLink() is not { State: LinkState.Connected };
+    bool WantsMain() => wizardOpen || appSettingsOpen || current == All || CurrentLink() is not { } link || !Usable(link) || viewFailed == link.Pc.Id;
+
+    /// <summary>Connected, and to the computer its entry names now (see <see cref="reconnecting"/>).</summary>
+    bool Usable(Link link) => link.State == LinkState.Connected && !reconnecting.Contains(link.Pc.Id);
 
     void ShowView(WebView2 v)
     {
@@ -558,57 +595,83 @@ internal sealed class MainForm : Form
     async Task OpenPcViewAsync(Link link)
     {
         var id = link.Pc.Id;
+        if (!Usable(link)) return;
         if (pcViews.TryGetValue(id, out var pv) && pv.Url == link.Url && pv.Token == link.Token)
         {
             if (pv.Ready) ShowView(pv.View);
             return;
         }
         if (pv is not null) DropPcView(id);
+        if (viewFailed == id) viewFailed = null;   // tried again
         var v = new WebView2 { Dock = DockStyle.Fill, DefaultBackgroundColor = PageBack() };
         pv = new PcView(v, link.Url, link.Token, link.Port);
         pcViews[id] = pv;
         Controls.Add(v);
         v.SendToBack();   // load behind the page that is showing now
         bool Dropped() => !pcViews.TryGetValue(id, out var still) || still != pv;   // closed while starting
-        if (clearing.TryGetValue(id, out var emptying)) await emptying;
-        if (Dropped()) return;
-        // this PC's own browser profile: nothing in it comes from, or goes to, another PC's pages
-        await v.EnsureCoreWebView2Async(webEnv, ProfileOptions(PcProfile(id)));
-        if (Dropped()) return;
-        var core = v.CoreWebView2;
-        if (staleProfiles.Contains(id))
+        try
         {
-            // the entry pointed at another computer before and emptying its profile didn't work then
-            await core.Profile.ClearBrowsingDataAsync();
-            staleProfiles.Remove(id);
+            if (clearing.TryGetValue(id, out var emptying)) await emptying;
+            await leftoverProfiles;
             if (Dropped()) return;
-        }
-        // the server only answers requests that carry its access token: a cookie for its local port, kept in
-        // this PC's profile only, so no other PC's server is ever sent it; page script can't read it
-        var cookies = core.CookieManager;
-        var cookie = cookies.CreateCookie($"sshmgr_token_{link.Port}", link.Token, "localhost", "/");
-        cookie.IsHttpOnly = true;
-        cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
-        cookies.AddOrUpdateCookie(cookie);
-        SetColorScheme(core);
-        Configure(v, link);
-        v.NavigationCompleted += async (_, a) => await AppLog.GuardAsync("PC page loaded", async () =>
-        {
-            if (a.IsSuccess)
+            // this PC's own browser profile: nothing in it comes from, or goes to, another PC's pages
+            var profile = PcProfile(id);
+            await v.EnsureCoreWebView2Async(webEnv, ProfileOptions(profile));
+            if (Dropped()) return;
+            var core = v.CoreWebView2;
+            if (profileMarks.NeedsEmptying(profile))
             {
-                PushPcs();
-                Post(ThemeMessage(), v.CoreWebView2);
-                await Task.Delay(1500);   // pages from older servers don't say when they're drawn
-                Reveal(id, pv);
-                return;
+                // it holds what another computer's pages stored, and emptying it didn't work or didn't finish then
+                await core.Profile.ClearBrowsingDataAsync();
+                if (Dropped()) return;
+                profileMarks.Emptied(profile);
             }
-            // the PC's server restarted under us: try again shortly while its link is still up
-            await Task.Delay(2000);
-            if (pcViews.TryGetValue(id, out var cur) && cur == pv && link.State == LinkState.Connected)
-                v.CoreWebView2.Navigate(pv.Url);
-        });
-        v.CoreWebView2.Navigate(link.Url);
+            profileMarks.InUse(profile);
+            // the server only answers requests that carry its access token: a cookie kept in this PC's profile,
+            // sent to this PC's local port only
+            await OwnServerOnly.ApplyAsync(core, link.Port, link.Token);
+            if (Dropped()) return;
+            SetColorScheme(core);
+            Configure(v, link);
+            v.NavigationCompleted += async (_, a) => await AppLog.GuardAsync("PC page loaded", async () =>
+            {
+                if (a.IsSuccess)
+                {
+                    PushPcs();
+                    Post(ThemeMessage(), v.CoreWebView2);
+                    await Task.Delay(1500);   // pages from older servers don't say when they're drawn
+                    Reveal(id, pv);
+                    return;
+                }
+                // the PC's server restarted under us: try again shortly while its link is still up
+                await Task.Delay(2000);
+                if (pcViews.TryGetValue(id, out var cur) && cur == pv && Usable(link))
+                    v.CoreWebView2.Navigate(pv.Url);
+            });
+            v.CoreWebView2.Navigate(link.Url);
+        }
+        catch (Exception) when (Dropped()) { return; }   // closed while starting
+        catch (Exception e)
+        {
+            DropPcView(id);   // not left behind half-made: the next time the PC is shown it is tried again
+            if (current == id && !wizardOpen && !appSettingsOpen) ShowViewFailed(link, e);
+            throw;
+        }
         TrimViews();
+    }
+
+    /// <summary>A PC's page couldn't be opened: its status page says so, instead of whatever was in front.</summary>
+    void ShowViewFailed(Link link, Exception e)
+    {
+        viewFailed = link.Pc.Id;
+        var key = $"view-failed:{link.Pc.Id}";
+        if (mainShown != key)
+        {
+            mainShown = key;
+            NavigateMain(Ui.StatusPage(link.Pc, LinkState.Disconnected, $"{link.Pc.DisplayName}'s page couldn't be opened.\n{e.Message}",
+                "Click Retry now to try again."));
+        }
+        else ShowView(web);
     }
 
     void Reveal(string id, PcView pv)
@@ -673,16 +736,18 @@ internal sealed class MainForm : Form
         }
         var link = CurrentLink() ?? links[0];
         current = link.Pc.Id;
-        Text = $"SSH Manager · {link.Pc.DisplayName}" + (link.State == LinkState.Connected ? "" : " (not connected)");
-        if (link.State == LinkState.Connected)
+        Text = $"SSH Manager · {link.Pc.DisplayName}" + (Usable(link) ? "" : " (not connected)");
+        if (Usable(link))
             OpenPcView(link);
         else
         {
-            var key = $"status:{link.Pc.Id}:{link.State}:{link.Message}";
+            // an entry that was just changed is on its way to the computer it names now
+            var (state, message) = reconnecting.Contains(link.Pc.Id) ? (LinkState.Connecting, $"Connecting to {link.Pc.DisplayName}…") : (link.State, link.Message);
+            var key = $"status:{link.Pc.Id}:{state}:{message}";
             if (mainShown != key)
             {
                 mainShown = key;
-                NavigateMain(Ui.StatusPage(link.Pc, link.State, link.Message));
+                NavigateMain(Ui.StatusPage(link.Pc, state, message));
             }
             else ShowView(web);
         }
@@ -691,6 +756,7 @@ internal sealed class MainForm : Form
     void OnLinkChanged(Link link, LinkState state, string message)
     {
         if (!links.Contains(link)) return;   // removed meanwhile
+        if (state != LinkState.Connected) reconnecting.Remove(link.Pc.Id);   // the old connection has ended
         UpdateTray();
         var name = link.Pc.DisplayName;
         var quiet = DateTime.UtcNow < muteBalloonsUntil;
@@ -1028,7 +1094,7 @@ internal sealed class MainForm : Form
         else
         {
             var entry = pcViews.FirstOrDefault(p => p.Value.View == from);
-            if (entry.Value is null || !SameOrigin(source, entry.Value.Port)) return;
+            if (entry.Value is null || !OwnServerOnly.Own(source, entry.Value.Port)) return;
             fromPc = entry.Key;
         }
         var reply = from.CoreWebView2;
@@ -1068,6 +1134,11 @@ internal sealed class MainForm : Form
                 Post(ThemeMessage(), reply);
                 return;
             case "retry":
+                if (shared && (ById() ?? CurrentLink()) is { } failed && failed.Pc.Id == viewFailed && Usable(failed))
+                {
+                    ShowCurrent();   // the connection is fine, only its page didn't open: open it again
+                    return;
+                }
                 (shared ? ById() ?? CurrentLink() : Own())?.Reconnect(resetBackoff: true);
                 return;
             case "auth-failed":   // the page's token stopped working: fetch a fresh one
@@ -1349,8 +1420,10 @@ internal sealed class MainForm : Form
             if (existing is not null) pc.Id = existing.Id;
             if (existing is not null)
             {
-                // the entry may now lead to another computer: nothing the old one's pages stored is kept for it
-                if (!existing.Host.Trim().Equals(pc.Host.Trim(), StringComparison.OrdinalIgnoreCase)) ForgetBrowserData(existing.Id);
+                // the entry may now lead to another computer (another address, or another name to look up):
+                // nothing the old one's pages stored is kept for it
+                static bool Same(string a, string b) => a.Trim().Equals(b.Trim(), StringComparison.OrdinalIgnoreCase);
+                if (!Same(existing.Host, pc.Host) || !Same(existing.LookupName, pc.LookupName)) ForgetBrowserData(existing.Id, pcRemoved: false);
                 lock (settings.Gate)
                 {
                     existing.Host = pc.Host;
@@ -1359,7 +1432,13 @@ internal sealed class MainForm : Form
                     existing.LookupName = pc.LookupName;
                     existing.PcName = "";
                 }
-                links.FirstOrDefault(l => l.Pc == existing)?.Reconnect(resetBackoff: true);
+                if (links.FirstOrDefault(l => l.Pc == existing) is { } link)
+                {
+                    // the link goes on reporting the old connection until it has seen it end
+                    DropPcView(existing.Id);
+                    reconnecting.Add(existing.Id);
+                    link.Reconnect(resetBackoff: true);
+                }
             }
             else
             {
@@ -1381,8 +1460,10 @@ internal sealed class MainForm : Form
                 (pairs > 0 ? $"Its {pairs} folder sync{(pairs == 1 ? "" : "s")} stop{(pairs == 1 ? "s" : "")} too (no files are deleted). " : "") +
                 "SSH Manager on that PC and this computer's key there stay; remove the key in that PC's Settings → SSH keys if you want to lock this computer out.",
                 "Remove PC", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK) return;
-        ForgetBrowserData(link.Pc.Id);
+        ForgetBrowserData(link.Pc.Id, pcRemoved: true);
+        reconnecting.Remove(link.Pc.Id);
         link.Dispose();
+        if (viewFailed == link.Pc.Id) viewFailed = null;
         links.Remove(link);
         linkSnapshot = links.ToArray();
         lock (settings.Gate) settings.Pcs.Remove(link.Pc);

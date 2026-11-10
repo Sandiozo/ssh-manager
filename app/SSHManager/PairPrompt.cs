@@ -6,6 +6,9 @@ namespace SSHManager;
 /// Pairing, approving side: a PC this app is connected to passes on a request from a computer that wants
 /// to manage this PC (see sshmgr/pairing.py). The app asks in a prompt that doesn't hold anything up,
 /// shows how long the request is still open and closes by itself when it expires or is cancelled there.
+/// The prompt is a window of its own, on top of the others: it is there whether the main window is
+/// open, minimised or in the tray. It doesn't take the keyboard, and Allow can't be clicked in its first
+/// moments, so a prompt that appears (or replaces another) under the user's hands isn't answered by accident.
 /// What Allow does is in PairApproval.
 /// </summary>
 internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?> ownLink, Action<string, string> balloon)
@@ -62,8 +65,7 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
         prompt.Answered += allowed => _ = AppLog.GuardAsync("Answering a pairing request",
             () => AnswerAsync(link, id, from, pcName, key, fingerprint, who, allowed));
         prompt.FormClosed += (_, _) => open.Remove(id);
-        prompt.Show(owner.Visible ? owner : null);
-        prompt.Activate();
+        prompt.Show();   // no owner: an owned window hides with a minimised or hidden main window
     }
 
     async Task AnswerAsync(Link link, string id, string from, string pcName, string key, string fingerprint, string who, bool allowed)
@@ -78,23 +80,29 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
         var added = $" (allowed {DateTime.Now:yyyy-MM-dd})";   // the label the key gets in Settings → SSH keys (60 characters at most)
         var label = (from.Length > 60 - added.Length ? from[..(60 - added.Length)] : from) + added;
         var result = await PairApproval.AllowAsync(To(link), own, id, key, fingerprint, label, Me);
+        var keyLine = $"Its fingerprint is {fingerprint}.";
         var problem = result.Outcome switch
         {
             PairOutcome.Allowed => null,
             PairOutcome.Gone => $"The request from {from} is no longer open: it expired or was cancelled there. Nothing was changed on this PC.\n\n" +
                                 $"If you still want this, send the request again on {from}.",
-            PairOutcome.Unreachable => $"Couldn't ask {pcName} whether the request from {from} is still open, so nothing was changed on this PC.",
+            PairOutcome.Unreachable => $"Couldn't reach {pcName} about the request from {from}, so nothing was changed on this PC.",
             PairOutcome.NoServer => "SSH Manager's server isn't running on this PC, so the key could not be added.",
-            PairOutcome.KeyNotAdded => $"The key of {from} could not be added, and {from} was told so:\n\n{result.Detail}",
+            PairOutcome.KeyNotAdded => $"The key of {from} was not added, and {from} was told so:\n\n{result.Detail}",
             PairOutcome.Late => $"The request from {from} expired or was cancelled just before your answer arrived, so its key was taken off this PC again. " +
                                 "Nothing was changed.",
-            _ => $"The request from {from} expired or was cancelled just before your answer arrived, but its key could not be taken off this PC again:\n\n" +
-                 $"{result.Detail}\n\nRemove it yourself in this PC's Settings → SSH keys. Its fingerprint is {fingerprint}.",
+            PairOutcome.Unanswered => $"{from} could not be told that you allowed it ({pcName} didn't answer), so its key was taken off this PC again. " +
+                                      $"Nothing was changed.\n\nIf you still want this, send the request again on {from}.",
+            PairOutcome.KeyLeft => $"{from} could not be told that you allowed it, and its key could not be taken off this PC again:\n\n{result.Detail}\n\n" +
+                                   $"The key is still on this PC: {from} can sign in with it. If you don't want that, remove it in this PC's Settings → SSH keys. {keyLine}",
+            _ => $"Adding the key of {from} failed, and this PC's SSH keys could not be read to see whether it was added all the same:\n\n{result.Detail}\n\n" +
+                 $"{from} was told that it failed. Look in this PC's Settings → SSH keys: if the key is there, {from} can sign in with it; remove it if you don't want that. {keyLine}",
         };
         if (problem is null) balloon("SSH Manager", $"{from} can now manage this PC.");
         else
             MessageBox.Show(owner.Visible ? owner : null, problem, "SSH Manager", MessageBoxButtons.OK,
-                result.Outcome is PairOutcome.Gone or PairOutcome.Late ? MessageBoxIcon.Information : MessageBoxIcon.Error);
+                result.Outcome is PairOutcome.Gone or PairOutcome.Late or PairOutcome.Unanswered ? MessageBoxIcon.Information
+                : result.Outcome is PairOutcome.KeyLeft or PairOutcome.KeyUnsure ? MessageBoxIcon.Warning : MessageBoxIcon.Error);
     }
 }
 
@@ -102,10 +110,27 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
 /// window denies too. It closes by itself, without an answer, when the request's time is up.</summary>
 internal sealed class PairPrompt : Form
 {
+    /// <summary>Allow can be clicked this long after the prompt appeared.</summary>
+    public static readonly TimeSpan AllowAfter = TimeSpan.FromMilliseconds(1500);
+
     public event Action<bool>? Answered;
     readonly System.Windows.Forms.Timer tick = new() { Interval = 500 };
+    readonly System.Windows.Forms.Timer unlock = new() { Interval = (int)AllowAfter.TotalMilliseconds };
     readonly Button deny = new() { Text = "Deny", AutoSize = true, MinimumSize = new Size(88, 30) };
     bool answered;
+
+    /// <summary>Shown without becoming the active window: what the user is typing goes on going where it went.</summary>
+    protected override bool ShowWithoutActivation => true;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var p = base.CreateParams;
+            p.ExStyle |= 0x8;   // WS_EX_TOPMOST: above the other windows (the TopMost property would also activate it)
+            return p;
+        }
+    }
 
     public PairPrompt(string from, string address, string pc, string fingerprint, string user, DateTime deadlineUtc)
     {
@@ -114,7 +139,6 @@ internal sealed class PairPrompt : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
-        TopMost = true;
         ShowInTaskbar = true;
         Font = new Font("Segoe UI", 9.5f);
         AutoSize = true;
@@ -137,7 +161,7 @@ internal sealed class PairPrompt : Form
                                  "Settings → SSH keys.", below: 0));
         var countdown = new Label { AutoSize = true, Margin = new Padding(0, 10, 0, 0), ForeColor = SystemColors.GrayText };
         layout.Controls.Add(countdown);
-        var allow = new Button { Text = "Allow", AutoSize = true, MinimumSize = new Size(88, 30) };
+        var allow = new Button { Text = "Allow", AutoSize = true, MinimumSize = new Size(88, 30), Enabled = false };
         var buttons = new FlowLayoutPanel { FlowDirection = FlowDirection.RightToLeft, AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 10, 0, 0) };
         buttons.Controls.Add(deny);
         buttons.Controls.Add(allow);
@@ -145,6 +169,7 @@ internal sealed class PairPrompt : Form
         Controls.Add(layout);
         AcceptButton = deny;
         CancelButton = deny;
+        ActiveControl = deny;   // where the keyboard is once the user turns to this window
 
         // counted from the server's expiry, so a busy window or a sleeping PC doesn't stretch it
         int Left() => (int)Math.Ceiling((deadlineUtc - DateTime.UtcNow).TotalSeconds);
@@ -161,10 +186,15 @@ internal sealed class PairPrompt : Form
             else CloseUnanswered();
         };
         deny.Click += (_, _) => Answer(false);
-        Shown += (_, _) => { deny.Focus(); tick.Start(); };
+        unlock.Tick += (_, _) =>
+        {
+            unlock.Stop();
+            allow.Enabled = true;
+        };
+        Shown += (_, _) => { tick.Start(); unlock.Start(); };
         // closing the window with its X is a No
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) Answer(false, close: false); };
-        FormClosed += (_, _) => tick.Dispose();
+        FormClosed += (_, _) => { tick.Dispose(); unlock.Dispose(); };
     }
 
     void Answer(bool allowed, bool close = true)

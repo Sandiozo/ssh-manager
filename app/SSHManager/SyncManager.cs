@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Net;
-using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace SSHManager;
@@ -27,10 +26,10 @@ internal sealed class SyncPair
 /// "name (conflict PC date).ext"); a file deleted on one side and unchanged on the other is moved to the
 /// Recycle Bin here (when deleted on the PC) or not fetched again (when deleted here; nothing is deleted
 /// on the PC). Nothing is ever overwritten without its content being kept somewhere. A pass changes nothing
-/// when the PC's folder is missing or can't be listed, leaves alone what the PC couldn't read, and waits for
-/// "Sync now" before it would move much of the folder to the Recycle Bin at once.
+/// when the PC's folder is missing or can't be listed, leaves alone what the PC couldn't read, and asks in the
+/// app's own window before it moves much of the folder to the Recycle Bin at once.
 /// </summary>
-internal sealed class SyncManager(AppSettings settings, Func<string, Link?> linkFor, Action changed)
+internal sealed partial class SyncManager(AppSettings settings, Func<string, Link?> linkFor, Action changed)
 {
     public static readonly string[] Modes = ["to-pc", "from-pc", "two-way"];
     const double Slack = 2.0;   // seconds of modification-time difference that count as "the same"
@@ -42,14 +41,24 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         public string Kind = "idle";   // idle | syncing | error | waiting
         public string Message = "";
         public bool Running, Again;
-        /// <summary>Files a pass held back from the Recycle Bin (too many gone from the PC at once), and how many
-        /// of them the user then let go with "Sync now".</summary>
-        public int HeldGone, ConfirmedGone;
+        /// <summary>Files the last pass held back from the Recycle Bin (too many gone from the PC at once); null
+        /// once a pass ends any other way.</summary>
+        public Hold? Held;
+        /// <summary>The held files the user said Yes to: the next pass may recycle these and no others.</summary>
+        public HashSet<string>? Approved;
+        /// <summary>The error last written to the app's log, so a pass failing the same way every 30 seconds
+        /// doesn't fill it.</summary>
+        public string? LoggedError;
         public FileSystemWatcher? Watcher;
         public System.Threading.Timer? Debounce;
     }
 
+    /// <summary>Files gone from the PC that a pass didn't recycle: their keys, how many files were synced, and a
+    /// few names to show.</summary>
+    sealed record Hold(HashSet<string> Keys, int Synced, string[] Sample);
+
     readonly Dictionary<string, State> states = [];
+    int asking;   // 1 while a question about held files is on screen
     System.Threading.Timer? timer;
     long lastProgressPost;
 
@@ -190,6 +199,8 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         if (Find(id) is not { } pair) return;
         pair.Enabled = !pair.Enabled;
         settings.Save();
+        var s = StateOf(pair);
+        lock (s) { s.Held = null; s.Approved = null; }   // a paused pair holds nothing: a later pass looks again
         if (pair.Enabled) Run(pair);
         changed();
     }
@@ -198,9 +209,39 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
     {
         if (Find(id) is not { } pair) return;
         var s = StateOf(pair);
-        // the pair is showing files held back from the Recycle Bin: this click lets the next pass go ahead
-        lock (s) s.ConfirmedGone = s.HeldGone;
-        Run(pair, force: true);
+        Hold? held;
+        lock (s) held = s.Held;
+        if (held is null) { Run(pair, force: true); return; }
+        // Files are held back from the Recycle Bin. A page can ask for "Sync now" (even the PC's own dashboard,
+        // whose listing is in doubt), so only a Yes in the app's own window lets them go.
+        if (Interlocked.Exchange(ref asking, 1) == 1) return;   // one question at a time
+        _ = ConfirmHeldAsync(pair, s, held);
+    }
+
+    async Task ConfirmHeldAsync(SyncPair pair, State s, Hold held)
+    {
+        try
+        {
+            string pcName;
+            lock (settings.Gate) pcName = settings.Pcs.FirstOrDefault(x => x.Id == pair.PcId)?.DisplayName ?? "the PC";
+            var n = held.Keys.Count;
+            var more = n - held.Sample.Length;
+            var text = $"{n} of the {held.Synced} synced files are no longer in the folder on the PC.\n\n" +
+                $"On {pcName}: {pair.Remote}\nOn this computer: {pair.Local}\n\n" +
+                $"For example:\n  {string.Join("\n  ", held.Sample)}{(more > 0 ? $"\n  and {more} more" : "")}\n\n" +
+                $"Move these {n} files on this computer to the Recycle Bin too?\n\n" +
+                "Choose No if the PC's folder may be on a drive that isn't plugged in, was renamed or moved, or if you aren't sure. " +
+                "Nothing changes unless you choose Yes.";
+            if (!await AskAsync("Folder sync", text).ConfigureAwait(false)) return;
+            lock (s)
+            {
+                if (s.Held is null) return;   // something happened since (PC disconnected, paused): look again first
+                s.Approved = held.Keys;       // only these files: anything else gone holds again
+            }
+            Run(pair, force: true);
+        }
+        catch (Exception e) { AppLog.Write("Folder sync question", e); }
+        finally { Interlocked.Exchange(ref asking, 0); }
     }
 
     void SyncAll()
@@ -286,11 +327,17 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
             while (true)
             {
                 lock (s) s.Again = false;
-                try { await SyncOnceAsync(pair).ConfigureAwait(false); }
+                try
+                {
+                    await SyncOnceAsync(pair).ConfigureAwait(false);
+                    lock (s) s.LoggedError = null;
+                }
                 catch (Exception e)
                 {
+                    bool fresh;
+                    lock (s) { fresh = s.LoggedError != e.Message; s.LoggedError = e.Message; }
                     Set(pair, "error", e.Message);
-                    AppLog.Write($"Sync {pair.Id} failed", e);
+                    if (fresh) AppLog.Write($"Sync {pair.Id} failed", e);   // the same error again isn't logged again
                 }
                 lock (s)
                 {
@@ -482,20 +529,31 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
 
     async Task SyncOnceAsync(SyncPair pair)
     {
+        var s = StateOf(pair);
+        HashSet<string>? approved;
+        lock (s) { approved = s.Approved; s.Approved = null; }   // a Yes counts for this one pass, whatever happens in it
+        Hold? hold = null;
+        try { hold = await PassAsync(pair, approved).ConfigureAwait(false); }
+        finally { lock (s) s.Held = hold; }   // a pass that ends any other way (early, failed, went ahead) holds nothing
+    }
+
+    /// <summary>One pass; returns what it held back from the Recycle Bin, or null when it held nothing.</summary>
+    async Task<Hold?> PassAsync(SyncPair pair, HashSet<string>? approved)
+    {
         var link = linkFor(pair.PcId);
         if (link is null || link.State != LinkState.Connected)
         {
             Set(pair, "waiting", link is null ? "the PC was removed from SSH Manager" : "waiting for the PC to connect");
-            return;
+            return null;
         }
         if (Validate(Clone(pair), checkOverlap: false) is { } invalid)
         {
             Set(pair, "error", invalid);
-            return;
+            return null;
         }
         if (!Directory.Exists(pair.Local))
         {
-            if (pair.Mode != "from-pc") { Set(pair, "error", "The local folder doesn't exist."); return; }
+            if (pair.Mode != "from-pc") { Set(pair, "error", "The local folder doesn't exist."); return null; }
             Directory.CreateDirectory(pair.Local);
         }
         var pcName = link.Pc.DisplayName;
@@ -506,49 +564,56 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         // anything is changed: read as an empty folder, it would send every synced file here to the Recycle Bin.
         var remote = new Dictionary<string, FileInfoLite>(StringComparer.OrdinalIgnoreCase);
         var unsafeNames = 0;
-        var skipped = new List<string>();   // places on the PC that exist but weren't listed: left alone
+        var skipped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);   // places on the PC that exist but weren't listed: left alone
+        var complete = true;   // false: an older server, which can't say whether it left anything out
         using (var r = await Http.SendAsync(link.Request(HttpMethod.Get, "/api/fs/tree?path=" + Uri.EscapeDataString(pair.Remote))).ConfigureAwait(false))
         {
             if (r.StatusCode == HttpStatusCode.NotFound)
             {
-                if (files.Values.Any(e => e.HasR))
-                    throw new InvalidOperationException($"{pair.Remote} isn't on the PC any more (a drive that isn't plugged in, or a folder that was renamed or moved?). " +
-                        "To be safe, nothing was changed. Make the folder available on the PC again; to start over with a new empty folder there, remove this sync and add it again.");
+                // to-pc never recycles here, so it can simply make the folder again
+                if (pair.Mode != "to-pc" && files.Values.Any(e => e.HasR))
+                    throw new InvalidOperationException($"The PC's folder is missing: nothing was changed. {pair.Remote} isn't there (a drive that isn't plugged in, or a folder that was renamed or moved?). " +
+                        "Make it available again, or remove this sync and add it again to start over.");
                 if (pair.Mode == "from-pc")
-                    throw new InvalidOperationException($"{pair.Remote} wasn't found on the PC.");
-                // first run: make the folder there
+                    throw new InvalidOperationException($"The PC's folder wasn't found: {pair.Remote}");
                 using var mk = await Http.SendAsync(link.Request(HttpMethod.Post, "/api/fs/mkdir", JsonContent(new { path = pair.Remote }))).ConfigureAwait(false);
                 if (!mk.IsSuccessStatusCode)
-                    throw new InvalidOperationException($"Couldn't make {pair.Remote} on the PC: {await ErrorText(mk).ConfigureAwait(false)}");
+                    throw new InvalidOperationException($"Couldn't make the folder on the PC: {await ErrorText(mk).ConfigureAwait(false)}");
             }
             else if (r.StatusCode == HttpStatusCode.Conflict)   // the folder is there but can't be listed: the PC says why
-                throw new InvalidOperationException((await ErrorText(r).ConfigureAwait(false)).TrimEnd('.', ' ') + ". Nothing was changed.");
+                throw new InvalidOperationException($"The PC's folder can't be read: nothing was changed. {await ErrorText(r).ConfigureAwait(false)}");
             else if (!r.IsSuccessStatusCode)
                 throw new InvalidOperationException($"Couldn't list {pair.Remote} on the PC: {await ErrorText(r).ConfigureAwait(false)}");
             else
             {
-                using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync().ConfigureAwait(false));
+                var unclear = new InvalidOperationException("The PC's answer couldn't be understood: nothing was changed.");
+                JsonDocument doc;
+                try { doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync().ConfigureAwait(false)); }
+                catch (JsonException) { throw unclear; }
+                using var _ = doc;
                 var root = doc.RootElement;
                 if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("files", out var list) || list.ValueKind != JsonValueKind.Array)
-                    throw new InvalidOperationException($"The PC's answer about {pair.Remote} had no list of files. Nothing was changed.");
+                    throw new InvalidOperationException("The PC's answer had no list of files: nothing was changed.");
                 foreach (var f in list.EnumerateArray())
                 {
-                    var raw = f.TryGetProperty("rel", out var rv) && rv.ValueKind == JsonValueKind.String ? rv.GetString() ?? "" : "";
-                    if (SafeRel(raw) is not { } rel) { unsafeNames++; continue; }
+                    if (f.ValueKind != JsonValueKind.Object || !f.TryGetProperty("rel", out var rv) || rv.ValueKind != JsonValueKind.String) throw unclear;
+                    if (SafeRel(rv.GetString() ?? "") is not { } rel) { unsafeNames++; continue; }
                     if (Ignored(pair, rel)) continue;
-                    var size = f.TryGetProperty("size", out var sv) && sv.TryGetInt64(out var sz) ? sz : -1;
-                    var mtime = f.TryGetProperty("mtime", out var mv) && mv.TryGetDouble(out var mt) ? mt : 0;
-                    if (size >= 0) remote[rel] = new(rel, size, mtime);
+                    if (f.TryGetProperty("size", out var sv) && sv.ValueKind == JsonValueKind.Number && sv.TryGetInt64(out var size) && size >= 0 &&
+                        f.TryGetProperty("mtime", out var mv) && mv.ValueKind == JsonValueKind.Number && mv.TryGetDouble(out var mtime) && double.IsFinite(mtime))
+                        remote[rel] = new(rel, size, mtime);
+                    else skipped.Add(rel);   // there, but its size or time can't be read: left alone, not taken for deleted
                 }
-                // older servers don't send "skipped": nothing was left out
-                if (root.TryGetProperty("skipped", out var sk) && sk.ValueKind != JsonValueKind.Null)
+                // older servers send no "skipped"; a newer one sends [] when nothing was left out
+                if (!root.TryGetProperty("skipped", out var sk) || sk.ValueKind == JsonValueKind.Null) complete = false;
+                else
                 {
-                    if (sk.ValueKind != JsonValueKind.Array || sk.EnumerateArray().Any(x => x.ValueKind != JsonValueKind.String))
-                        throw new InvalidOperationException($"The PC's answer about {pair.Remote} didn't say clearly what it left out. Nothing was changed.");
+                    if (sk.ValueKind != JsonValueKind.Array) throw unclear;
                     foreach (var x in sk.EnumerateArray())
                     {
-                        var rel = (x.GetString() ?? "").Replace('\\', '/').Trim('/');
-                        skipped.Add(rel == "." ? "" : rel);
+                        if (x.ValueKind != JsonValueKind.String || !CleanRel(x.GetString()!))
+                            throw new InvalidOperationException($"The PC's answer couldn't be understood: nothing was changed. (It named a place it left out as \"{x}\".)");
+                        if (!Ignored(pair, x.GetString()!)) skipped.Add(x.GetString()!);   // inside an ignored folder: not synced anyway
                     }
                 }
             }
@@ -559,33 +624,26 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         // Files in or under a place the PC couldn't list are left exactly as they are in this pass: not sent,
         // not fetched, not recycled, and what is remembered about them stays.
         var keys = local.Keys.Union(remote.Keys, StringComparer.OrdinalIgnoreCase).Union(files.Keys, StringComparer.OrdinalIgnoreCase)
-            .Where(k => !UnderAny(k, skipped))
+            .Where(k => !InSkipped(k, skipped))
             .OrderBy(k => k, StringComparer.OrdinalIgnoreCase).ToList();
 
         // Guard against a listing that is wrong without saying so: when much of the folder seems gone from the
-        // PC at once, nothing happens until the user confirms with "Sync now".
-        if (pair.Mode != "to-pc")
+        // PC at once, nothing happens until the user says Yes to exactly these files (see SyncNow).
+        if (pair.Mode != "to-pc" && complete)
         {
             var synced = keys.Count(k => files.GetValueOrDefault(k) is { HasL: true, HasR: true });
-            var gone = keys.Count(k => DeletedOnPc(local.TryGetValue(k, out var a) ? a : null, remote.ContainsKey(k), files.GetValueOrDefault(k)));
-            var tooMany = TooManyGone(gone, synced);
-            var s = StateOf(pair);
-            int confirmed;
-            lock (s)
+            var gone = keys.Where(k => DeletedOnPc(local.TryGetValue(k, out var a) ? a : null, remote.ContainsKey(k), files.GetValueOrDefault(k)))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (TooManyGone(gone.Count, synced) && !(approved is not null && gone.IsSubsetOf(approved)))
             {
-                confirmed = s.ConfirmedGone;   // a confirmation counts for one pass only
-                s.ConfirmedGone = 0;
-                s.HeldGone = tooMany && confirmed < gone ? gone : 0;
-            }
-            if (tooMany && confirmed < gone)
-            {
-                Set(pair, "error", $"{gone} of the {synced} synced files are no longer in {pair.Remote} on the PC. To be safe, nothing was changed. " +
-                    "If they were deleted there on purpose, click Sync now (⟳) to move them to the Recycle Bin here too; if not, check the folder on the PC.");
-                return;
+                Set(pair, "error", $"{gone.Count} files are gone from the PC: click Sync now (⟳) to review. Nothing was changed. " +
+                    $"({gone.Count} of the {synced} synced files are no longer in {pair.Remote}.)");
+                var sample = gone.Select(k => files[k].Name).Order(StringComparer.OrdinalIgnoreCase).Take(5).ToArray();
+                return new Hold(gone, synced, sample);
             }
         }
 
-        int sent = 0, received = 0, conflicts = 0, recycled = 0, failed = 0, done = 0;
+        int sent = 0, received = 0, conflicts = 0, recycled = 0, failed = 0, done = 0, keptGone = 0;
         string? firstError = null;
         var work = keys.Count(k => !(local.TryGetValue(k, out var a) && remote.TryGetValue(k, out var b) && Same(a, b)));
         var lastSave = Environment.TickCount64;
@@ -701,6 +759,12 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
                 else if (L is { } onlyL)
                 {
                     var deletedOnPc = DeletedOnPc(onlyL, false, S);
+                    if (deletedOnPc && !complete && pair.Mode != "to-pc")
+                    {
+                        // an older server can't say whether its listing is whole: keep the file, remember nothing new
+                        keptGone++;
+                        continue;
+                    }
                     if (pair.Mode == "from-pc" || (pair.Mode == "two-way" && deletedOnPc))
                     {
                         if (deletedOnPc)
@@ -752,7 +816,7 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
                 lastSave = Environment.TickCount64;
             }
         }
-        if (Find(pair.Id) is null) return;   // removed while running
+        if (Find(pair.Id) is null) return null;   // removed while running
         SaveState(pair, state);
 
         var parts = new List<string>();
@@ -762,12 +826,15 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         if (recycled > 0) parts.Add($"{recycled} moved to the Recycle Bin");
         if (unsafeNames > 0) parts.Add($"{unsafeNames} unsafe name{(unsafeNames == 1 ? "" : "s")} skipped");
         var summary = parts.Count == 0 ? $"up to date · {DateTime.Now:HH:mm}" : $"synced {DateTime.Now:HH:mm} · {string.Join(", ", parts)}";
+        // the page shows one line, cut short: what the user may need to know comes first
         if (skipped.Count > 0)
-            summary += skipped.Count == 1
-                ? " · 1 place on the PC couldn't be read (a locked or linked folder or file); it was left as it is"
-                : $" · {skipped.Count} places on the PC couldn't be read (locked or linked folders or files); they were left as they are";
-        if (failed > 0) Set(pair, "error", $"{summary} · {failed} failed, retried later ({firstError})");
+            summary = (skipped.Count == 1 ? "1 place on the PC couldn't be read and was left as it is" :
+                $"{skipped.Count} places on the PC couldn't be read and were left as they are") + " (locked or linked folders or files) · " + summary;
+        if (keptGone > 0)
+            summary = $"{keptGone} file{(keptGone == 1 ? "" : "s")} deleted on the PC kept here: update SSH Manager on that PC to copy deletions · " + summary;
+        if (failed > 0) Set(pair, "error", $"{failed} failed, retried later ({firstError}) · {summary}");
         else Set(pair, "idle", summary);
+        return null;
     }
 
     /// <summary>A file here that was synced, is unchanged since, and is no longer on the PC: it was deleted there,
@@ -775,13 +842,26 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
     static bool DeletedOnPc(FileInfoLite? local, bool onPc, Entry? saved) =>
         local is { } l && !onPc && saved is { HasL: true, HasR: true } && Same(l.Size, l.Mtime, saved.Ls, saved.Lm);
 
-    /// <summary>More than 20 files and more than half of the synced ones gone from the PC in one pass looks like
-    /// a folder that is unavailable or listed wrongly rather than files someone deleted. Below that, a mistake
-    /// costs little: the files are in the Recycle Bin.</summary>
-    static bool TooManyGone(int gone, int synced) => gone > 20 && gone * 2 > synced;
+    /// <summary>More than 200 files, or more than 20 that are over half of the synced ones, gone from the PC in
+    /// one pass looks like a folder that is unavailable or listed wrongly rather than files someone deleted.
+    /// Below that, a mistake costs little: the files are in the Recycle Bin.</summary>
+    static bool TooManyGone(int gone, int synced) => gone > 200 || (gone > 20 && gone * 2 > synced);
 
-    static bool UnderAny(string key, List<string> places) =>
-        places.Any(p => p == "" || key.Equals(p, StringComparison.OrdinalIgnoreCase) || key.StartsWith(p + "/", StringComparison.OrdinalIgnoreCase));
+    /// <summary>The key is one of the places or inside one: looks up the key and each folder above it.</summary>
+    static bool InSkipped(string key, HashSet<string> places)
+    {
+        if (places.Count == 0) return false;
+        var look = places.GetAlternateLookup<ReadOnlySpan<char>>();
+        var k = key.AsSpan();
+        for (var i = 0; i < k.Length; i++)
+            if (k[i] == '/' && look.Contains(k[..i])) return true;
+        return look.Contains(k);
+    }
+
+    /// <summary>A plain relative path in the listing's form ("a/b"): not empty or rooted, no "\", ":", "." or ".."
+    /// parts, no empty parts. A place the PC left out that isn't one could match nothing, so it can't be trusted.</summary>
+    static bool CleanRel(string rel) =>
+        rel != "" && rel.IndexOfAny(['\\', ':']) < 0 && rel.Split('/').All(part => part is not ("" or "." or ".."));
 
     /// <summary>The reason a server request failed: its "detail" when it sent one, else its text.</summary>
     static async Task<string> ErrorText(HttpResponseMessage r)
@@ -872,30 +952,5 @@ internal sealed class SyncManager(AppSettings settings, Func<string, Link?> link
         // only the file name; folders that differ only in case are left as they are
         if (!string.Equals(Path.GetDirectoryName(rel), Path.GetDirectoryName(newRel), StringComparison.Ordinal)) return;
         File.Move(LocalPath(pair, rel), LocalPath(pair, newRel));
-    }
-
-    // ---- Recycle Bin ----
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    struct ShFileOp
-    {
-        public IntPtr Hwnd;
-        public uint Func;
-        public string From;
-        public string? To;
-        public ushort Flags;
-        public bool Aborted;
-        public IntPtr NameMappings;
-        public string? Title;
-    }
-
-    [DllImport("shell32.dll", CharSet = CharSet.Unicode, EntryPoint = "SHFileOperationW")]
-    static extern int SHFileOperation(ref ShFileOp op);
-
-    static bool Recycle(string path)
-    {
-        // FO_DELETE with FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR
-        var op = new ShFileOp { Func = 3, From = path + "\0", Flags = 0x40 | 0x10 | 0x4 | 0x400 | 0x200 };
-        return SHFileOperation(ref op) == 0 && !op.Aborted && !File.Exists(path);
     }
 }

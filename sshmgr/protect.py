@@ -8,9 +8,17 @@
   in %ProgramData%\\ssh may be changed
 
 Paths are compared after resolving short (8.3) names, junctions and symbolic links, without case; folder
-walks resolve each folder they list, and file links by their target."""
+walks resolve the folder they start from, and file links by their target. A path is also checked as named
+(short names expanded, links not followed), so a .ssh folder that is a link to another folder stays
+protected when named through .ssh."""
+import ctypes
+import ctypes.wintypes as wt
 import os
 from pathlib import Path
+
+_kernel32 = ctypes.WinDLL("kernel32")
+_kernel32.GetLongPathNameW.argtypes = [wt.LPCWSTR, wt.LPWSTR, wt.DWORD]
+_kernel32.GetLongPathNameW.restype = wt.DWORD
 
 SELF = "AI agents can't read or change SSH Manager's own files (access token, settings, plugins, data folder)."
 KEYS = "AI agents can't read or change SSH keys."
@@ -29,6 +37,22 @@ def _real(p: str) -> str:
         return _norm(os.path.realpath(p))
     except (OSError, ValueError):
         return _norm(os.path.abspath(p))
+
+
+def _long(p: str) -> str:
+    """p with short (8.3) names replaced by long ones, as far as it exists, without following junctions or
+    links: the path as named, so a .ssh folder that is a link still shows as .ssh."""
+    tail = []
+    while True:
+        n = _kernel32.GetLongPathNameW(p, None, 0)
+        buf = ctypes.create_unicode_buffer(n) if n else None
+        if buf is not None and _kernel32.GetLongPathNameW(p, buf, n):
+            return os.path.join(buf.value, *reversed(tail))
+        head, name = os.path.split(p)
+        if not name or head == p:
+            return os.path.join(p, *reversed(tail))
+        tail.append(name)
+        p = head
 
 
 def _under(path: str, root: str) -> bool:
@@ -75,10 +99,12 @@ class Protect:
             return NETWORK
         if ":" in os.path.expandvars(raw)[2:]:
             return STREAM
-        p = _real(os.path.abspath(os.path.expandvars(raw)))
+        full = os.path.abspath(os.path.expandvars(raw))
+        p = _real(full)
         if p.startswith("\\\\"):   # a junction or link that leads to the network
             return NETWORK
-        if reason := self._hidden(p):
+        # where it leads, and how it is named (a .ssh folder may be a link to a folder named otherwise)
+        if reason := self._hidden(p) or self._hidden(_norm(_long(full))):
             return reason
         if write and _under(p, self.ssh):
             return SSH_CONFIG
@@ -90,20 +116,22 @@ class Protect:
                 return CONTAINS
         return None
 
-    def walk_filter(self):
-        """For one folder walk (zip download, tree): a check `hidden(path, link=False)` that says which
-        entries to leave out for agents. The walk may have started from a junction, an 8.3 short name or
-        another alias, so each folder is resolved once (walks list a folder's entries together and give
-        their long names); entries are then compared by name. `link`: the entry is a file link, so it is
-        checked by where it leads."""
-        last = ["", ""]   # (folder as walked, folder resolved)
+    def walk_filter(self, root: str):
+        """For a folder walk from `root` (zip download, tree): a check `hidden(path, link=False)` that says
+        which entries to leave out for agents. The root may be named through a junction, an 8.3 short name
+        or another alias, so it is resolved once; walks give long names and never enter links, so every
+        entry's real path is the root's real path plus the rest of its path. `link`: the entry is a file
+        link, so it is checked by where it leads."""
+        real_root = _real(root)
 
         def hidden(path: str, link: bool = False) -> bool:
             if link:
                 return self.why(path) is not None
-            folder, name = os.path.split(path)
-            if folder != last[0]:
-                last[:] = [folder, _real(folder)]
-            return self._hidden(_norm(os.path.join(last[1], name))) is not None
+            rest = path[len(root):]
+            if path.startswith(root) and (not rest or rest[0] == "\\" or root.endswith("\\")):
+                real = os.path.join(real_root, rest.lstrip("\\"))
+            else:   # not from this walk: resolve its folder
+                real = os.path.join(_real(os.path.dirname(path)), os.path.basename(path))
+            return self._hidden(_norm(real)) is not None
 
         return hidden

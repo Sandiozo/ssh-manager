@@ -78,6 +78,17 @@ def resolve(path: str) -> Path:
     return Path(os.path.abspath(p))
 
 
+def _gone(p: str) -> bool:
+    """p no longer exists (deleted since it was listed). A link whose target is missing still exists."""
+    try:
+        os.lstat(p)
+        return False
+    except (FileNotFoundError, NotADirectoryError):
+        return True
+    except OSError:
+        return False
+
+
 def entry(p: Path) -> dict | None:
     try:
         st = p.stat()
@@ -90,12 +101,13 @@ def entry(p: Path) -> dict | None:
             "hidden": hidden}
 
 
-def walk(root: str, skip=None, errors: list | None = None, links: list | None = None):
+def walk(root: str, skip=None, errors: list | None = None, not_entered: list | None = None):
     """Like os.walk (top-down), but never enters junctions, symbolic links or other reparse-point folders,
     and never visits the same folder twice, so link loops can't make it run forever. `skip(path)` leaves
     entries out, and `skip(path, link=True)` file links (checked by where they lead); unreadable folders
-    and entries are added to `errors` as (path, reason), and folders not entered because they are links to
-    `links`."""
+    and entries are added to `errors` as (path, reason), and folders not entered because they are links or
+    were already visited (by another name, or a share that gives different folders the same id) to
+    `not_entered`."""
     seen: set[tuple[int, int]] = set()
     stack = [root]
     while stack:
@@ -104,6 +116,8 @@ def walk(root: str, skip=None, errors: list | None = None, links: list | None = 
             st = os.stat(top)
             key = (st.st_dev, st.st_ino)
             if st.st_ino and key in seen:
+                if not_entered is not None:
+                    not_entered.append(top)
                 continue
             seen.add(key)
             with os.scandir(top) as it:
@@ -127,8 +141,8 @@ def walk(root: str, skip=None, errors: list | None = None, links: list | None = 
             if attrs & FILE_ATTRIBUTE_DIRECTORY:
                 if not reparse:
                     dirs.append(e.name)
-                elif links is not None:
-                    links.append(e.path)
+                elif not_entered is not None:
+                    not_entered.append(e.path)
             else:
                 # a file link: an agent's walk checks where it leads (other reparse points, such as
                 # OneDrive files, don't lead to another path)
@@ -164,22 +178,22 @@ class _Sink:
         return out
 
 
-def _items(paths: list[Path], skip=None, errors: list | None = None):
+def _items(paths: list[Path], skip_for=None, errors: list | None = None):
     """(archive name, full path, is folder) for every file and folder under the given paths, found while
-    streaming (nothing is walked in advance)."""
+    streaming (nothing is walked in advance). `skip_for(folder)` gives the walk's skip for each folder."""
     for root in paths:
         base = root.parent
         if not root.is_dir():
             yield root.name, root, False
             continue
-        for dirpath, _, filenames in walk(str(root), skip, errors):
+        for dirpath, _, filenames in walk(str(root), skip_for(str(root)) if skip_for else None, errors):
             d = Path(dirpath)
             yield d.relative_to(base).as_posix() + "/", d, True
             for f in filenames:
                 yield (d / f).relative_to(base).as_posix(), d / f, False
 
 
-def zip_stream(paths: list[Path], skip=None, done=None):
+def zip_stream(paths: list[Path], skip_for=None, done=None):
     """Streams a zip of `paths`. Files that can't be read (locked, no access) are left out and listed in
     _files-not-included.txt inside the zip. `done(stats)` is called at the end (or when the download stops)."""
     sink = _Sink()
@@ -187,7 +201,7 @@ def zip_stream(paths: list[Path], skip=None, done=None):
     errors: list = []
     try:
         with zipfile.ZipFile(sink, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
-            for arcname, full, is_dir in _items(paths, skip, errors):
+            for arcname, full, is_dir in _items(paths, skip_for, errors):
                 try:
                     zi = zipfile.ZipInfo.from_file(full, arcname)
                     if is_dir:
@@ -343,16 +357,21 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
             raise HTTPException(403, why)
 
     def walk_skip(request: Request):
-        """What one folder walk leaves out: in-progress uploads, and for agents the protected paths however
-        the walk's folder was named, and file links that lead to them."""
-        hidden = protect.walk_filter() if agents_mod.is_agent(request) else None
+        """For this request, `skip_for(folder)`: what a walk of that folder leaves out. In-progress uploads,
+        and for agents the protected paths however the folder was named, and file links that lead to them."""
+        agent = agents_mod.is_agent(request)
 
-        def skip(path: str, link: bool = False) -> bool:
-            if link:
-                return bool(hidden and hidden(path, link=True))
-            return path.endswith(UPLOAD_SUFFIX) or bool(hidden and hidden(path))
+        def skip_for(root: str):
+            hidden = protect.walk_filter(root) if agent else None
 
-        return skip
+            def skip(path: str, link: bool = False) -> bool:
+                if link:
+                    return bool(hidden and hidden(path, link=True))
+                return path.endswith(UPLOAD_SUFFIX) or bool(hidden and hidden(path))
+
+            return skip
+
+        return skip_for
 
     @r.get("/roots")
     def roots():
@@ -389,8 +408,8 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
     def tree(request: Request, path: str, max_files: int = 100_000):
         """Every file under a folder with size and modification time (for folder sync). Junctions and links
         are not followed; uploads in progress are left out. `skipped` names what exists but is not in
-        `files` (folders that couldn't be read or are links, files that couldn't be read), so a sync never
-        takes them for deleted."""
+        `files` (folders that couldn't be read, are links or were already listed by another name, files that
+        couldn't be read), so a sync never takes them for deleted."""
         root = resolve(path)
         guard(request, root)
         try:
@@ -401,26 +420,36 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
             raise HTTPException(409, f"Can't read {root}: {e.strerror or e}")
         if not is_dir:
             raise HTTPException(404, f"Not a folder: {root}")
-        files, errors, links, unreadable = [], [], [], []
+        files, errors, not_entered, unreadable = [], [], [], []
 
         def rel(full: str) -> str:
             return Path(full).relative_to(root).as_posix()
 
-        for dirpath, _, filenames in walk(str(root), walk_skip(request), errors, links):
+        def check_skipped():   # never cut the list short without saying so
+            if len(errors) + len(not_entered) + len(unreadable) > max_files:
+                raise HTTPException(413, f"More than {max_files} files and folders under {root} could not be listed.")
+
+        for dirpath, _, filenames in walk(str(root), walk_skip(request)(str(root)), errors, not_entered):
             for name in filenames:
                 full = os.path.join(dirpath, name)
                 try:
                     st = os.stat(full)
                 except OSError:
-                    unreadable.append(rel(full))
+                    if not _gone(full):
+                        unreadable.append(rel(full))
                     continue
                 files.append({"rel": rel(full), "size": st.st_size, "mtime": st.st_mtime})
                 if len(files) > max_files:
                     raise HTTPException(413, f"More than {max_files} files under {root}.")
+            check_skipped()
+        check_skipped()
         for p, why in errors:
             if p == str(root):
+                if _gone(p):
+                    raise HTTPException(404, f"Not a folder: {root}")
                 raise HTTPException(409, f"Can't list {root}: {why}")
-        skipped = [rel(p) for p, _ in errors] + [rel(p) for p in links] + unreadable
+        # what was deleted while the walk ran is simply gone
+        skipped = [rel(p) for p in [p for p, _ in errors] + not_entered if not _gone(p)] + unreadable
         return {"root": str(root), "files": files, "skipped": skipped}
 
     @r.get("/download")

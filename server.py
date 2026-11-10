@@ -197,10 +197,18 @@ PLAIN_CSP = "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; for
 @app.middleware("http")
 async def guard(request: Request, call_next):
     response = await _guarded(request, call_next)
-    response.headers.setdefault("X-Content-Type-Options", "nosniff")
-    if request.url.path in ("/", "/login"):
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Content-Security-Policy"] = PAGE_CSP if response.status_code == 200 else PLAIN_CSP
+    h = response.headers
+    h.setdefault("X-Content-Type-Options", "nosniff")
+    path = request.url.path
+    if path in ("/", "/login") or path.startswith("/static/") and h.get("content-type", "").startswith("text/html"):
+        h["Content-Security-Policy"] = PAGE_CSP if response.status_code == 200 and path != "/login" else PLAIN_CSP
+    if h.get("content-type", "").startswith("text/html") or path in ("/", "/login"):
+        # no page of this server may be framed, plugin pages included: every localhost port is the same
+        # site, so another PC's dashboard in the same browser could otherwise frame it (the cookie is sent)
+        h["X-Frame-Options"] = "DENY"
+        csp = h.get("Content-Security-Policy", "")
+        if "frame-ancestors" not in csp:
+            h["Content-Security-Policy"] = f"{csp}; frame-ancestors 'none'" if csp else "frame-ancestors 'none'"
     return response
 
 
@@ -395,7 +403,17 @@ app.include_router(make_tools_router(config, activity, runner, who, agents, prot
 app.include_router(agents_mod.make_router(config, agents, activity, who))
 app.include_router(make_pairing_router(activity, lambda: monitor.host_name, who, address_of))
 loaded_plugins = plugins.load(plugins.PluginContext(config, HOME, monitor, activity, app))
-app.mount("/static", StaticFiles(directory=RES / "static"), name="static")
+class PageFiles(StaticFiles):
+    """The page's script, style and images. index.html is only served at "/" (with its security headers),
+    never as a second copy from this folder."""
+
+    async def get_response(self, path: str, scope):
+        if os.path.splitext(path.rstrip(". "))[1].lower() in (".html", ".htm"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return await super().get_response(path, scope)
+
+
+app.mount("/static", PageFiles(directory=RES / "static"), name="static")
 
 
 # ---- restart: applies a hand-edited config.json or a new/changed plugin ----
@@ -447,31 +465,57 @@ def restart_server(request: Request):
 # When the user signs in, the logon task starts a new instance in the desktop session; it finds the port
 # taken, and asks the old instance (with the token, which it reads from the same home folder) to quit.
 
-PYTHON_FLAGS = re.compile(r"^-[bBdEiIOPqRsSuv]+$")   # interpreter options that take no value
+# Python options before the script: flags (-u, -B ...), possibly followed by -X or -W, which take a value
+# (in the same argument, "-Xutf8", or in the next one, "-X utf8")
+PYTHON_OPTION = re.compile(r"^-[bBdEiIOPqRsSuv]*(?:([XW])(.*))?$")
 
 
-def _same_program(pid: int) -> bool:
-    """Process pid is this server program: installed, the same executable; from source, Python (this
-    one, or the base Python that a venv's python.exe starts) running this folder's server.py as its
-    script. The process' name and arguments alone prove nothing: any program can choose them."""
+def _script_of(args: list[str]) -> str | None:
+    """The script a Python command line runs (None for -c, -m or anything not understood)."""
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--":
+            return args[i + 1] if i + 1 < len(args) else None
+        if not a.startswith("-"):
+            return a
+        m = PYTHON_OPTION.match(a)
+        if not m or a == "-":
+            return None
+        i += 2 if m.group(1) and not m.group(2) else 1
+    return None
+
+
+def _not_same_program(pid: int) -> str | None:
+    """None when process pid is this server program, otherwise why not. Installed: the same executable.
+    From source: Python (this one, or the base Python that a venv's python.exe starts) running this
+    folder's server.py as its script. The process' name and arguments alone prove nothing: any program
+    can choose them. A process that can't be looked at counts as another program."""
     import psutil
     try:
         p = psutil.Process(pid)
         exe = os.path.normcase(p.exe())
         if home_mod.FROZEN:
-            return exe == os.path.normcase(sys.executable)
+            return None if exe == os.path.normcase(sys.executable) else f"it is {p.exe()}"
         pythons = {os.path.normcase(os.path.dirname(x)) for x in (sys.executable, getattr(sys, "_base_executable", "")) if x}
         if os.path.dirname(exe) not in pythons or not os.path.basename(exe).startswith("python"):
-            return False
-        args = p.cmdline()[1:]
-        while args and PYTHON_FLAGS.match(args[0]):
-            args = args[1:]
-        if not args:
-            return False
-        script = args[0] if os.path.isabs(args[0]) else os.path.join(p.cwd(), args[0])
-        return os.path.normcase(os.path.abspath(script)) == os.path.normcase(str(ROOT / "server.py"))
-    except (psutil.Error, OSError):
-        return False
+            return f"it is {p.exe()}, not this Python"
+        script = _script_of(p.cmdline()[1:])
+        if not script:
+            return "it doesn't run a script"
+        if not os.path.isabs(script):
+            script = os.path.join(p.cwd(), script)   # started with a relative path: from its working folder
+        if os.path.normcase(os.path.abspath(script)) != os.path.normcase(str(ROOT / "server.py")):
+            return f"it runs {script}"
+        return None
+    except psutil.AccessDenied:
+        return "it can't be looked at (no access to its program, command line or working folder)"
+    except (psutil.Error, OSError) as e:
+        return f"it can't be looked at ({e})"
+
+
+def _same_program(pid: int) -> bool:
+    return _not_same_program(pid) is None
 
 
 @app.post("/api/server/handover")
@@ -518,18 +562,29 @@ def take_over() -> bool:
     pid = listening_pid()
     if not pid or winsec.session_of(pid) != 0:
         return False
-    # the request carries the token: it only ever goes to this same program, checked before every try
-    # (another program may have taken the port, also while this waits)
-    if not _same_program(pid):
-        log.warning("port %s is held by a program in session 0 that isn't this SSH Manager server (pid %s); not "
-                    "sending it the token", PORT, pid)
-        return False
-    log.info("a server in session 0 (pid %s) has port %s; asking it to hand over to this desktop session", pid, PORT)
+    asked = None
     until = time.monotonic() + 600
     while time.monotonic() < until:
-        if pid != listening_pid() or not _same_program(pid):
-            log.warning("port %s is no longer held by the session-0 server (pid %s); not sending the token", PORT, pid)
+        # the request carries the token: it only ever goes to this same program. The listener is looked up
+        # again every round, since the session-0 server may restart (a new pid) or quit while this waits,
+        # or another program may take the port.
+        pid = listening_pid()
+        if not pid:
+            if not port_in_use():
+                log.info("the session-0 server has quit; taking over its port")
+                return True
+            log.warning("can't tell which program holds port %s; not sending it the token", PORT)
             return False
+        if winsec.session_of(pid) != 0:
+            log.info("port %s is now held by pid %s outside session 0; leaving it", PORT, pid)
+            return False
+        if why := _not_same_program(pid):
+            log.warning("port %s is held by pid %s in session 0, which isn't this SSH Manager server: %s. Not "
+                        "sending it the token", PORT, pid, why)
+            return False
+        if pid != asked:
+            log.info("a server in session 0 (pid %s) has port %s; asking it to hand over to this desktop session", pid, PORT)
+            asked = pid
         try:
             c = http.client.HTTPConnection("127.0.0.1", PORT, timeout=10)
             c.request("POST", "/api/server/handover", body=b"",

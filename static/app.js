@@ -564,7 +564,7 @@ const xfer = {
     $("#dock-bar").style.width = (total ? done / total * 100 : finished ? 100 : 0) + "%";
     const left = this.speed > 0 && !finished ? (total - done) / this.speed : null;
     $("#dock-stats").innerHTML = `<span>${doneCount}/${b.length} files · ${fmtBytes(done)} of ${fmtBytes(total)}</span>
-      <span>${finished ? "" : `${fmtBytes(this.speed)}/s${left != null && left < 86400 ? " · " + fmtDur(left) + " left" : ""}`}</span>`;
+      <span>${finished || !(this.speed > 0) ? "" : `${fmtBytes(this.speed)}/s${left != null && left < 86400 ? " · " + fmtDur(left) + " left" : ""}`}</span>`;
     if (this.showList) {
       $("#dock-list").innerHTML = b.slice().reverse().map(t => {
         const st = { queued: "waiting", active: (t.size ? Math.round((t.loaded || 0) / t.size * 100) : 0) + "%", done: "done",

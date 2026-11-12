@@ -32,6 +32,7 @@ MAX_OUTPUT = 50 * 1024 * 1024     # bytes of output written to a run's file; the
 LINGER = 2.0                      # seconds output is still kept after the run's own process has ended
 MAX_RUN_SECONDS = 7 * 24 * 3600   # the longest time limit a run can have
 STOP_WAIT = 5.0                   # seconds a Stop waits for the run's process to end
+READ_SIZE = 64 * 1024             # bytes read from a run's output at a time
 PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
 
 
@@ -215,7 +216,7 @@ class Runner:
             out = open(run.output, "w", encoding="utf-8", newline="\n")
         except OSError:
             out = None   # no output file (disk full, no access): the run still streams to the page
-        sink = {"out": out, "written": 0, "open": True}
+        sink = {"out": out, "written": 0, "open": True, "part": bytearray()}   # part: a line read up to now
         gate = threading.Lock()   # held while a line is kept; once sink["open"] is False nothing more is
 
         def keep(line: str):
@@ -239,17 +240,32 @@ class Runner:
                     del run.lines[:extra]
                     run.dropped += extra
 
+        def take(raw: bytes):   # one line of output (called holding gate)
+            line = raw.decode("utf-8", errors="replace").rstrip("\r")
+            decoded = decode_clixml(line)
+            for line in [line] if decoded is None else decoded:
+                keep(line)
+
         def read():
             # until every holder of the pipe has closed it: the run's process, and programs it started that
-            # got its output (they may run for days; what they write after the run has ended is dropped)
+            # got its output (they may run for days). Read in pieces of at most READ_SIZE: once the run has
+            # ended they are dropped as they come, also from a program that never writes a line end.
+            pipe = run.proc.stdout
             try:
-                for raw in iter(run.proc.stdout.readline, b""):
-                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                    decoded = decode_clixml(line)
+                while chunk := pipe.read1(READ_SIZE):
                     with gate:
-                        if sink["open"]:
-                            for line in [line] if decoded is None else decoded:
-                                keep(line)
+                        if not sink["open"]:
+                            continue
+                        sink["part"] += chunk
+                        if b"\n" in chunk:
+                            *lines, rest = sink["part"].split(b"\n")
+                            sink["part"] = bytearray(rest)
+                            for raw in lines:
+                                take(raw)
+                with gate:
+                    if sink["open"] and sink["part"]:   # the last line had no line end
+                        take(bytes(sink["part"]))
+                        sink["part"] = bytearray()
             except (OSError, ValueError):
                 pass
             finally:
@@ -269,6 +285,9 @@ class Runner:
             holds_output = reader.is_alive()
             started = still_running(run)
             with gate:
+                if sink["part"]:   # written before the end without a line end
+                    take(bytes(sink["part"]))
+                    sink["part"] = bytearray()
                 sink["open"] = False
                 if holds_output or started:
                     if len(started) > 1:

@@ -31,6 +31,7 @@ KEEP_RUNS = 50                    # finished runs kept (runs still going are alw
 MAX_OUTPUT = 50 * 1024 * 1024     # bytes of output written to a run's file; the rest is only streamed
 LINGER = 2.0                      # seconds output is still kept after the run's own process has ended
 MAX_RUN_SECONDS = 7 * 24 * 3600   # the longest time limit a run can have
+STOP_WAIT = 5.0                   # seconds a Stop waits for the run's process to end
 PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
 
 
@@ -140,6 +141,9 @@ class Run:
         self.t0 = time.time()
         self.proc: subprocess.Popen | None = None
         self.lock = threading.Lock()
+        self.stopping: str | None = None    # the status a Stop or the time limit asked for, set when the run has ended
+        self.stop_lock = threading.Lock()   # held by a Stop while it ends the process, and by the end of the run
+        self.finished = threading.Event()   # the run has ended: status, exit code and its last output are in
 
     def view(self, after: int = 0) -> dict:
         """Lines numbered from the start of the run: `after` is the `next` of the previous call."""
@@ -257,30 +261,34 @@ class Runner:
         reader = threading.Thread(target=read, daemon=True, name=f"run-{run.id}")
         reader.start()
         code = signed(run.proc.wait())
-        reader.join(LINGER)   # the pipe closes right away, unless a program the run started still has it
-        holds_output = reader.is_alive()
-        started = still_running(run)
-        with gate:
-            sink["open"] = False
-            if holds_output or started:
-                if len(started) > 1:
-                    what = "programs it started are still running: " + ", ".join(started)
-                else:
-                    what = "a program it started is still running" + (f": {started[0]}" if started else "")
-                later = " What it writes from now on isn't shown here." if holds_output else ""
-                keep(f"[The script has ended, but {what}.{later}]")
-            if sink["out"] is not None:
-                try:
-                    sink["out"].close()
-                except OSError:
-                    pass
-            with run.lock:
-                run.exit_code = code
-                run.left_running = holds_output or bool(started)
-                if run.status == "running":
-                    run.status = "done" if code == 0 else "failed"
-                run.ended = _iso()
-                run.t1 = time.time()
+        # the status is set last, with the exit code, end time and the last output, so whoever stops following
+        # the run at its first status other than "running" has all of it; a Stop that is still ending the
+        # process tree finishes first
+        with run.stop_lock:
+            reader.join(LINGER)   # the pipe closes right away, unless a program the run started still has it
+            holds_output = reader.is_alive()
+            started = still_running(run)
+            with gate:
+                sink["open"] = False
+                if holds_output or started:
+                    if len(started) > 1:
+                        what = "programs it started are still running: " + ", ".join(started)
+                    else:
+                        what = "a program it started is still running" + (f": {started[0]}" if started else "")
+                    later = " What it writes from now on isn't shown here." if holds_output else ""
+                    keep(f"[The script has ended, but {what}.{later}]")
+                if sink["out"] is not None:
+                    try:
+                        sink["out"].close()
+                    except OSError:
+                        pass
+                with run.lock:
+                    run.exit_code = code
+                    run.left_running = holds_output or bool(started)
+                    run.status = run.stopping or ("done" if code == 0 else "failed")
+                    run.ended = _iso()
+                    run.t1 = time.time()
+        run.finished.set()
         if timer is not None:
             timer.cancel()
         tail = "\n".join(run.lines[-200:])
@@ -290,21 +298,41 @@ class Runner:
         self._prune()
 
     def stop(self, run_id: str, status: str = "stopped") -> bool:
-        """Ends a run's process and the programs it started that still belong to it (its process tree). A run
-        whose process has ended is not stopped: programs it left running stay as they are."""
+        """Ends a run's process and the programs it started that still belong to it (its process tree). The
+        run gets `status` when it has ended, after its last output (this waits for that). A run whose process
+        has ended is not stopped: programs it left running stay as they are. False when there is nothing to
+        stop, or the process couldn't be ended (the run then goes on as before)."""
         run = self.runs.get(run_id)
         if not run or not run.proc:
             return False
-        with run.lock:
-            if run.status != "running" or run.proc.poll() is not None:
-                return False
-            run.status = status
-        try:
-            subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True,
-                           creationflags=CREATE_NO_WINDOW, timeout=30)
-        except (OSError, subprocess.TimeoutExpired):
-            run.proc.kill()
-        return True
+        with run.stop_lock:
+            with run.lock:
+                if run.status != "running" or run.proc.poll() is not None:
+                    return False
+                run.stopping = status
+            ended_by_itself = False
+            try:
+                r = subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True,
+                                   creationflags=CREATE_NO_WINDOW, timeout=30)
+                ended_by_itself = r.returncode == 128   # "not found": it ended on its own just before
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if not ended_by_itself:
+                try:
+                    run.proc.wait(STOP_WAIT)
+                except subprocess.TimeoutExpired:
+                    try:
+                        run.proc.kill()
+                        run.proc.wait(STOP_WAIT)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+            stopped = not ended_by_itself and run.proc.poll() is not None
+            if not stopped:
+                with run.lock:
+                    run.stopping = None
+        if stopped:
+            run.finished.wait(LINGER + 5)
+        return stopped
 
     def get(self, run_id: str) -> Run | None:
         return self.runs.get(run_id)

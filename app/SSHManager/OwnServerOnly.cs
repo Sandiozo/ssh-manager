@@ -11,20 +11,26 @@ namespace SSHManager;
 /// its host: a picture, a redirect, a WebSocket or a prefetch the page asks for on another PC's port would
 /// hand that server this PC's token. So the cookie is tied to the PC's port: the browser is started with
 /// port-bound cookies and the cookie is set for that port. The browser then never sends it anywhere else,
-/// whatever a page asks for, including what it fetches on its own (prefetch, prerender), and it costs
-/// nothing per request. A frame of another address is not shown in the view either (its request still goes
-/// out, without the token).
+/// whatever a page asks for (prefetch and prerender included), and it costs nothing per request. The
+/// cookies of ports the PC had before are deleted, as another PC's connection may get such a port later.
+/// A frame of another address is not shown in the view either (its request still goes out, without the token).
 ///
 /// A browser update could drop port binding; each view checks that it holds. Where it doesn't, the view
-/// itself is held to the PC's own server instead: every page and frame is checked before its request is
-/// sent (and at each step of a redirect), and every page that is let in gets a content security policy on
-/// top of any it brings, so what it loads, posts or connects to has to be on its own server too. Workers are
-/// then only allowed from the page's own script (blob:), as those inherit the policy. That leaves what the
-/// browser prefetches by itself, and it costs a little: it uses the browser's request interception
-/// (DevTools protocol), for pages and frames only, but uploads get slower with it switched on. The policy
-/// can only be added by handing the browser the page again with it (the interception ignores changed
-/// headers on an answer that is let through), so a page is read whole first; downloads and answers the
-/// browser only shows as they are (pictures, text) are let through untouched.
+/// falls back to being held to the PC's own server by checking its pages: every page and frame is checked
+/// before its request is sent (and at each step of a redirect), and every page that is let in gets a content
+/// security policy on top of any it brings, so what it loads, posts or connects to has to be on its own
+/// server too. Workers are then only allowed from the page's own script (blob:), as those inherit the
+/// policy; service workers kept in the profile from before are deleted first, as nothing checks theirs.
+///
+/// The fallback does not stop everything: a page can still have the browser prefetch or prerender an address
+/// on another local port (one speculation-rules script or link rel=prerender in it is enough), and that
+/// request carries the PC's token. The browser makes it outside the page, where neither the interception nor
+/// the policy reaches. So the fallback is logged as a warning, once per start: it means a browser update
+/// took port binding away and this needs fixing. It also costs a little: it uses the browser's request
+/// interception (DevTools protocol), for pages and frames only, but uploads get slower with it switched on.
+/// The policy can only be added by handing the browser the page again with it (the interception ignores
+/// changed headers on an answer that is let through), so a page is read whole first; downloads and answers
+/// the browser only shows as they are (pictures, text) are let through untouched.
 /// </summary>
 internal static class OwnServerOnly
 {
@@ -50,21 +56,33 @@ internal static class OwnServerOnly
             if (!Allowed(a.Uri, port)) a.Cancel = true;
         };
         var name = $"sshmgr_token_{port}";
-        using var set = JsonDocument.Parse(await CallAsync(core, "Network.setCookie", new
+        // the cookies of the ports this PC had before (its connection came back on another one): once another
+        // PC's connection gets such a port, a request this PC's page makes there would carry this PC's token
+        foreach (var old in await core.CookieManager.GetCookiesAsync(""))
+            if (old.Name.StartsWith(CookiePrefix, StringComparison.Ordinal) && old.Name != name) core.CookieManager.DeleteCookie(old);
+        var url = $"http://localhost:{port}/";
+        await CallAsync(core, "Network.setCookie", new
         {
-            name, value = token, url = $"http://localhost:{port}/", path = "/", httpOnly = true, sameSite = "Strict",
-            sourceScheme = "NonSecure", sourcePort = port,
-        }));
-        if (!set.RootElement.TryGetProperty("success", out var ok) || ok.ValueKind != JsonValueKind.True)
-            throw new InvalidOperationException("The browser didn't take the access cookie.");
+            name, value = token, url, path = "/", httpOnly = true, sameSite = "Strict", sourceScheme = "NonSecure", sourcePort = port,
+        });
+        // a cookie the browser refuses comes back as an error; the answer's "success" is deprecated (always true)
+        // and may go, so it isn't read: the cookie has to be there for the PC's own address
+        if (!await HasCookieAsync(core, url, name, token)) throw new InvalidOperationException("The browser didn't take the access cookie.");
+        var left = (await core.CookieManager.GetCookiesAsync("")).Count(c => c.Name.StartsWith(CookiePrefix, StringComparison.Ordinal) && c.Name != name);
+        if (left > 0) throw new InvalidOperationException("The browser didn't delete the access cookies of this PC's earlier connections.");
         // the cookies the browser would send to the next port: this one isn't among them where it is bound
-        using var other = JsonDocument.Parse(await CallAsync(core, "Network.getCookies", new { urls = new[] { $"http://localhost:{(port == 65535 ? 1 : port + 1)}/" } }));
-        if (!other.RootElement.GetProperty("cookies").EnumerateArray().Any(c => c.TryGetProperty("name", out var n) && n.GetString() == name)) return;
+        if (!await HasCookieAsync(core, $"http://localhost:{(port == 65535 ? 1 : port + 1)}/", name)) return;
         if (!toldUnbound)
         {
             toldUnbound = true;
-            AppLog.Write("This browser version doesn't keep a cookie to its port; PC views are held to their own server by checking their pages.");
+            AppLog.Write($"WARNING: this browser version ({core.Environment.BrowserVersionString}) doesn't keep a cookie to its port, so PC views " +
+                "fall back to checking their pages. The fallback doesn't stop everything: a PC's page can still have the browser prefetch " +
+                "or prerender an address on another local port, and that request carries the PC's access token. SSH Manager needs " +
+                "an update for this browser version: please report this line.");
         }
+        // service workers registered while binding held: their requests are not checked, and one can answer
+        // for a page of its own, without the policy
+        await core.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.ServiceWorkers);
         core.GetDevToolsProtocolEventReceiver("Fetch.requestPaused").DevToolsProtocolEventReceived += (_, e) =>
             _ = PausedAsync(core, e.ParameterObjectAsJson, port);
         // pages and frames only, before the request is sent and when its answer starts
@@ -137,6 +155,17 @@ internal static class OwnServerOnly
 
     /// <summary>The view (or its browser process) went away while a page was checked.</summary>
     static bool Closed(Exception ex) => ex is InvalidOperationException || ex.HResult == unchecked((int)0x8007139F);
+
+    const string CookiePrefix = "sshmgr_token_";
+
+    /// <summary>Whether the browser would send the cookie (with that value, when given) to this address.</summary>
+    static async Task<bool> HasCookieAsync(CoreWebView2 core, string url, string name, string? value = null)
+    {
+        using var doc = JsonDocument.Parse(await CallAsync(core, "Network.getCookies", new { urls = new[] { url } }));
+        return doc.RootElement.GetProperty("cookies").EnumerateArray().Any(c =>
+            c.TryGetProperty("name", out var n) && n.GetString() == name
+            && (value is null || (c.TryGetProperty("value", out var v) && v.GetString() == value)));
+    }
 
     static Task FailAsync(CoreWebView2 core, string? id) => CallAsync(core, "Fetch.failRequest", new { requestId = id, errorReason = "BlockedByClient" });
 

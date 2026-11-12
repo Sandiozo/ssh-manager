@@ -843,7 +843,7 @@ $("#set-keys").onclick = async e => {
   const fp = b.closest("tr").dataset.fp, label = settingsUi.draft.keys[fp] || fp;
   if (!confirm(`Stop allowing "${label}"?\n\nThe computer using this key will no longer be able to connect to ${hostName}. A backup of the key file is kept in SSH Manager's data folder on ${hostName}.`)) return;
   try { await api("/api/keys/remove", { method: "POST", json: { fingerprint: fp } }); toast("Key removed"); await settingsUi.load(); settingsUi.render(); settingsUi.loadKeys(); }
-  catch (err) { toast(err.message, true); }
+  catch (err) { toast(err.message, true); settingsUi.loadKeys(); }   // the key file may have changed all the same
 };
 $("#key-add").onclick = async () => {
   try {
@@ -851,7 +851,7 @@ $("#key-add").onclick = async () => {
     $("#key-text").value = ""; $("#key-label").value = ""; $("#addkey").open = false;
     toast("Key allowed. That computer can now connect.");
     await settingsUi.load(); settingsUi.render(); settingsUi.loadKeys();
-  } catch (err) { toast(err.message, true); }
+  } catch (err) { toast(err.message, true); settingsUi.loadKeys(); }   // the key may have been added all the same
 };
 $("#set-shortcuts").oninput = e => {
   const tr = e.target.closest("tr[data-i]"); if (!tr || !e.target.dataset.f) return;

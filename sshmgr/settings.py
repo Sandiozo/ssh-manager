@@ -132,23 +132,25 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
                 who) -> APIRouter:
     r = APIRouter(prefix="/api")
 
-    def save():
-        cfgfile.save(config, config_path)   # callers hold cfgfile.lock around their change + save
-
-    def store(changes: dict):
+    def store(changes: dict, failed: str = "Couldn't save the settings ({reason}). Nothing was changed; try again."):
         """Writes config.json with these changes and only then uses them, so a write that fails (config.json
-        held open by another program, a full disk) changes nothing and trying again does it again. Callers
-        hold cfgfile.lock."""
+        held open by another program, a full disk) changes nothing and trying again does it again; `failed`
+        is the answer then. Callers hold cfgfile.lock."""
         try:
             cfgfile.save({**config, **changes}, config_path)
         except OSError as e:
             reason = (e.strerror or str(e)).strip().rstrip(".")
-            raise HTTPException(503, f"Couldn't save the settings ({reason}). Nothing was changed; try again.")
+            raise HTTPException(503, failed.format(reason=reason))
         config.update(changes)
+
+    def key_labels() -> dict:
+        """The SSH keys' labels by fingerprint (none when a hand-edited config.json has something else there)."""
+        labels = config.get("keys")
+        return labels if isinstance(labels, dict) else {}
 
     def current() -> dict:
         return {"name": config.get("name", ""), "computer_name": os.environ.get("COMPUTERNAME", ""),
-                "peers": config.get("peers", []), "keys": config.get("keys", {}),
+                "peers": config.get("peers", []), "keys": key_labels(),
                 "bookmarks": shortcuts(config), "default_upload": config.get("default_upload", ""),
                 "auto_update": config.get("auto_update", True), "port": config.get("port", 8765),
                 "actions": actions_shown(config.get("actions", [])), "logs": config.get("logs", []),
@@ -283,25 +285,31 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
     def get_keys():
         data = keys.list_keys()
         usage = monitor.key_usage()
-        labels = config.get("keys", {})
+        labels = key_labels()
         for k in data["keys"]:
             u = usage.get(k["fingerprint"], {})
             k.update(label=labels.get(k["fingerprint"], ""), last_used=u.get("last"),
                      last_client=u.get("client"), in_use=u.get("open", False))
         return data
 
+    # A key is added to or removed from the key file first, then its label is saved in config.json. When
+    # that save fails the key file has changed all the same: the answer says so, and the activity log has it.
     @r.post("/keys/add")
     def add_key(request: Request, body: AddKeyBody):
         try:
             k = keys.add_key(body.public_key, data_dir)
         except keys.KeyError_ as e:
             raise HTTPException(400, str(e))
-        if body.label.strip():
-            with cfgfile.lock:
-                config.setdefault("keys", {})[k["fingerprint"]] = body.label.strip()
-                save()
-        activity.add("setup", action="key-added", client=who(request), fingerprint=k["fingerprint"],
-                     label=body.label.strip() or k["comment"])
+        label = body.label.strip()
+        try:
+            if label:
+                with cfgfile.lock:
+                    store({"keys": {**key_labels(), k["fingerprint"]: label}},
+                          "The key was added and can be used to connect, but its label couldn't be saved "
+                          "({reason}). Give it the label in Settings.")
+        finally:
+            activity.add("setup", action="key-added", client=who(request), fingerprint=k["fingerprint"],
+                         label=label or k["comment"])
         return k
 
     @r.post("/keys/remove")
@@ -313,10 +321,17 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             keys.remove_key(body.fingerprint, data_dir)
         except keys.KeyError_ as e:
             raise HTTPException(400, str(e))
-        with cfgfile.lock:
-            label = config.get("keys", {}).pop(body.fingerprint, "")
-            save()
-        activity.add("setup", action="key-removed", client=who(request), fingerprint=body.fingerprint, label=label)
+        label = ""
+        try:
+            with cfgfile.lock:
+                labels = key_labels()
+                if body.fingerprint in labels:
+                    label = labels[body.fingerprint]
+                    store({"keys": {fp: v for fp, v in labels.items() if fp != body.fingerprint}},
+                          "The key was removed and can't be used to connect any more, but its label couldn't be "
+                          "taken out of the settings ({reason}).")
+        finally:
+            activity.add("setup", action="key-removed", client=who(request), fingerprint=body.fingerprint, label=label)
         return {"removed": body.fingerprint}
 
     return r

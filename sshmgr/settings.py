@@ -86,9 +86,21 @@ def same_folder(a: str, b: str) -> bool:
     return bool(folder_key(a)) and folder_key(a) == folder_key(b)
 
 
+def usable_shortcut(b) -> bool:
+    return isinstance(b, dict) and all(isinstance(b.get(k), str) and b[k].strip() for k in ("name", "path"))
+
+
+def shortcuts(config: dict) -> list[dict]:
+    """The folder shortcuts in use: the entries in config.json with a name and a path (text). Others (a
+    hand-edited path that is a number, no name, an entry that isn't an object) are left out wherever shortcuts
+    are read, and a full save drops them."""
+    items = config.get("bookmarks")
+    return [b for b in items if usable_shortcut(b)] if isinstance(items, list) else []
+
+
 def has_shortcut(config: dict, path: str) -> bool:
     """A folder shortcut leads to this folder (the star in Files)."""
-    return any(same_folder(b.get("path", ""), path) for b in config.get("bookmarks", []))
+    return any(same_folder(b["path"], path) for b in shortcuts(config))
 
 
 ACTION_ID_MAX = 40
@@ -137,7 +149,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
     def current() -> dict:
         return {"name": config.get("name", ""), "computer_name": os.environ.get("COMPUTERNAME", ""),
                 "peers": config.get("peers", []), "keys": config.get("keys", {}),
-                "bookmarks": config.get("bookmarks", []), "default_upload": config.get("default_upload", ""),
+                "bookmarks": shortcuts(config), "default_upload": config.get("default_upload", ""),
                 "auto_update": config.get("auto_update", True), "port": config.get("port", 8765),
                 "actions": actions_shown(config.get("actions", [])), "logs": config.get("logs", []),
                 "screen_preview": config.get("screen_preview", True), "screen_apps": config.get("screen_apps", []),
@@ -213,6 +225,11 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
     def noted(request: Request, what: str):
         activity.add("setup", action="settings", client=who(request), changed=[what])
 
+    def saved_shortcuts() -> list:
+        """The shortcuts as config.json has them, the unusable ones too (the star changes only its own)."""
+        items = config.get("bookmarks")
+        return items if isinstance(items, list) else []
+
     @r.post("/settings/bookmarks/add")
     def add_shortcut(request: Request, body: AddShortcutBody):
         """Adds a folder shortcut (nothing changes when one leads to that folder already). `shortcut`: the one
@@ -224,7 +241,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
         with cfgfile.lock:
             shortcut = None if has_shortcut(config, path) else {"name": name, "path": path}
             if shortcut:
-                store({"bookmarks": [*config.get("bookmarks", []), shortcut]})
+                store({"bookmarks": [*saved_shortcuts(), shortcut]})
             after = current()
         if shortcut:
             noted(request, "bookmarks")
@@ -235,10 +252,11 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
         """Removes every shortcut that leads to a folder (nothing changes when none does). `removed`: those
         shortcuts, as they were saved."""
         with cfgfile.lock:
-            shortcuts = config.get("bookmarks", [])
-            removed = [b for b in shortcuts if same_folder(b.get("path", ""), body.path)]
+            def leads_there(b) -> bool:
+                return usable_shortcut(b) and same_folder(b["path"], body.path)
+            removed = [b for b in saved_shortcuts() if leads_there(b)]
             if removed:
-                store({"bookmarks": [b for b in shortcuts if not same_folder(b.get("path", ""), body.path)]})
+                store({"bookmarks": [b for b in saved_shortcuts() if not leads_there(b)]})
             after = current()
         if removed:
             noted(request, "bookmarks")

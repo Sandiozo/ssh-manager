@@ -25,7 +25,7 @@ from send2trash import send2trash
 
 from . import agents as agents_mod
 from .activity import ActivityLog
-from .settings import has_shortcut
+from .settings import has_shortcut, shortcuts
 
 CHUNK = 1 << 20
 UPLOAD_SUFFIX = ".sshmgr-upload"     # an upload in progress; never listed, never synced
@@ -385,7 +385,7 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
             except OSError:
                 pass
         bookmarks = []
-        for b in config.get("bookmarks", []):
+        for b in shortcuts(config):
             p = os.path.expandvars(b["path"])
             bookmarks.append({"name": b["name"], "path": p, "exists": os.path.isdir(p)})
         return {"drives": drives, "bookmarks": bookmarks, **({"starred": has_shortcut(config, path)} if path else {})}

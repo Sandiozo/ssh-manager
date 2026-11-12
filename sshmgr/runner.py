@@ -3,8 +3,14 @@ so the dashboard can stream it. Runs inherit the server's rights (normally admin
 user's desktop session, so a script can also start programs with a window).
 
 The last MAX_LINES lines of each run are kept in memory for streaming; the complete output is also
-written to <data>/runs/<id>.log, which can be downloaded while the run is among the last KEEP_RUNS."""
+written to <data>/runs/<id>.log, which can be downloaded while the run is among the last KEEP_RUNS.
+
+A run ends when its own PowerShell process ends, also when a program it started (a server, an app) keeps
+running: such a program may hold on to the run's output pipe for as long as it runs. What it writes in the
+first LINGER seconds after that is kept; later output is read and dropped (so the program never stalls on
+a full pipe), and the run says that a program it started is still running."""
 import base64
+import ctypes
 import html
 import os
 import re
@@ -12,13 +18,17 @@ import subprocess
 import threading
 import time
 import uuid
+from ctypes import wintypes
 from datetime import datetime, timezone
 from pathlib import Path
+
+import psutil
 
 CREATE_NO_WINDOW = 0x08000000
 MAX_LINES = 5000
 KEEP_RUNS = 50                    # finished runs kept (runs still going are always kept)
 MAX_OUTPUT = 50 * 1024 * 1024     # bytes of output written to a run's file; the rest is only streamed
+LINGER = 2.0                      # seconds output is still kept after the run's own process has ended
 PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
 
 
@@ -50,6 +60,61 @@ def _iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+_k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+_k32.Process32FirstW.argtypes = _k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+_k32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+
+class _ProcessEntry(ctypes.Structure):   # PROCESSENTRY32W
+    _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+                ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+                ("ppid", wintypes.DWORD), ("priority", ctypes.c_long), ("flags", wintypes.DWORD),
+                ("exe", ctypes.c_wchar * 260)]
+
+
+def _processes() -> list[tuple[int, int, str]]:
+    """(pid, parent pid, program) of every process, from one snapshot (psutil takes a snapshot for every
+    process' parent, which takes seconds on a busy PC)."""
+    snap = _k32.CreateToolhelp32Snapshot(2, 0)   # TH32CS_SNAPPROCESS
+    if not snap or snap == wintypes.HANDLE(-1).value:
+        raise OSError(ctypes.get_last_error(), "no process snapshot")
+    try:
+        entry = _ProcessEntry(size=ctypes.sizeof(_ProcessEntry))
+        out = []
+        more = _k32.Process32FirstW(snap, ctypes.byref(entry))
+        while more:
+            out.append((entry.pid, entry.ppid, entry.exe))
+            more = _k32.Process32NextW(snap, ctypes.byref(entry))
+        return out
+    finally:
+        _k32.CloseHandle(snap)
+
+
+def still_running(run: "Run") -> list[str]:
+    """Programs the run's process started that are still running, as "name (process N)". Windows keeps a
+    program's parent process id after the parent has ended, and the run's process id isn't given to another
+    process while run.proc holds its handle. A program started by one that has ended itself isn't found
+    (the run then only knows that its output pipe is still open). The console's own conhost is left out."""
+    found = []
+    try:
+        for pid, ppid, name in _processes():
+            if ppid != run.proc.pid or name.lower() == "conhost.exe":
+                continue
+            try:
+                if psutil.Process(pid).create_time() < run.t0 - 1:
+                    continue   # older than the run: an earlier process with the same parent id
+            except psutil.NoSuchProcess:
+                continue
+            except psutil.Error:
+                pass
+            found.append(f"{name} (process {pid})")
+    except OSError:
+        return []
+    return found[:5] + ([f"{len(found) - 5} more"] if len(found) > 5 else [])
+
+
 class Run:
     def __init__(self, title: str, script: str, client: str, action_id: str | None, output: Path, agent: str = ""):
         self.id = uuid.uuid4().hex[:12]
@@ -59,6 +124,7 @@ class Run:
         self.dropped = 0          # lines no longer in memory (still in the output file)
         self.status = "running"   # running | done | failed | stopped | timeout
         self.exit_code: int | None = None
+        self.left_running = False  # a program the run started was still running when the run ended
         self.started = _iso()
         self.ended: str | None = None
         self.t0 = time.time()
@@ -70,7 +136,7 @@ class Run:
         with self.lock:
             start = max(0, after - self.dropped)
             return {"id": self.id, "title": self.title, "status": self.status, "exit_code": self.exit_code,
-                    "started": self.started, "ended": self.ended, "client": self.client, "action_id": self.action_id,
+                    "left_running": self.left_running, "started": self.started, "ended": self.ended, "client": self.client, "action_id": self.action_id,
                     "duration_s": round((time.time() if not self.ended else self.t1) - self.t0, 1),
                     "lines": self.lines[start:], "next": self.dropped + len(self.lines),
                     "skipped": max(0, self.dropped - after),   # lines between `after` and the first returned one
@@ -126,52 +192,87 @@ class Runner:
             return any(r.status == "running" for r in self.runs.values())
 
     def _pump(self, run: Run, timeout: float):
+        timer = None
         if timeout:   # enforced here, so the limit holds even when whoever started the run went away
-            timer = threading.Timer(timeout, lambda: run.status == "running" and self.stop(run.id, "timeout"))
+            timer = threading.Timer(timeout, lambda: self.stop(run.id, "timeout"))
             timer.daemon = True
             timer.start()
         try:
             out = open(run.output, "w", encoding="utf-8", newline="\n")
         except OSError:
             out = None   # no output file (disk full, no access): the run still streams to the page
-        written = 0
-        try:
-            for raw in iter(run.proc.stdout.readline, b""):
-                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-                decoded = decode_clixml(line)
-                for line in [line] if decoded is None else decoded:
-                    if out is not None:
-                        try:
-                            if written + len(line) + 1 > MAX_OUTPUT:
-                                out.write(f"[output truncated: only the first {MAX_OUTPUT // (1024 * 1024)} MB are kept "
-                                          "in this file]\n")
-                                out.close()
-                                out = None
-                            else:
-                                out.write(line + "\n")
-                                out.flush()
-                                written += len(line.encode("utf-8", errors="replace")) + 1
-                        except OSError:
-                            out = None
-                    with run.lock:
-                        run.lines.append(line)
-                        if len(run.lines) > MAX_LINES:
-                            extra = len(run.lines) - MAX_LINES
-                            del run.lines[:extra]
-                            run.dropped += extra
-        finally:
-            if out is not None:
+        sink = {"out": out, "written": 0, "open": True}
+        gate = threading.Lock()   # held while a line is kept; once sink["open"] is False nothing more is
+
+        def keep(line: str):
+            f = sink["out"]
+            if f is not None:
                 try:
-                    out.close()
+                    if sink["written"] + len(line) + 1 > MAX_OUTPUT:
+                        f.write(f"[output truncated: only the first {MAX_OUTPUT // (1024 * 1024)} MB are kept in this file]\n")
+                        f.close()
+                        sink["out"] = None
+                    else:
+                        f.write(line + "\n")
+                        f.flush()
+                        sink["written"] += len(line.encode("utf-8", errors="replace")) + 1
+                except OSError:
+                    sink["out"] = None
+            with run.lock:
+                run.lines.append(line)
+                if len(run.lines) > MAX_LINES:
+                    extra = len(run.lines) - MAX_LINES
+                    del run.lines[:extra]
+                    run.dropped += extra
+
+        def read():
+            # until every holder of the pipe has closed it: the run's process, and programs it started that
+            # got its output (they may run for days; what they write after the run has ended is dropped)
+            try:
+                for raw in iter(run.proc.stdout.readline, b""):
+                    line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    decoded = decode_clixml(line)
+                    with gate:
+                        if sink["open"]:
+                            for line in [line] if decoded is None else decoded:
+                                keep(line)
+            except (OSError, ValueError):
+                pass
+            finally:
+                try:
+                    run.proc.stdout.close()
                 except OSError:
                     pass
+
+        reader = threading.Thread(target=read, daemon=True, name=f"run-{run.id}")
+        reader.start()
         code = signed(run.proc.wait())
-        with run.lock:
-            run.exit_code = code
-            if run.status == "running":
-                run.status = "done" if code == 0 else "failed"
-            run.ended = _iso()
-            run.t1 = time.time()
+        reader.join(LINGER)   # the pipe closes right away, unless a program the run started still has it
+        holds_output = reader.is_alive()
+        started = still_running(run)
+        with gate:
+            sink["open"] = False
+            if holds_output or started:
+                if len(started) > 1:
+                    what = "programs it started are still running: " + ", ".join(started)
+                else:
+                    what = "a program it started is still running" + (f": {started[0]}" if started else "")
+                later = " What it writes from now on isn't shown here." if holds_output else ""
+                keep(f"[The script has ended, but {what}.{later}]")
+            if sink["out"] is not None:
+                try:
+                    sink["out"].close()
+                except OSError:
+                    pass
+            with run.lock:
+                run.exit_code = code
+                run.left_running = holds_output or bool(started)
+                if run.status == "running":
+                    run.status = "done" if code == 0 else "failed"
+                run.ended = _iso()
+                run.t1 = time.time()
+        if timer is not None:
+            timer.cancel()
         tail = "\n".join(run.lines[-200:])
         self.activity.add("action", ts=run.started, client=run.client, title=run.title, script=run.script[:20000],
                           output=tail, exit_code=code, status=run.status, duration_s=round(run.t1 - run.t0, 1),
@@ -179,10 +280,15 @@ class Runner:
         self._prune()
 
     def stop(self, run_id: str, status: str = "stopped") -> bool:
+        """Ends a run's process and the programs it started that still belong to it (its process tree). A run
+        whose process has ended is not stopped: programs it left running stay as they are."""
         run = self.runs.get(run_id)
-        if not run or run.status != "running" or not run.proc:
+        if not run or not run.proc:
             return False
-        run.status = status
+        with run.lock:
+            if run.status != "running" or run.proc.poll() is not None:
+                return False
+            run.status = status
         try:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True,
                            creationflags=CREATE_NO_WINDOW, timeout=30)

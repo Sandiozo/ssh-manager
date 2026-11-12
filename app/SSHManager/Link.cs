@@ -43,6 +43,13 @@ internal sealed partial class Link : IDisposable
     readonly int preferredPort;
     readonly CancellationTokenSource stop = new();
     readonly SemaphoreSlim retryNow = new(0);
+    /// <summary>How often Reconnect was called. Each attempt notes the count when it starts; when it changes
+    /// before the attempt is connected, the attempt starts over (it may have read the entry before it was
+    /// changed), and a connection that is up ends.</summary>
+    int reconnects;
+    /// <summary>The count when the current attempt started (used by the link's own loop only).</summary>
+    int attemptReconnects;
+    bool Restarted => Volatile.Read(ref reconnects) != attemptReconnects;
     readonly object sshLock = new();
     Process? ssh;
     readonly List<string> sshOutput = [];
@@ -83,10 +90,12 @@ internal sealed partial class Link : IDisposable
 
     public void Start() => _ = Task.Run(() => RunAsync(stop.Token));
 
-    /// <summary>Drop the current connection (if any) and connect again right away.</summary>
+    /// <summary>Drop the current connection (if any) and connect again right away, with what the entry says
+    /// now: an attempt under way, whatever it is doing, doesn't end connected but starts over.</summary>
     public void Reconnect(bool resetBackoff = false)
     {
         if (resetBackoff) this.resetBackoff = true;
+        Interlocked.Increment(ref reconnects);   // before ssh is ended: an attempt that fails because of it knows why
         KillSsh();
         retryNow.Release();
     }
@@ -105,6 +114,9 @@ internal sealed partial class Link : IDisposable
         while (!ct.IsCancellationRequested)
         {
             if (resetBackoff) { resetBackoff = false; attempt = 0; }
+            // a Reconnect from here on is seen by this attempt; the ones before are what it is for
+            attemptReconnects = Volatile.Read(ref reconnects);
+            while (retryNow.CurrentCount > 0) retryNow.Wait(0);
             Set(LinkState.Connecting, attempt == 0 ? $"Connecting to {Pc.DisplayName}…" : $"Reconnecting to {Pc.DisplayName} (attempt {attempt + 1})…");
             string reason;
             try
@@ -115,11 +127,12 @@ internal sealed partial class Link : IDisposable
             catch (Exception e) { reason = e.Message; }
             finally { KillSsh(); }
             if (ct.IsCancellationRequested) break;
+            if (Restarted) continue;   // Reconnect was called during the attempt: a fresh one, right away
             if (reason == "") { attempt = 0; continue; }   // reconnect immediately (e.g. learned the server's port)
 
             attempt++;
             Set(LinkState.Disconnected, reason);
-            while (retryNow.CurrentCount > 0) retryNow.Wait(0);
+            // a Reconnect from now on ends the wait
             try { await retryNow.WaitAsync(TimeSpan.FromSeconds(Math.Min(30, 2 * attempt)), ct); } catch (OperationCanceledException) { break; }
             if (resetBackoff) { resetBackoff = false; attempt = 0; }
         }
@@ -187,6 +200,8 @@ internal sealed partial class Link : IDisposable
             var lookupName = byAddress && computer != "" ? computer : Pc.LookupName;
             var host = byAddress && IPAddress.TryParse(reachedAt, out _) ? reachedAt : Pc.Host;
             if (name.Length > 64 || name.Any(char.IsControl)) name = "";
+            // the entry was changed meanwhile: what this connection found is not written over it
+            if (Restarted) return false;
             if ((name != "" && name != Pc.PcName) || mac != Pc.Mac || !ips.SequenceEqual(Pc.Ips) || lookupName != Pc.LookupName || host != Pc.Host)
             {
                 if (name != "") Pc.PcName = name;
@@ -248,10 +263,12 @@ internal sealed partial class Link : IDisposable
         Token = remoteToken ?? "";
         AppSecret = remoteAppSecret ?? "";
         await LearnNameAsync(ct, learnAddress: false);
+        if (Restarted) return "";   // asked to reconnect meanwhile: start over
         Set(LinkState.Connected, "Connected (this PC)");
         string? taken = null;
-        // also notice someone else taking the port over while the server is restarting
-        await WatchAsync(Port, () => (taken = PortOwner.CheckServer(Port, folder, nothingIsOk: true)) is not null, ct);
+        // also notice someone else taking the port over while the server is restarting, and a Reconnect
+        // (there is no ssh to end here)
+        await WatchAsync(Port, () => Restarted || (taken = PortOwner.CheckServer(Port, folder, nothingIsOk: true)) is not null, ct);
         return taken ?? "SSH Manager's server on this PC stopped answering.";
     }
 
@@ -313,6 +330,9 @@ internal sealed partial class Link : IDisposable
             return $"Couldn't check {Pc.DisplayName}'s identity (host key), so SSH Manager did not connect.\n\n{e.Message}" +
                    (e.Passes ? "\n\nSSH Manager tries again by itself." : "");
         }
+        // The entry may change while an attempt runs (Change connection): Reconnect can't end an ssh that isn't
+        // started yet, so the attempt looks itself, here and until it is connected, and starts over
+        if (Restarted) return "";
         var firstUse = trust.AcceptNew;
         if (!firstUse)
         {
@@ -327,6 +347,7 @@ internal sealed partial class Link : IDisposable
         var deadline = DateTime.UtcNow.AddSeconds(45);
         while (true)
         {
+            if (Restarted) return "";   // also when it came while ssh was starting (the name lookup can take seconds)
             if (remoteError is { } err) return err;
             if (RemotePortSeen is { } rp && rp != remotePort)
             {
@@ -356,6 +377,7 @@ internal sealed partial class Link : IDisposable
         if (!await LearnNameAsync(ct, learnAddress: true, checkOnly: firstUse)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
         if (firstUse)
         {
+            if (Restarted) return "";   // not the identity of what the entry may lead to now
             // it is the PC (it let this computer in and its server answers): this key is its identity from now on.
             // Unless another key was saved for it meanwhile: then connect again, held to that one
             try
@@ -370,11 +392,12 @@ internal sealed partial class Link : IDisposable
             save();
             if (!await LearnNameAsync(ct, learnAddress: true)) return $"SSH Manager on {Pc.DisplayName} didn't accept the login.";
         }
+        if (Restarted) return "";
         Set(LinkState.Connected, "Connected over SSH");
         connected();
         Process? proc;
         lock (sshLock) proc = ssh;
-        await WatchAsync(Port, () => proc is null || Exited(proc), ct);
+        await WatchAsync(Port, () => proc is null || Exited(proc) || Restarted, ct);
         return proc is not null && Exited(proc) ? DescribeSshFailure(firstUse) : $"{Pc.DisplayName} stopped answering.";
     }
 

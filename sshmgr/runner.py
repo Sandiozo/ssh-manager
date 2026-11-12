@@ -79,6 +79,8 @@ _k32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
 _k32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
 _k32.Process32FirstW.argtypes = _k32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
 _k32.CloseHandle.argtypes = [wintypes.HANDLE]
+_k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+_k32.TerminateProcess.restype = wintypes.BOOL
 
 
 class _ProcessEntry(ctypes.Structure):   # PROCESSENTRY32W
@@ -106,15 +108,14 @@ def _processes() -> list[tuple[int, int, str]]:
         _k32.CloseHandle(snap)
 
 
-def still_running(run: "Run") -> list[str]:
-    """Programs the run's process started that are still running, as "name (process N)". Windows keeps a
-    program's parent process id after the parent has ended, and the run's process id isn't given to another
-    process while run.proc holds its handle. A program started by one that has ended itself isn't found
-    (the run then only knows that its output pipe is still open). The console's own conhost is left out."""
+def _children(run: "Run") -> list[tuple[int, str]]:
+    """(process id, program) of the programs the run's process started that are still running. Windows keeps
+    a program's parent process id after the parent has ended, and the run's process id isn't given to another
+    process while run.proc holds its handle. A program started by one that has ended itself isn't found."""
     found = []
     try:
         for pid, ppid, name in _processes():
-            if ppid != run.proc.pid or name.lower() == "conhost.exe":
+            if ppid != run.proc.pid:
                 continue
             try:
                 if psutil.Process(pid).create_time() < run.t0 - 1:
@@ -123,10 +124,42 @@ def still_running(run: "Run") -> list[str]:
                 continue
             except psutil.Error:
                 pass
-            found.append(f"{name} (process {pid})")
+            found.append((pid, name))
     except OSError:
         return []
+    return found
+
+
+def still_running(run: "Run") -> list[str]:
+    """Programs the run's process started that are still running, as "name (process N)" (see _children; for
+    one started by a program that has ended the run only knows that its output pipe is still open). The
+    console's own conhost is left out."""
+    found = [f"{name} (process {pid})" for pid, name in _children(run) if name.lower() != "conhost.exe"]
     return found[:5] + ([f"{len(found) - 5} more"] if len(found) > 5 else [])
+
+
+def end_process(proc: subprocess.Popen) -> bool:
+    """Ends a process at once (exit code 1, as taskkill /F gives). True when this ended it. False when it had
+    ended or was ending by itself: Windows decides that in one step and doesn't end a process that is already
+    exiting, which then keeps its own exit code (also false if it couldn't be ended at all)."""
+    return bool(_k32.TerminateProcess(int(proc._handle), 1))
+
+
+def end_programs(run: "Run"):
+    """Ends the programs the run's process started and the ones they started (the rest of its process tree),
+    parents first. Called once that process has been ended, so it can't start more."""
+    procs = []
+    for pid, _ in _children(run):
+        try:
+            p = psutil.Process(pid)
+            procs += [p, *p.children(recursive=True)]
+        except psutil.Error:
+            pass
+    for p in procs:
+        try:
+            p.kill()   # psutil makes sure the process id still belongs to that process
+        except psutil.Error:
+            pass
 
 
 class Run:
@@ -324,9 +357,11 @@ class Runner:
 
     def stop(self, run_id: str, status: str = "stopped") -> bool:
         """Ends a run's process and the programs it started that still belong to it (its process tree). The
-        run gets `status` when it has ended, after its last output (this waits for that). A run whose process
-        has ended is not stopped: programs it left running stay as they are. False when there is nothing to
-        stop, or the process couldn't be ended (the run then goes on as before)."""
+        run gets `status` when it has ended, after its last output (this waits for that). What counts is
+        whether this ended the run's own process: one that had ended or was ending by itself (also as Stop
+        came) is not stopped and keeps its own status and exit code, and programs it left running stay as they
+        are. False when there is nothing to stop, the process couldn't be ended (the run goes on as before),
+        or it hasn't ended within STOP_WAIT (it then gets `status` when it has)."""
         run = self.runs.get(run_id)
         if not run or not run.proc:
             return False
@@ -334,30 +369,18 @@ class Runner:
             with run.lock:
                 if run.status != "running" or run.proc.poll() is not None:
                     return False
-                run.stopping = status
-            ended_by_itself = False
-            try:
-                r = subprocess.run(["taskkill", "/T", "/F", "/PID", str(run.proc.pid)], capture_output=True,
-                                   creationflags=CREATE_NO_WINDOW, timeout=30)
-                ended_by_itself = r.returncode == 128   # "not found": it ended on its own just before
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-            if not ended_by_itself:
-                try:
-                    run.proc.wait(STOP_WAIT)
-                except subprocess.TimeoutExpired:
-                    try:
-                        run.proc.kill()
-                        run.proc.wait(STOP_WAIT)
-                    except (OSError, subprocess.TimeoutExpired):
-                        pass
-            stopped = not ended_by_itself and run.proc.poll() is not None
-            if not stopped:
+            if run.stopping is None:   # (else an earlier Stop ended it and Windows is still at it)
+                if not end_process(run.proc):   # first, so it can't start more programs
+                    return False
                 with run.lock:
-                    run.stopping = None
-        if stopped:
-            run.finished.wait(LINGER + 5)
-        return stopped
+                    run.stopping = status
+            end_programs(run)
+            try:
+                run.proc.wait(STOP_WAIT)
+            except subprocess.TimeoutExpired:
+                return False
+        run.finished.wait(LINGER + 5)
+        return True
 
     def get(self, run_id: str) -> Run | None:
         return self.runs.get(run_id)

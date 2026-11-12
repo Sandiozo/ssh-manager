@@ -149,7 +149,7 @@ internal sealed class MainForm : Form
         menu.Items.Add("Check for updates", null, async (_, _) => await AppLog.GuardAsync("Check for updates", async () =>
         {
             await updater.CheckAsync();
-            Balloon("SSH Manager", updater.Available ? $"Version {updater.Latest} is available." : updater.Error ?? $"You have the latest version ({updater.Current}).", ToolTipIcon.Info, force: true);
+            Balloon("SSH Manager", updater.Available ? $"Version {updater.Latest} is available. {updater.Problem}".TrimEnd() : updater.Error ?? $"You have the latest version ({updater.Current}).", ToolTipIcon.Info, force: true);
         }));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitApp());
@@ -1081,7 +1081,7 @@ internal sealed class MainForm : Form
             if (updater.Status != "idle")
                 appUpdate = new { text = updater.Status == "downloading" ? "Downloading the SSH Manager update…" : "Installing the update…", canInstall = false };
             else if (updater.Available)
-                appUpdate = new { text = $"SSH Manager {updater.Latest} is available (you have {updater.Current}).", canInstall = AppUpdater.IsInstalled() };
+                appUpdate = new { text = $"SSH Manager {updater.Latest} is available (you have {updater.Current}). {updater.Problem}".TrimEnd(), canInstall = AppUpdater.IsInstalled() };
             else if (updater.Error is { } err)
                 appUpdate = new { text = err, canInstall = false };
         }

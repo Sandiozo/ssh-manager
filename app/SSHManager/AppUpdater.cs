@@ -42,6 +42,11 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
     public bool Available { get; private set; }
     public string Status { get; private set; } = "idle";   // idle | downloading | verifying | installing
     public string? Error { get; private set; }
+    /// <summary>Why the last try to install the version on offer failed, for as long as that failure is on record
+    /// (it is kept with the back-off, so the next check or a restart doesn't lose it).</summary>
+    public string? LastFailure { get; private set; }
+    /// <summary>What to show with the version on offer: what just went wrong, else why the last try failed.</summary>
+    public string? Problem => Error ?? LastFailure;
     public event Action? Changed;
     string? assetUrl, shaUrl, sigUrl, announced;
 
@@ -130,6 +135,8 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
             Available = assetUrl is not null && Latest is not null && Newer(Latest, Current);
             Error = Available && (shaUrl is null || sigUrl is null)
                 ? $"SSH Manager {Latest} has no signature or checksum, so it isn't installed from here. Download it from GitHub." : null;
+            var state = LoadState();
+            LastFailure = Available && state.FailedVersion == Latest ? state.FailedReason : null;
             if (Available && !was && !(settings.AutoUpdate && IsInstalled() && UserIsAdmin()))
             {
                 announced = Latest;
@@ -226,11 +233,7 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
                 state.Declined = version;   // UAC: no; don't ask again on its own for this version
                 Error = "The update was cancelled.";
             }
-            else
-            {
-                RecordFailure(state, version);
-                Error = "Update failed: " + e.Message;
-            }
+            else Failed(state, version, "Update failed: " + e.Message);
             SaveState(state);
             Status = "idle";
             Changed?.Invoke();
@@ -250,11 +253,7 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
             var code = process.ExitCode;
             var state = LoadState();
             state.Pending = null;
-            if (code != 0)
-            {
-                RecordFailure(state, version);
-                Error = $"The installer for {version} stopped (exit code {code}).";
-            }
+            if (code != 0) Failed(state, version, $"The installer for {version} stopped (exit code {code}).");
             SaveState(state);
         }
         catch (Exception) { Error = $"The update to {version} didn't finish."; }
@@ -270,24 +269,31 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
         {
             if (ParseVersion(Current).CompareTo(ParseVersion(pending)) >= 0)
             {
-                if (state.FailedVersion == pending) state.FailedVersion = null;
+                if (state.FailedVersion == pending) (state.FailedVersion, state.FailedReason) = (null, null);
             }
-            else
-            {
-                RecordFailure(state, pending);
-                Error = $"The update to {pending} didn't finish; this PC still has {Current}.";
-            }
+            else Failed(state, pending, $"The update to {pending} didn't finish; this PC still has {Current}.");
             state.Pending = null;
             SaveState(state);
         }
         CleanFolder();
     }
 
-    static void RecordFailure(UpdateState state, string version)
+    /// <summary>A try to install <paramref name="version"/> failed: recorded for the back-off together with why, which
+    /// is shown with that version while it is on offer, and written to the app's log.</summary>
+    void Failed(UpdateState state, string version, string why)
+    {
+        RecordFailure(state, version, why);
+        Error = why;
+        if (version == Latest) LastFailure = why;
+        AppLog.Write(Regex.Replace($"Update to {version}: {why}", @"\p{C}", " "));   // one line, whatever the release says
+    }
+
+    static void RecordFailure(UpdateState state, string version, string why)
     {
         state.FailedCount = state.FailedVersion == version ? state.FailedCount + 1 : 1;
         state.FailedVersion = version;
         state.FailedAt = DateTime.UtcNow;
+        state.FailedReason = why;
     }
 
     /// <summary>Old downloaded installers (also where versions before 1.7 put them).</summary>
@@ -453,6 +459,7 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
         public string? FailedVersion { get; set; }
         public DateTime FailedAt { get; set; }
         public int FailedCount { get; set; }
+        public string? FailedReason { get; set; }
     }
 
     static UpdateState LoadState()

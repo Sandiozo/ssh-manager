@@ -99,6 +99,17 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
     def save():
         cfgfile.save(config, config_path)   # callers hold cfgfile.lock around their change + save
 
+    def store(changes: dict):
+        """Writes config.json with these changes and only then uses them, so a write that fails (config.json
+        held open by another program, a full disk) changes nothing and trying again does it again. Callers
+        hold cfgfile.lock."""
+        try:
+            cfgfile.save({**config, **changes}, config_path)
+        except OSError as e:
+            reason = (e.strerror or str(e)).strip().rstrip(".")
+            raise HTTPException(503, f"Couldn't save the settings ({reason}). Nothing was changed; try again.")
+        config.update(changes)
+
     def current() -> dict:
         return {"name": config.get("name", ""), "computer_name": os.environ.get("COMPUTERNAME", ""),
                 "peers": config.get("peers", []), "keys": config.get("keys", {}),
@@ -132,8 +143,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
                     raise HTTPException(400, f"{p.name}: {e}")
         with cfgfile.lock:
             before = current()
-            apply(body)
-            save()
+            store(changes(body))
             after = current()
         monitor.reload_peers()
         changed = [k for k in ("name", "peers", "keys", "bookmarks", "default_upload", "auto_update", "actions", "logs",
@@ -142,14 +152,15 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             activity.add("setup", action="settings", client=who(request), changed=changed)
         return after
 
-    def apply(body: SettingsBody):
-        config["name"] = body.name.strip()
-        config["peers"] = [{"name": p.name.strip(), "host": p.host.strip(), "ip": p.ip.strip(),
-                            **({"mac": wol.normalize(p.mac)} if p.mac.strip() else {})} for p in body.peers]
-        config["keys"] = {fp: label.strip() for fp, label in body.keys.items() if label.strip()}
-        config["bookmarks"] = [{"name": b.name.strip(), "path": b.path.strip()} for b in body.bookmarks]
-        config["default_upload"] = body.default_upload.strip()
-        config["auto_update"] = body.auto_update
+    def changes(body: SettingsBody) -> dict:
+        """The settings a full save sets."""
+        new = {"name": body.name.strip(),
+               "peers": [{"name": p.name.strip(), "host": p.host.strip(), "ip": p.ip.strip(),
+                          **({"mac": wol.normalize(p.mac)} if p.mac.strip() else {})} for p in body.peers],
+               "keys": {fp: label.strip() for fp, label in body.keys.items() if label.strip()},
+               "bookmarks": [{"name": b.name.strip(), "path": b.path.strip()} for b in body.bookmarks],
+               "default_upload": body.default_upload.strip(),
+               "auto_update": body.auto_update}
         # ids that can stay are kept first, so an id that has to change (new, taken or too long) can't take one
         kept, used = {}, set()
         for i, a in enumerate(body.actions):
@@ -162,15 +173,16 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             used.add(aid)
             actions.append({"id": aid, "name": a.name.strip(), "script": a.script, "group": a.group.strip(),
                             "confirm": a.confirm, **({"timeout": a.timeout} if a.timeout else {})})
-        config["actions"] = actions
-        config["logs"] = [{"name": l.name.strip(), "path": l.path.strip()} for l in body.logs]
-        config["screen_preview"] = body.screen_preview
+        new["actions"] = actions
+        new["logs"] = [{"name": l.name.strip(), "path": l.path.strip()} for l in body.logs]
+        new["screen_preview"] = body.screen_preview
         if body.screen_apps is not None:
-            config["screen_apps"] = sorted({a.strip().removesuffix(".exe") for a in body.screen_apps if a.strip()}, key=str.lower)
+            new["screen_apps"] = sorted({a.strip().removesuffix(".exe") for a in body.screen_apps if a.strip()}, key=str.lower)
         if body.screen_monitors is not None:
-            config["screen_monitors"] = body.screen_monitors
+            new["screen_monitors"] = body.screen_monitors
         if body.ai_access is not None:
-            config["ai_access"] = body.ai_access
+            new["ai_access"] = body.ai_access
+        return new
 
     # ---- one item at a time (the star in Files, "Save as quick action"): changes only that item, on top
     # of the settings as they are now, so changes made meanwhile elsewhere are kept ----
@@ -188,8 +200,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             shortcuts = config.get("bookmarks", [])
             added = not any(same_folder(b.get("path", ""), path) for b in shortcuts)
             if added:
-                config["bookmarks"] = [*shortcuts, {"name": name, "path": path}]
-                save()
+                store({"bookmarks": [*shortcuts, {"name": name, "path": path}]})
             after = current()
         if added:
             noted(request, "bookmarks")
@@ -203,8 +214,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             kept = [b for b in shortcuts if not same_folder(b.get("path", ""), body.path)]
             removed = len(kept) != len(shortcuts)
             if removed:
-                config["bookmarks"] = kept
-                save()
+                store({"bookmarks": kept})
             after = current()
         if removed:
             noted(request, "bookmarks")
@@ -222,8 +232,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             a = {"id": new_action_id("", body.name, {x.get("id") for x in actions}), "name": body.name.strip(),
                  "script": body.script, "group": body.group.strip(), "confirm": body.confirm,
                  **({"timeout": body.timeout} if body.timeout else {})}
-            config["actions"] = [*actions, a]
-            save()
+            store({"actions": [*actions, a]})
             after = current()
         noted(request, "actions")
         return {"settings": after, "action": a}

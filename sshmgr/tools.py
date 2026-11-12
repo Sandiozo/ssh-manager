@@ -26,7 +26,8 @@ class RunBody(BaseModel):
     title: str = Field("", max_length=10_000)     # longer titles are shortened, not rejected
     cwd: str = Field("", max_length=1000)         # working directory (environment variables allowed)
     env: dict[str, str] = {}                      # extra environment variables for this run
-    timeout: float = Field(0, ge=0, le=MAX_RUN_SECONDS, allow_inf_nan=False)   # seconds; the run is stopped (status "timeout") after it
+    # seconds; the run is stopped (status "timeout") after it. A number only (strict: true or "60" is refused)
+    timeout: float = Field(0, ge=0, le=MAX_RUN_SECONDS, allow_inf_nan=False, strict=True)
 
 
 class ClipBody(BaseModel):

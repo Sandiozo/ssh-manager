@@ -1005,7 +1005,17 @@ $("#actions").onclick = e => {
   runUi.start(api(`/api/actions/${encodeURIComponent(a.id)}/run`, { method: "POST" }));
 };
 $("#runs").onclick = e => { const r = e.target.closest("[data-run]"); if (r) runUi.show(r.dataset.run); };
-$("#out-stop").onclick = () => runUi.current && api(`/api/runs/${runUi.current}/stop`, { method: "POST" }).catch(e => toast(e.message, true));
+$("#out-stop").onclick = () => {
+  const id = runUi.current; if (!id) return;
+  // false: nothing was stopped. Fine when the run has ended meanwhile (a script that has just ended still
+  // says "running" for up to 2 s); said when it is still going after that
+  api(`/api/runs/${id}/stop`, { method: "POST" }).then(async r => {
+    if (r.stopped) return;
+    await new Promise(done => setTimeout(done, 3000));
+    const run = ((await api("/api/runs")).runs || []).find(x => x.id === id);
+    if (run && run.status === "running") toast("Couldn't stop the run: it is still running. Try Stop again.", true);
+  }).catch(e => toast(e.message, true));
+};
 function runCommand() {
   const script = $("#cmd-text").value.trim(); if (!script) return;
   const h = store.get("cmdHistory", []).filter(c => c !== script);

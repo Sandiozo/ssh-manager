@@ -147,9 +147,14 @@ def status_for_agent(s: dict) -> dict:
     logins there were in 24 hours) and nothing else, so no computer list, login history, addresses, MAC
     addresses, key labels or fingerprints."""
     host, sshd = s.get("host") or {}, s.get("sshd") or {}
+    ram, disks = host.get("ram"), host.get("disks")
     return {
         "now": s.get("now"),
-        "host": {k: host.get(k) for k in ("name", "computer_name", "uptime_s", "cpu", "ram", "disks")},
+        # only these fields, also of the memory and disks: whatever is added to the status later stays out
+        "host": {**{k: host.get(k) for k in ("name", "computer_name", "uptime_s", "cpu")},
+                 "ram": {k: ram.get(k) for k in ("total", "used", "percent")} if isinstance(ram, dict) else None,
+                 "disks": [{k: d.get(k) for k in ("mount", "total", "free", "percent")} for d in disks if isinstance(d, dict)]
+                          if isinstance(disks, list) else None},
         "sshd": {k: sshd.get(k) for k in ("installed", "status", "listening", "ports")},
         "sessions": [{"client": without_address(x.get("client")), "user": x.get("user"), "start": x.get("start"),
                       "tunnel": x.get("tunnel"), "agents": x.get("agents", []),

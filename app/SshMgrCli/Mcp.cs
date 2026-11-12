@@ -926,6 +926,9 @@ static partial class Program
             "running" => $"Run {id} on {pc.Name} is still running ({took} so far{LimitNote(id)}).",
             "stopped" => $"Run {id} on {pc.Name} was stopped after {took}" +
                          (TimedOutRuns.ContainsKey(id) && Limits.TryGetValue(id, out var s) ? $", at its time limit of {Duration(s)}." : "."),
+            // the PC stopped it at its time limit (the one given with the run, or the quick action's own)
+            "timeout" => $"Run {id} on {pc.Name} was stopped at its time limit" +
+                         (Limits.TryGetValue(id, out var limit) ? $" of {Duration(limit)}" : "") + $", after {took}.",
             _ => $"Exit code {ExitText(view["exit_code"])} ({took}, run {id} on {pc.Name}).",
         };
     }

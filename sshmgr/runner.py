@@ -71,8 +71,11 @@ def signed(code: int) -> int:
 
 def time_limit(value) -> float:
     """Seconds a run may take (0: no limit) from a value that may come from a hand-edited config.json: a
-    number up to MAX_RUN_SECONDS (a larger one is cut to it); anything else (negative, NaN, text) is no limit."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+    number up to MAX_RUN_SECONDS (a larger one is cut to it, also a whole number too large for a float);
+    anything else (negative, NaN, infinite, true/false, text) is no limit."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    if isinstance(value, float) and not math.isfinite(value) or value <= 0:
         return 0.0
     return float(min(value, MAX_RUN_SECONDS))
 

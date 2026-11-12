@@ -26,7 +26,7 @@ class Action(BaseModel):
     script: str = Field(min_length=1, max_length=100_000)
     group: str = Field("", max_length=40)
     confirm: bool = False
-    timeout: float = Field(0, ge=0, le=MAX_RUN_SECONDS, allow_inf_nan=False)   # seconds, 0: no limit
+    timeout: float = Field(0, ge=0, le=MAX_RUN_SECONDS, allow_inf_nan=False, strict=True)   # seconds, 0: no limit (a number only)
 
 
 class LogEntry(BaseModel):
@@ -77,9 +77,14 @@ def actions_shown(actions: list) -> list[dict]:
 
 def folder_key(path: str) -> str:
     """Where a folder path leads, for comparing: environment variables expanded, / and \\ alike, "." and ".."
-    worked out, no trailing separator, any case (C:\\Windows\\, C:/Windows and %WINDIR% are one folder)."""
+    worked out, no trailing separator, any case (C:\\Windows\\, C:/Windows and %WINDIR% are one folder). A drive
+    or share root always ends in one (C: and C:\\ are one folder, as are \\\\srv\\share and \\\\srv\\share\\)."""
     p = os.path.expandvars(path.strip())
-    return os.path.normcase(os.path.normpath(p)) if p else ""
+    if not p:
+        return ""
+    p = os.path.normcase(os.path.normpath(p))
+    drive, rest = os.path.splitdrive(p)
+    return p + "\\" if drive and not rest else p
 
 
 def same_folder(a: str, b: str) -> bool:

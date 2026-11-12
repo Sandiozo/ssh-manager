@@ -3,7 +3,9 @@
 All notable changes to SSH Manager. Versions follow [semantic versioning](https://semver.org/); every
 version is available on the [releases page](https://github.com/Sandiozo/ssh-manager/releases).
 
-## [Unreleased]
+## [1.8.0] - 2026-11-12
+
+A security and reliability release.
 
 ### Security
 - AI agents could download SSH Manager's access token, app secret and settings by naming its folder
@@ -451,6 +453,7 @@ A security and reliability release, with a new look.
 - First release: dashboard with live sessions, activity log and connection history, file transfer and a
   tray app for Windows' OpenSSH Server.
 
+[1.8.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.8.0
 [1.7.2]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.2
 [1.7.1]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.1
 [1.7.0]: https://github.com/Sandiozo/ssh-manager/releases/tag/v1.7.0

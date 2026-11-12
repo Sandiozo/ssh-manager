@@ -355,12 +355,14 @@ internal sealed class MainForm : Form
     void OnPowerModeChanged(object? sender, PowerModeChangedEventArgs e)
     {
         if (e.Mode != PowerModes.Resume) return;
-        OnUi(() =>
+        OnUi(() => _ = AppLog.GuardAsync("Resume", async () =>
         {
-            // every tunnel is dead after sleep: reconnect now instead of after the backoff, quietly
+            // every tunnel is dead after sleep: reconnect now instead of after the backoff, quietly. This PC's
+            // own server needs no tunnel: while it answers, its page stays as it was
             muteBalloonsUntil = DateTime.UtcNow.AddSeconds(30);
-            links.ForEach(l => l.Reconnect(resetBackoff: true));
-        });
+            foreach (var l in links.Where(l => !l.Pc.IsLocal).ToList()) l.Reconnect(resetBackoff: true);
+            foreach (var l in links.Where(l => l.Pc.IsLocal).ToList()) await ReconnectIfSilentAsync(l);
+        }));
     }
 
     void OnNetworkChanged(object? sender, EventArgs e)
@@ -373,20 +375,22 @@ internal sealed class MainForm : Form
     async Task ReconnectAfterNetworkChangeAsync()
     {
         muteBalloonsUntil = DateTime.UtcNow.AddSeconds(30);
-        foreach (var l in links.ToList())
+        foreach (var l in links.ToList()) await ReconnectIfSilentAsync(l);
+    }
+
+    /// <summary>Reconnects a link right away unless it is connected and its server answers.</summary>
+    async Task ReconnectIfSilentAsync(Link l)
+    {
+        if (l.State == LinkState.Connected)
         {
-            if (l.State != LinkState.Connected)
-            {
-                l.Reconnect(resetBackoff: true);
-                continue;
-            }
             try
             {
                 using var r = await Link.Http.SendAsync(l.Request(HttpMethod.Get, "/api/ping"));
-                if (!r.IsSuccessStatusCode) l.Reconnect(resetBackoff: true);
+                if (r.IsSuccessStatusCode) return;
             }
-            catch (Exception) { l.Reconnect(resetBackoff: true); }
+            catch (Exception) { }
         }
+        if (links.Contains(l)) l.Reconnect(resetBackoff: true);   // not one removed while its server was asked
     }
 
     // ---- browser profiles: one per PC, one for the app's own pages ----

@@ -20,19 +20,21 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
 
     /// <summary>A request id longer than this is not the server's (its ids are short): nothing is kept or shown for it.</summary>
     const int MaxId = 64;
-    /// <summary>A request that was asked about is remembered this long: far longer than any request is open.</summary>
-    static readonly TimeSpan Remember = TimeSpan.FromMinutes(10);
+    /// <summary>A request that was asked about is remembered this long (ms): far longer than any request is open.</summary>
+    const long Remember = 10 * 60_000;
 
     readonly Dictionary<string, (Link Link, PairPrompt Prompt)> open = [];
-    /// <summary>Requests already asked about (or turned down), with when.</summary>
-    readonly Dictionary<string, DateTime> seen = [];
-    /// <summary>Requests from a computer whose last request was denied are turned down without asking for a while.</summary>
-    readonly Dictionary<string, DateTime> deniedUntil = [];
+    /// <summary>Requests already asked about (or turned down), with when (<see cref="Environment.TickCount64"/>,
+    /// which a change of the clock doesn't move).</summary>
+    readonly Dictionary<string, long> seen = [];
+    /// <summary>Requests from a computer whose last request was denied are turned down without asking for a
+    /// while (until this <see cref="Environment.TickCount64"/>).</summary>
+    readonly Dictionary<string, long> deniedUntil = [];
 
     /// <summary>What is kept about earlier requests doesn't grow without end.</summary>
     void Forget()
     {
-        var now = DateTime.UtcNow;
+        var now = Environment.TickCount64;
         foreach (var (id, at) in seen.ToList())
             if (now - at > Remember) seen.Remove(id);
         foreach (var (who, until) in deniedUntil.ToList())
@@ -57,7 +59,7 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
             entry.Prompt.CloseUnanswered();
         Forget();
         if (id == "" || seen.ContainsKey(id) || open.Count >= MaxOpen) return;
-        seen[id] = DateTime.UtcNow;
+        seen[id] = Environment.TickCount64;
 
         var seconds = J.N(q, "expires_in") is { } left ? Math.Min(left, MaxSeconds) : MaxSeconds;
         if (seconds <= 0) return;
@@ -66,7 +68,7 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
         var address = PairApproval.Clean(J.S(q, "address"), 64);
         var key = J.S(q, "public_key");
         var who = $"{link.Pc.Id}|{from}|{address}".ToLowerInvariant();
-        if (deniedUntil.TryGetValue(who, out var until) && DateTime.UtcNow < until)
+        if (deniedUntil.TryGetValue(who, out var until) && Environment.TickCount64 < until)
         {
             _ = PairApproval.DenyAsync(To(link), id, Me, "Denied recently; try again later.");
             return;
@@ -90,7 +92,7 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
     {
         if (!allowed)
         {
-            deniedUntil[who] = DateTime.UtcNow.AddMinutes(5);   // a repeated request doesn't pop up again right away
+            deniedUntil[who] = Environment.TickCount64 + (long)TimeSpan.FromMinutes(5).TotalMilliseconds;   // a repeated request doesn't pop up again right away
             await PairApproval.DenyAsync(To(link), id, Me);
             return;
         }
@@ -98,8 +100,21 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
         var added = $" (allowed {DateTime.Now:yyyy-MM-dd})";   // the label the key gets in Settings → SSH keys (60 characters at most)
         var label = (from.Length > 60 - added.Length ? from[..(60 - added.Length)] : from) + added;
         var result = await PairApproval.AllowAsync(To(link), own, id, key, fingerprint, label, Me);
+        var problem = Problem(result, from, pcName, fingerprint);
+        if (problem is null) balloon("SSH Manager", $"{from} can now manage this PC.");
+        else
+            MessageBox.Show(owner.Visible ? owner : null, problem, "SSH Manager", MessageBoxButtons.OK,
+                result.Outcome is PairOutcome.Gone or PairOutcome.Late or PairOutcome.Unanswered ? MessageBoxIcon.Information
+                : result.Outcome is PairOutcome.KeyLeft or PairOutcome.KeyUnsure ? MessageBoxIcon.Warning : MessageBoxIcon.Error);
+    }
+
+    /// <summary>What the user is told after Allow, unless it simply worked (null).</summary>
+    internal static string? Problem(PairResult result, string from, string pcName, string fingerprint)
+    {
         var keyLine = $"Its fingerprint is {fingerprint}.";
-        var problem = result.Outcome switch
+        var look = $"In a minute, look in this PC's Settings → SSH keys: if the key is there, {from} can sign in with it; remove it if you " +
+                   $"don't want that. If it isn't there and you still want this, send the request again on {from}. {keyLine}";
+        return result.Outcome switch
         {
             PairOutcome.Allowed => null,
             PairOutcome.Gone => $"The request from {from} is no longer open: it expired or was cancelled there. Nothing was changed on this PC.\n\n" +
@@ -113,14 +128,14 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
                                       $"Nothing was changed.\n\nIf you still want this, send the request again on {from}.",
             PairOutcome.KeyLeft => $"{from} could not be told that you allowed it, and its key could not be taken off this PC again:\n\n{result.Detail}\n\n" +
                                    $"The key is still on this PC: {from} can sign in with it. If you don't want that, remove it in this PC's Settings → SSH keys. {keyLine}",
-            _ => $"Adding the key of {from} failed, and SSH Manager couldn't make sure that it wasn't added all the same (this PC's server may also still be adding it):\n\n{result.Detail}\n\n" +
-                 $"{from} was told that it failed. In a minute, look in this PC's Settings → SSH keys: if the key is there, {from} can sign in with it; remove it if you don't want that. {keyLine}",
+            // KeyUnsure: the add got no answer and the key was taken off again (it may still be written), or the key
+            // couldn't be taken off or seen to be gone
+            _ when result.TakenOff => $"This PC's server didn't answer while the key of {from} was being added:\n\n{result.Detail}\n\n" +
+                                      $"SSH Manager took the key off this PC again and told {from} that it failed. But the server may still " +
+                                      $"have been busy adding it, so the key may be on this PC after all. {look}",
+            _ => $"Adding the key of {from} failed, and SSH Manager couldn't make sure that it wasn't added all the same:\n\n{result.Detail}\n\n" +
+                 $"{from} was told that it failed, but the key may be on this PC, or still be added in a moment. {look}",
         };
-        if (problem is null) balloon("SSH Manager", $"{from} can now manage this PC.");
-        else
-            MessageBox.Show(owner.Visible ? owner : null, problem, "SSH Manager", MessageBoxButtons.OK,
-                result.Outcome is PairOutcome.Gone or PairOutcome.Late or PairOutcome.Unanswered ? MessageBoxIcon.Information
-                : result.Outcome is PairOutcome.KeyLeft or PairOutcome.KeyUnsure ? MessageBoxIcon.Warning : MessageBoxIcon.Error);
     }
 }
 

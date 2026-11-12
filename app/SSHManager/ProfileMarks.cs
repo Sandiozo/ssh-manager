@@ -45,8 +45,8 @@ internal sealed partial class ProfileMarks
         this.path = path;
         try
         {
-            if (!File.Exists(path)) return;
-            var saved = JsonSerializer.Deserialize<Saved>(File.ReadAllText(path)) ?? throw new JsonException("The file holds nothing.");
+            if (!File.Exists(path) || Read(path) is not { } text) return;
+            var saved = JsonSerializer.Deserialize<Saved>(text) ?? throw new JsonException("The file holds nothing.");
             toEmpty.UnionWith((saved.Empty ?? []).Where(IsPcProfile));
             removed.UnionWith((saved.Removed ?? []).Where(IsPcProfile));
             emptyAll = saved.EmptyAll == true;
@@ -59,6 +59,23 @@ internal sealed partial class ProfileMarks
             removed.Clear();
             emptiedSince.Clear();
             emptyAll = true;
+        }
+    }
+
+    /// <summary>A file that can't be opened is tried again this often, this long apart (about a second in all).</summary>
+    const int ReadTries = 6;
+    static readonly TimeSpan ReadPause = TimeSpan.FromMilliseconds(200);
+
+    /// <summary>The file's text, or null when there is no file (any more). A file that someone else holds
+    /// open for a moment (an antivirus scan, a backup) is read once it is free; one that stays shut throws,
+    /// like one whose text can't be understood (that is not tried again).</summary>
+    static string? Read(string path)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { return File.ReadAllText(path); }
+            catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException) { return null; }
+            catch (Exception e) when ((e is IOException or UnauthorizedAccessException) && attempt < ReadTries) { Thread.Sleep(ReadPause); }
         }
     }
 

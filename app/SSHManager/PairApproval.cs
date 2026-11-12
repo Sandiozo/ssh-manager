@@ -23,8 +23,9 @@ internal enum PairOutcome
     Unreachable,
     /// <summary>This PC's own server isn't running, so the key could not be added; the requester was told.</summary>
     NoServer,
-    /// <summary>The key is not on this PC and won't be added any more (this PC's server refused it or couldn't
-    /// add it, or it was taken out again after an add that didn't answer); the requester was told why.</summary>
+    /// <summary>The key is not on this PC and won't be added any more (this PC's keys couldn't be read first,
+    /// or its server refused the key or answered that it couldn't add it); the requester was told why. Never
+    /// after an add that got no answer.</summary>
     KeyNotAdded,
     /// <summary>The request ended between the check and the answer: the key was taken out again.</summary>
     Late,
@@ -33,13 +34,15 @@ internal enum PairOutcome
     Unanswered,
     /// <summary>As Late or Unanswered, but the key could not be taken out again: it is still on this PC.</summary>
     KeyLeft,
-    /// <summary>Adding the key failed in a way that doesn't say whether it was added, and it couldn't be made
-    /// sure that the key isn't on this PC and won't be added any more: it may be there now or later. The
-    /// requester was told it failed.</summary>
+    /// <summary>Adding the key got no answer (it may still be written, even after it was taken off again), or
+    /// failed in a way that doesn't say whether it was added and it couldn't be made sure that it isn't there:
+    /// it may be on this PC now or later. The requester was told it failed.</summary>
     KeyUnsure,
 }
 
-internal sealed record PairResult(PairOutcome Outcome, string Detail = "");
+/// <summary>What became of Allow. <paramref name="TakenOff"/>: with KeyUnsure, the key was taken off this PC
+/// again (it may still be written afterwards).</summary>
+internal sealed record PairResult(PairOutcome Outcome, string Detail = "", bool TakenOff = false);
 
 /// <summary>
 /// The approving side of pairing (see sshmgr/pairing.py), without the window: what is shown about a
@@ -50,8 +53,8 @@ internal sealed record PairResult(PairOutcome Outcome, string Detail = "");
 /// A call that fails doesn't say nothing happened: the server may have done its part before the answer
 /// got lost (the app stops waiting after a few seconds). So after a failed call the app looks at what is
 /// really there, this PC's key list or the request's state, and what the user is told follows that. An add
-/// that got no answer at all may even still be under way: the key list can't rule out that it is written
-/// later, only a removal that worked can (see <see cref="AllowAsync"/>).
+/// that got no answer at all may even still be under way: neither the key list nor a removal can rule out
+/// that it is written later, so then the user is told to look (see <see cref="AllowAsync"/>).
 /// </summary>
 internal static class PairApproval
 {
@@ -182,7 +185,7 @@ internal static class PairApproval
             {
                 // nothing was written for this request. The key may be here all the same, added meanwhile by
                 // another prompt for the same key or by hand: then it can be used, but isn't this request's
-                if (await HasKeyAsync(own, fingerprint) != true)
+                if (await HasKeyAsync(own, fingerprint, tries: 3) != true)
                 {
                     await AnswerAsync(pc, id, me, false, error);   // the requester sees why instead of waiting for nothing
                     return new(PairOutcome.KeyNotAdded, error);
@@ -192,18 +195,25 @@ internal static class PairApproval
             {
                 // the server writes the key before it finishes its answer: the key may be there all the same
                 var now = await HasKeyAsync(own, fingerprint, tries: 3);
+                if (now != true && answered)
+                {
+                    // an add that did answer is over: the list (or a removal) says what is there
+                    var gone = now == false || await TakeOutAsync(own, fingerprint) is null;
+                    await AnswerAsync(pc, id, me, false, error);
+                    return new(gone ? PairOutcome.KeyNotAdded : PairOutcome.KeyUnsure, error);
+                }
                 if (now != true)
                 {
                     // An add that got no answer may still be under way and write the key later, whatever the list
-                    // says now. Taking the key out before the requester hears no settles it: this PC's server adds
-                    // and removes keys one at a time, so the removal waits for an add in progress, and only one
-                    // that worked shows the key is gone for good. An add that did answer is over: there the list
-                    // (or a removal) says what is there
-                    var gone = answered
-                        ? now == false || await TakeOutAsync(own, fingerprint) is null
-                        : await RemoveAsync(own, fingerprint) is null;
+                    // says now. The key is taken out before the requester hears no, as the best that can be done:
+                    // this PC's server adds and removes keys one at a time, so the removal waits for an add that
+                    // is already being written. But a removal that worked doesn't prove the key is gone for good:
+                    // the add may not have reached the server's lock yet and be written after it, and what it
+                    // took out may be the same key added meanwhile another way. So the user is always sent to
+                    // look in Settings → SSH keys
+                    var takenOff = await RemoveAsync(own, fingerprint) is null;
                     await AnswerAsync(pc, id, me, false, error);
-                    return new(gone ? PairOutcome.KeyNotAdded : PairOutcome.KeyUnsure, error);
+                    return new(PairOutcome.KeyUnsure, error, takenOff);
                 }
                 added = true;
             }

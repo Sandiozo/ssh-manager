@@ -33,9 +33,10 @@ internal sealed class SetupWizard(Action<string> show, Action<PcEntry?> done, Fu
     /// after the saved one was lost. What the app keeps for that PC may belong to another computer.</summary>
     public bool LastKeyReplaced { get; private set; }
 
-    /// <summary>Asks the user a Yes/No question (title, text) in a box over the window; No is the default.</summary>
+    /// <summary>Asks the user a Yes/No question (title, text) in a box over the window; No is the default.
+    /// Over the main window, where the wizard is: not over whatever else is open (a pairing prompt).</summary>
     internal Func<string, string, bool> Ask { get; set; } = (title, text) =>
-        MessageBox.Show(Application.OpenForms.Count > 0 ? Application.OpenForms[0] : null, text, title,
+        MessageBox.Show(Application.OpenForms.OfType<MainForm>().FirstOrDefault(f => f.Visible), text, title,
             MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
 
     /// <summary>Runs ssh.exe (arguments, time-out, environment); a test can stand in for the PC's answer.</summary>

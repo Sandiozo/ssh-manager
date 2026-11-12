@@ -18,10 +18,26 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
     /// <summary>A request lives this long on the server; a longer time from a PC is not believed.</summary>
     const int MaxSeconds = 120;
 
+    /// <summary>A request id longer than this is not the server's (its ids are short): nothing is kept or shown for it.</summary>
+    const int MaxId = 64;
+    /// <summary>A request that was asked about is remembered this long: far longer than any request is open.</summary>
+    static readonly TimeSpan Remember = TimeSpan.FromMinutes(10);
+
     readonly Dictionary<string, (Link Link, PairPrompt Prompt)> open = [];
-    readonly HashSet<string> seen = [];
+    /// <summary>Requests already asked about (or turned down), with when.</summary>
+    readonly Dictionary<string, DateTime> seen = [];
     /// <summary>Requests from a computer whose last request was denied are turned down without asking for a while.</summary>
     readonly Dictionary<string, DateTime> deniedUntil = [];
+
+    /// <summary>What is kept about earlier requests doesn't grow without end.</summary>
+    void Forget()
+    {
+        var now = DateTime.UtcNow;
+        foreach (var (id, at) in seen.ToList())
+            if (now - at > Remember) seen.Remove(id);
+        foreach (var (who, until) in deniedUntil.ToList())
+            if (now >= until) deniedUntil.Remove(who);
+    }
 
     PairIdentity Me => new(Environment.MachineName, settings.MachineId, Environment.UserName);
 
@@ -35,11 +51,13 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
         using var doc = JsonDocument.Parse(await r.Content.ReadAsStringAsync());
         var q = J.O(doc.RootElement, "request");
         var id = J.S(q, "id");
+        if (id.Length > MaxId) id = "";
         // expired, cancelled on the other computer, or replaced by a newer request: that prompt closes
         foreach (var (_, entry) in open.Where(o => o.Value.Link == link && o.Key != id).ToList())
             entry.Prompt.CloseUnanswered();
-        if (id == "" || seen.Contains(id) || open.Count >= MaxOpen) return;
-        seen.Add(id);
+        Forget();
+        if (id == "" || seen.ContainsKey(id) || open.Count >= MaxOpen) return;
+        seen[id] = DateTime.UtcNow;
 
         var seconds = J.N(q, "expires_in") is { } left ? Math.Min(left, MaxSeconds) : MaxSeconds;
         if (seconds <= 0) return;
@@ -117,6 +135,7 @@ internal sealed class PairPrompt : Form
     readonly System.Windows.Forms.Timer tick = new() { Interval = 500 };
     readonly System.Windows.Forms.Timer unlock = new() { Interval = (int)AllowAfter.TotalMilliseconds };
     readonly Button deny = new() { Text = "Deny", AutoSize = true, MinimumSize = new Size(88, 30) };
+    readonly Font font = new("Segoe UI", 9.5f), bold;
     bool answered;
 
     /// <summary>Shown without becoming the active window: what the user is typing goes on going where it went.</summary>
@@ -140,19 +159,20 @@ internal sealed class PairPrompt : Form
         MaximizeBox = MinimizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         ShowInTaskbar = true;
-        Font = new Font("Segoe UI", 9.5f);
+        bold = new Font(font, FontStyle.Bold);
+        Font = font;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(16);
 
         // UseMnemonic off: an "&" in a name a PC supplied is shown as it is
-        Label Line(string text, bool bold = false, int below = 10) => new()
+        Label Line(string text, bool strong = false, int below = 10) => new()
         {
             AutoSize = true, MaximumSize = new Size(520, 0), Margin = new Padding(0, 0, 0, below), UseMnemonic = false,
-            Font = bold ? new Font(Font, FontStyle.Bold) : Font, Text = text,
+            Font = strong ? bold : font, Text = text,
         };
         var layout = new TableLayoutPanel { ColumnCount = 1, AutoSize = true, Dock = DockStyle.Fill };
-        layout.Controls.Add(Line($"{from} asks to be allowed to manage this PC.", bold: true));
+        layout.Controls.Add(Line($"{from} asks to be allowed to manage this PC.", strong: true));
         layout.Controls.Add(Line($"If you allow it, {from} can sign in to this PC as {user} over SSH, with the same rights as you: " +
                                  "open and change files, run commands and view the screen."));
         layout.Controls.Add(Line($"Requested by: {from}\nIts address: {(address != "" ? address : "unknown")}\n" +
@@ -195,6 +215,15 @@ internal sealed class PairPrompt : Form
         // closing the window with its X is a No
         FormClosing += (_, e) => { if (e.CloseReason == CloseReason.UserClosing) Answer(false, close: false); };
         FormClosed += (_, _) => { tick.Dispose(); unlock.Dispose(); };
+    }
+
+    /// <summary>A window doesn't dispose a font it was given: the prompt's own go with it.</summary>
+    protected override void Dispose(bool disposing)
+    {
+        base.Dispose(disposing);
+        if (!disposing) return;
+        font.Dispose();
+        bold.Dispose();
     }
 
     void Answer(bool allowed, bool close = true)

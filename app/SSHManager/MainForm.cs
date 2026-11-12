@@ -266,7 +266,13 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show("SSH Manager needs the Microsoft Edge WebView2 Runtime. Reinstall SSH Manager to get it.\n\n" + ex.Message,
+            AppLog.Write("Starting the app's browser", ex);
+            // still the browser of the last start after waiting for it: the runtime is there, reinstalling doesn't help
+            var stillRunning = ex.HResult == unchecked((int)0x8007139F);
+            MessageBox.Show((stillRunning
+                    ? "SSH Manager's browser from its last start is still running, so it can't start again yet. Wait a minute and start SSH Manager " +
+                      "again; if this keeps happening, restart Windows."
+                    : "SSH Manager needs the Microsoft Edge WebView2 Runtime. Reinstall SSH Manager to get it.") + "\n\n" + ex.Message,
                 "SSH Manager", MessageBoxButtons.OK, MessageBoxIcon.Error);
             ExitApp();
             return;
@@ -408,7 +414,11 @@ internal sealed class MainForm : Form
         profileMarks.MustEmpty(profile, pcRemoved);   // until it is done, a page for this PC is not loaded
         if (webEnv is null || exiting) return;
         var before = clearing.GetValueOrDefault(pcId, Task.CompletedTask);
-        clearing[pcId] = ClearAsync();
+        Task? task = null;
+        task = ClearAsync();
+        // only while it runs: done, it is taken out again (by itself, or here when it was over at once)
+        if (task.IsCompleted) clearing.Remove(pcId);
+        else clearing[pcId] = task;
 
         async Task ClearAsync()
         {
@@ -426,6 +436,7 @@ internal sealed class MainForm : Form
             {
                 Controls.Remove(v);
                 v.Dispose();
+                if (task is not null && clearing.TryGetValue(pcId, out var running) && running == task) clearing.Remove(pcId);
             }
         }
     }
@@ -635,8 +646,9 @@ internal sealed class MainForm : Form
             }
             profileMarks.InUse(profile);
             // the server only answers requests that carry its access token: a cookie kept in this PC's profile,
-            // sent to this PC's local port only
-            await OwnServerOnly.ApplyAsync(core, link.Port, link.Token);
+            // sent to this PC's local port only. The view's own values throughout: the link may have connected
+            // again meanwhile (this view is then replaced), and the view only lets its own port in
+            await OwnServerOnly.ApplyAsync(core, pv.Port, pv.Token);
             if (Dropped()) return;
             SetColorScheme(core);
             Configure(v, link);
@@ -655,7 +667,7 @@ internal sealed class MainForm : Form
                 if (pcViews.TryGetValue(id, out var cur) && cur == pv && Usable(link))
                     v.CoreWebView2.Navigate(pv.Url);
             });
-            v.CoreWebView2.Navigate(link.Url);
+            v.CoreWebView2.Navigate(pv.Url);
         }
         catch (Exception) when (Dropped()) { return; }   // closed while starting
         catch (Exception e)
@@ -1427,16 +1439,19 @@ internal sealed class MainForm : Form
             var existing = settings.Pcs.FirstOrDefault(p => p.Id == pc.Id);
             if (existing is not null)
             {
+                // a PC saved by its address: the name the app learned from the PC itself (to find it at another
+                // address) isn't the wizard's to carry. The same address with the same identity keeps it
+                var lookupName = pc.LookupName == "" && SameName(existing.Host, pc.Host) && !wizard.LastKeyReplaced ? existing.LookupName : pc.LookupName;
                 // the entry may now lead to another computer (another address, another name to look up, or an
                 // identity the user accepted in place of the saved one): nothing the old one's pages stored is kept for it
-                if (!SameName(existing.Host, pc.Host) || !SameName(existing.LookupName, pc.LookupName) || wizard.LastKeyReplaced)
+                if (!SameName(existing.Host, pc.Host) || !SameName(existing.LookupName, lookupName) || wizard.LastKeyReplaced)
                     ForgetBrowserData(existing.Id, pcRemoved: false);
                 lock (settings.Gate)
                 {
                     existing.Host = pc.Host;
                     existing.User = pc.User;
                     existing.KeyFile = pc.KeyFile;
-                    existing.LookupName = pc.LookupName;
+                    existing.LookupName = lookupName;
                     existing.KeySaved = pc.KeySaved;   // the wizard saved its identity under this id
                     existing.PcName = "";
                 }

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace SSHManager;
@@ -9,6 +10,8 @@ namespace SSHManager;
 /// leads to another computer), and profiles of removed PCs whose folder is deleted at the next start.
 /// Only a profile named here is ever emptied or deleted: a PC that is merely missing from the list
 /// (settings that couldn't be read, this PC's own server being reinstalled) keeps what it stored.
+/// A file that is there but can't be read could have named any profile: then every PC's profile is emptied
+/// before its next use (each once, also across starts), and no folder is deleted for it.
 /// </summary>
 internal sealed partial class ProfileMarks
 {
@@ -16,13 +19,21 @@ internal sealed partial class ProfileMarks
     {
         public List<string>? Empty { get; set; }
         public List<string>? Removed { get; set; }
+        /// <summary>The file couldn't be read once: every PC profile not in <see cref="Emptied"/> is emptied before use.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public bool? EmptyAll { get; set; }
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public List<string>? Emptied { get; set; }
     }
 
     readonly string path;
     readonly object gate = new();
     readonly HashSet<string> toEmpty = [], removed = [];
+    /// <summary>Since the file couldn't be read: the profiles emptied since then (the others still have to be).</summary>
+    bool emptyAll;
+    readonly HashSet<string> emptiedSince = [];
 
-    [GeneratedRegex("^pc-[0-9a-f]{32}$")]
+    [GeneratedRegex(@"\Apc-[0-9a-f]{32}\z")]
     private static partial Regex PcProfileName();
 
     /// <summary>A name the app gives a PC's profile. A name from the file becomes part of a folder that is
@@ -35,17 +46,26 @@ internal sealed partial class ProfileMarks
         try
         {
             if (!File.Exists(path)) return;
-            var saved = JsonSerializer.Deserialize<Saved>(File.ReadAllText(path));
-            toEmpty.UnionWith((saved?.Empty ?? []).Where(IsPcProfile));
-            removed.UnionWith((saved?.Removed ?? []).Where(IsPcProfile));
+            var saved = JsonSerializer.Deserialize<Saved>(File.ReadAllText(path)) ?? throw new JsonException("The file holds nothing.");
+            toEmpty.UnionWith((saved.Empty ?? []).Where(IsPcProfile));
+            removed.UnionWith((saved.Removed ?? []).Where(IsPcProfile));
+            emptyAll = saved.EmptyAll == true;
+            if (emptyAll) emptiedSince.UnionWith((saved.Emptied ?? []).Where(IsPcProfile));
         }
-        catch (Exception e) { AppLog.Write("Reading which browser profiles are to be cleaned up", e); }
+        catch (Exception e)
+        {
+            AppLog.Write("Reading which browser profiles are to be cleaned up (each PC's browser data is deleted before its next use)", e);
+            toEmpty.Clear();
+            removed.Clear();
+            emptiedSince.Clear();
+            emptyAll = true;
+        }
     }
 
     /// <summary>The profile holds data of a removed PC or of another computer: it is emptied before a page is loaded in it.</summary>
     public bool NeedsEmptying(string profile)
     {
-        lock (gate) return toEmpty.Contains(profile);
+        lock (gate) return toEmpty.Contains(profile) || (emptyAll && !emptiedSince.Contains(profile));
     }
 
     /// <summary>Profiles of PCs that were removed: their folders can go.</summary>
@@ -57,13 +77,13 @@ internal sealed partial class ProfileMarks
     /// <summary>The PC was removed (<paramref name="pcRemoved"/>) or its entry now leads elsewhere.</summary>
     public void MustEmpty(string profile, bool pcRemoved) => Change(() => toEmpty.Add(profile) | (pcRemoved && removed.Add(profile)));
 
-    public void Emptied(string profile) => Change(() => toEmpty.Remove(profile));
+    public void Emptied(string profile) => Change(() => toEmpty.Remove(profile) | (emptyAll && emptiedSince.Add(profile)));
 
     /// <summary>A PC in the list uses the profile (again): its folder stays.</summary>
     public void InUse(string profile) => Change(() => removed.Remove(profile));
 
     /// <summary>The folder is gone, and everything in it.</summary>
-    public void Deleted(string profile) => Change(() => toEmpty.Remove(profile) | removed.Remove(profile));
+    public void Deleted(string profile) => Change(() => toEmpty.Remove(profile) | removed.Remove(profile) | (emptyAll && emptiedSince.Add(profile)));
 
     void Change(Func<bool> change)
     {
@@ -74,7 +94,11 @@ internal sealed partial class ProfileMarks
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
                 var tmp = path + ".tmp";
-                File.WriteAllText(tmp, JsonSerializer.Serialize(new Saved { Empty = [.. toEmpty.Order()], Removed = [.. removed.Order()] }));
+                File.WriteAllText(tmp, JsonSerializer.Serialize(new Saved
+                {
+                    Empty = [.. toEmpty.Order()], Removed = [.. removed.Order()],
+                    EmptyAll = emptyAll ? true : null, Emptied = emptyAll ? [.. emptiedSince.Order()] : null,
+                }));
                 File.Move(tmp, path, overwrite: true);
             }
             catch (Exception e) { AppLog.Write("Saving which browser profiles are to be cleaned up", e); }

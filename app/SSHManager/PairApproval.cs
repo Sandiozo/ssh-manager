@@ -69,23 +69,42 @@ internal static class PairApproval
     /// grapheme joiner, two Khmer vowels): Unicode calls them letters or marks, so they are named here.</summary>
     static readonly HashSet<int> Blank = [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x2800, 0x3164, 0xFFA0];
 
+    /// <summary>Accents, vowel signs and variation selectors kept on one character: enough for any script,
+    /// not a pile that runs over the lines around it.</summary>
+    const int MaxMarks = 3;
+
     /// <summary>Text a PC supplied, made fit to show in a prompt: one line, no control or invisible
-    /// characters (which could fake extra lines, reverse the text or pad it out of sight), at most
-    /// <paramref name="max"/> characters.</summary>
+    /// characters (which could fake extra lines, reverse the text or pad it out of sight), no stacks of
+    /// marks over or under a character, at most <paramref name="max"/> characters.</summary>
     public static string Clean(string? text, int max)
     {
         var sb = new StringBuilder();
+        var marks = MaxMarks;   // a mark needs a character before it to sit on
         foreach (var rune in (text ?? "").EnumerateRunes())
         {
-            var keep = Rune.GetUnicodeCategory(rune) switch
+            var category = Rune.GetUnicodeCategory(rune);
+            var keep = category switch
             {
                 UnicodeCategory.Control or UnicodeCategory.Format or UnicodeCategory.LineSeparator or UnicodeCategory.ParagraphSeparator
                     or UnicodeCategory.Surrogate or UnicodeCategory.PrivateUse or UnicodeCategory.OtherNotAssigned => false,
                 _ => true,
             };
-            if (!keep || rune.Value == 0xFFFD || Blank.Contains(rune.Value)) sb.Append(' ');   // also what a broken character was read as
-            else if (Rune.IsWhiteSpace(rune)) sb.Append(' ');
-            else sb.Append(rune.ToString());
+            if (!keep || rune.Value == 0xFFFD || Blank.Contains(rune.Value) || Rune.IsWhiteSpace(rune))   // also what a broken character was read as
+            {
+                sb.Append(' ');
+                marks = MaxMarks;
+            }
+            else if (category is UnicodeCategory.NonSpacingMark or UnicodeCategory.SpacingCombiningMark or UnicodeCategory.EnclosingMark)
+            {
+                if (marks >= MaxMarks) continue;
+                sb.Append(rune.ToString());
+                marks++;
+            }
+            else
+            {
+                sb.Append(rune.ToString());
+                marks = 0;
+            }
         }
         var oneLine = string.Join(' ', sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries));
         if (oneLine.Length <= max) return oneLine;

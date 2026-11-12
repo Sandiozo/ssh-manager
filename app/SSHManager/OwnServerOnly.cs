@@ -186,9 +186,12 @@ internal static class OwnServerOnly
     {
         if (Own(uri, port)) return true;
         if (uri.StartsWith("blob:", StringComparison.OrdinalIgnoreCase)) return Own(uri[5..], port);   // made by a page of this server
-        return uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase)
-            || uri.Equals("about:blank", StringComparison.OrdinalIgnoreCase) || uri.Equals("about:srcdoc", StringComparison.OrdinalIgnoreCase);
+        return uri.StartsWith("data:", StringComparison.OrdinalIgnoreCase) || Empty(uri, "about:blank") || Empty(uri, "about:srcdoc");
     }
+
+    /// <summary>That empty page, also with a "#…" or "?…" after it (still the same empty page to the browser).</summary>
+    static bool Empty(string uri, string page) =>
+        uri.StartsWith(page, StringComparison.OrdinalIgnoreCase) && (uri.Length == page.Length || uri[page.Length] is '#' or '?');
 
     /// <summary>http://localhost:port/… exactly: not another port, host or scheme, and no user name in front.</summary>
     public static bool Own(string uri, int port) =>

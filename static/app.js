@@ -447,13 +447,17 @@ $("#fs-refresh").onclick = () => files.open(files.path);
 $("#fs-path").onkeydown = e => { if (e.key === "Enter") files.open(e.target.value.trim()); };
 $("#fs-hidden").onchange = () => files.render();
 $("#fs-star").onclick = async () => {
-  if (!files.path || !settingsUi.saved) return;
-  const s = structuredClone(settingsUi.saved);
-  const i = s.bookmarks.findIndex(b => b.path.toLowerCase() === files.path.toLowerCase());
-  if (i >= 0) s.bookmarks.splice(i, 1);
-  else s.bookmarks.push({ name: baseName(files.path), path: files.path });
-  try { await settingsUi.save(s); toast(i >= 0 ? "Removed from shortcuts" : "Added to shortcuts"); }
-  catch (e) { toast(e.message, true); }
+  if (!files.path) return;
+  const path = files.path, same = b => b.path.trim().toLowerCase() === path.trim().toLowerCase();
+  const starred = !!settingsUi.saved?.bookmarks.some(same);
+  try {
+    if (starred) await settingsUi.change("/api/settings/bookmarks/remove", { path }, d => { d.bookmarks = d.bookmarks.filter(b => !same(b)); });
+    else await settingsUi.change("/api/settings/bookmarks/add", { name: baseName(path), path }, (d, r) => {
+      const b = r.settings.bookmarks.find(same);
+      if (b && !d.bookmarks.some(same)) d.bookmarks.push(structuredClone(b));
+    });
+    toast(starred ? "Removed from shortcuts" : "Added to shortcuts");
+  } catch (e) { toast(e.message, true); }
 };
 $("#fs-all").onchange = e => { files.sel = new Set(e.target.checked ? files.visible().map(i => i.path) : []); files.updateButtons(); };
 $("#fs-body").onclick = e => {
@@ -726,6 +730,20 @@ const settingsUi = {
     if (!$("#tab-settings").hidden) this.render();
     files.loadRoots().catch(() => { });
   },
+  // one item changed on the server, on top of the settings as they are there now (not this page's copy
+  // saved over them). An open draft keeps its unsaved edits and gets the same change, so saving it later
+  // doesn't undo this one.
+  async change(url, json, sameInDraft) {
+    const r = await api(url, { method: "POST", json });
+    const keepDraft = !!this.draft && this.dirty();
+    this.saved = r.settings;
+    if (keepDraft) sameInDraft(this.draft, r);
+    else this.draft = structuredClone(this.saved);
+    this.touch();
+    if (!$("#tab-settings").hidden) this.render();
+    files.loadRoots().catch(() => { });
+    return r;
+  },
   render() {
     const d = this.draft; if (!d) return;
     $("#set-name").value = d.name; $("#set-name").placeholder = d.computer_name;
@@ -995,11 +1013,12 @@ $("#cmd-text").onkeydown = e => { if (e.key === "Enter" && (e.ctrlKey || e.metaK
 $("#cmd-history").onchange = e => { const h = store.get("cmdHistory", []); if (e.target.value !== "") $("#cmd-text").value = h[+e.target.value]; e.target.value = ""; };
 $("#cmd-save").onclick = async () => {
   const script = $("#cmd-text").value.trim(); if (!script) return toast("Type a command first", true);
-  const name = prompt("Name for this quick action:"); if (!name) return;
-  if (!settingsUi.saved) await settingsUi.load();
-  const next = structuredClone(settingsUi.saved);
-  next.actions = [...(next.actions || []), { name, script, group: "", confirm: false }];
-  try { await settingsUi.save(next); toast("Saved as a quick action"); runUi.load(); } catch (e) { toast(e.message, true); }
+  const name = prompt("Name for this quick action:")?.trim(); if (!name) return;
+  try {
+    await settingsUi.change("/api/settings/actions/add", { name, script, group: "", confirm: false },
+      (d, r) => (d.actions ||= []).push(structuredClone(r.action)));
+    toast("Saved as a quick action"); runUi.load();
+  } catch (e) { toast(e.message, true); }
 };
 $("#actions-edit").onclick = () => { showTab("settings"); showSettingsSection("actions"); };
 

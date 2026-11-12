@@ -53,6 +53,27 @@ class SettingsBody(BaseModel):
     ai_access: str | None = Field(None, pattern="^(off|read|full)$")   # None (older dashboards): keep it
 
 
+class AddShortcutBody(BaseModel):
+    name: str = Field("", max_length=500)    # cut to 60; empty: the folder's name
+    path: str = Field(min_length=1, max_length=500)
+
+
+class RemoveShortcutBody(BaseModel):
+    path: str = Field(min_length=1, max_length=500)
+
+
+def same_folder(a: str, b: str) -> bool:
+    """The comparison the dashboard's star uses."""
+    return a.strip().lower() == b.strip().lower()
+
+
+def new_action_id(wanted: str, name: str, used: set) -> str:
+    aid = (wanted or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "action")[:40]
+    while aid in used:
+        aid += "-2"
+    return aid
+
+
 class AddKeyBody(BaseModel):
     public_key: str = Field(min_length=20, max_length=20000)
     label: str = Field("", max_length=60)
@@ -123,9 +144,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
         used = set()
         actions = []
         for a in body.actions:
-            aid = (a.id or re.sub(r"[^a-z0-9]+", "-", a.name.lower()).strip("-") or "action")[:40]
-            while aid in used:
-                aid += "-2"
+            aid = new_action_id(a.id, a.name, used)
             used.add(aid)
             actions.append({"id": aid, "name": a.name.strip(), "script": a.script, "group": a.group.strip(),
                             "confirm": a.confirm, **({"timeout": a.timeout} if a.timeout else {})})
@@ -138,6 +157,62 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
             config["screen_monitors"] = body.screen_monitors
         if body.ai_access is not None:
             config["ai_access"] = body.ai_access
+
+    # ---- one item at a time (the star in Files, "Save as quick action"): changes only that item, on top
+    # of the settings as they are now, so changes made meanwhile elsewhere are kept ----
+    def noted(request: Request, what: str):
+        activity.add("setup", action="settings", client=who(request), changed=[what])
+
+    @r.post("/settings/bookmarks/add")
+    def add_shortcut(request: Request, body: AddShortcutBody):
+        """Adds a folder shortcut (nothing changes when that folder has one already)."""
+        path = body.path.strip()
+        if not path:
+            raise HTTPException(400, "Choose a folder.")
+        name = (body.name.strip() or path.rstrip("\\/").replace("/", "\\").split("\\")[-1] or path)[:60].strip()
+        with cfgfile.lock:
+            shortcuts = config.get("bookmarks", [])
+            added = not any(same_folder(b.get("path", ""), path) for b in shortcuts)
+            if added:
+                config["bookmarks"] = [*shortcuts, {"name": name, "path": path}]
+                save()
+            after = current()
+        if added:
+            noted(request, "bookmarks")
+        return {"settings": after, "changed": added}
+
+    @r.post("/settings/bookmarks/remove")
+    def remove_shortcut(request: Request, body: RemoveShortcutBody):
+        """Removes the shortcuts to a folder (nothing changes when it has none)."""
+        with cfgfile.lock:
+            shortcuts = config.get("bookmarks", [])
+            kept = [b for b in shortcuts if not same_folder(b.get("path", ""), body.path)]
+            removed = len(kept) != len(shortcuts)
+            if removed:
+                config["bookmarks"] = kept
+                save()
+            after = current()
+        if removed:
+            noted(request, "bookmarks")
+        return {"settings": after, "changed": removed}
+
+    @r.post("/settings/actions/add")
+    def add_action(request: Request, body: Action):
+        """Adds a quick action at the end of the list, with a new id."""
+        if not body.name.strip():
+            raise HTTPException(400, "Give the quick action a name.")
+        if not body.script.strip():
+            raise HTTPException(400, "The script is empty.")
+        with cfgfile.lock:
+            actions = config.get("actions", [])
+            a = {"id": new_action_id("", body.name, {x.get("id") for x in actions}), "name": body.name.strip(),
+                 "script": body.script, "group": body.group.strip(), "confirm": body.confirm,
+                 **({"timeout": body.timeout} if body.timeout else {})}
+            config["actions"] = [*actions, a]
+            save()
+            after = current()
+        noted(request, "actions")
+        return {"settings": after, "action": a}
 
     @r.get("/keys")
     def get_keys():

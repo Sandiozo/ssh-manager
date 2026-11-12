@@ -293,7 +293,7 @@ AI access setting (`GET /api/ai` tells the level).
 |---|---|
 | `POST /api/run` `{script, title?, cwd?, env?, timeout?}` | Runs a PowerShell script (admin, in the signed-in user's session). `cwd` may use environment variables; `env` adds variables for this run; `timeout` (seconds) stops it after that long; titles over 200 characters are shortened. |
 | `GET /api/runs` | Recent and running runs. |
-| `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines are kept here; `skipped` tells how many were left out. `left_running` is true when the script ended while a program it started was still running. |
+| `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines (at most 2 million characters) are kept here; `skipped` tells how many were left out. A line longer than 1 MB comes as several lines, here and in the output file. `left_running` is true when the script ended while a program it started was still running. |
 | `GET /api/runs/{id}/output` | The complete output as a text file (for the last 50 runs); `output_file` in the run's status is where it is kept on the PC. |
 | `POST /api/runs/{id}/stop` | Stops a run and the programs it started, and answers once the run has ended. `stopped` is false when there was nothing to stop: a script that has ended isn't stopped, and programs it left running stay. |
 | `GET /api/actions`, `POST /api/actions/{id}/run` | Lists and runs quick actions. |

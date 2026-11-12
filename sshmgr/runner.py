@@ -2,8 +2,10 @@
 so the dashboard can stream it. Runs inherit the server's rights (normally admin, in the signed-in
 user's desktop session, so a script can also start programs with a window).
 
-The last MAX_LINES lines of each run are kept in memory for streaming; the complete output is also
-written to <data>/runs/<id>.log, which can be downloaded while the run is among the last KEEP_RUNS.
+The last MAX_LINES lines of each run (at most MAX_TAIL characters) are kept in memory for streaming; the
+complete output (its first MAX_OUTPUT bytes) is also written to <data>/runs/<id>.log, which can be
+downloaded while the run is among the last KEEP_RUNS. A line longer than MAX_LINE bytes, also one that
+hasn't ended yet, is split into lines of at most that size, in memory and in the file alike.
 
 A run ends when its own PowerShell process ends, also when a program it started (a server, an app) keeps
 running: such a program may hold on to the run's output pipe for as long as it runs. What it writes in the
@@ -29,6 +31,9 @@ import psutil
 
 CREATE_NO_WINDOW = 0x08000000
 MAX_LINES = 5000
+MAX_TAIL = 2 * 1024 * 1024        # characters of a run's last lines kept in memory (the newest line always)
+MAX_LINE = 1024 * 1024            # bytes of output taken as one line: a longer line is split
+ACTIVITY_OUTPUT = 64 * 1024       # characters of the end of a run's output kept in its activity log entry
 KEEP_RUNS = 50                    # finished runs kept (runs still going are always kept)
 MAX_OUTPUT = 50 * 1024 * 1024     # bytes of output written to a run's file; the rest is only streamed
 LINGER = 2.0                      # seconds output is still kept after the run's own process has ended
@@ -40,15 +45,17 @@ PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding 
 
 CLIXML_STRING = re.compile(r'<S S="(?:Error|Warning|Verbose|Debug|Information)">(.*?)</S>', re.S)
 CLIXML_ESCAPE = re.compile(r"_x([0-9A-Fa-f]{4})_")
+CLIXML_NS = "schemas.microsoft.com/powershell"
 
 
-def decode_clixml(line: str) -> list[str] | None:
+def decode_clixml(line: str, piece: bool = False) -> list[str] | None:
     """PowerShell started with -EncodedCommand writes its error stream as CLIXML when that stream isn't a
-    console: a "#< CLIXML" line, then <Objs ...> with the messages. Returns the readable lines (none for
-    the marker line), or None for an ordinary line."""
+    console: a "#< CLIXML" line, then <Objs ...> with the messages, all on one line at the end of the run.
+    Returns the readable lines (none for the marker line), or None for an ordinary line. `piece`: the line is
+    a piece of such a line that was too long to take whole (see MAX_LINE)."""
     if line.strip() == "#< CLIXML":
         return []
-    if not line.startswith("<Objs ") or "schemas.microsoft.com/powershell" not in line:
+    if not piece and not (line.startswith("<Objs ") and CLIXML_NS in line):
         return None
     text = "".join(CLIXML_ESCAPE.sub(lambda m: chr(int(m.group(1), 16)), html.unescape(s))
                    for s in CLIXML_STRING.findall(line))
@@ -168,6 +175,7 @@ class Run:
         self.title, self.script, self.client, self.action_id, self.agent = title, script, client, action_id, agent
         self.output = output.with_name(f"{self.id}.log")
         self.lines: list[str] = []
+        self.chars = 0            # characters in self.lines
         self.dropped = 0          # lines no longer in memory (still in the output file)
         self.status = "running"   # running | done | failed | stopped | timeout
         self.exit_code: int | None = None
@@ -251,7 +259,8 @@ class Runner:
             out = open(run.output, "w", encoding="utf-8", newline="\n")
         except OSError:
             out = None   # no output file (disk full, no access): the run still streams to the page
-        sink = {"out": out, "written": 0, "open": True, "part": bytearray()}   # part: a line read up to now
+        # part: a line read up to now; cut: how a line too long to take whole is being split, None when it isn't
+        sink = {"out": out, "written": 0, "open": True, "part": bytearray(), "cut": None}
         gate = threading.Lock()   # held while a line is kept; once sink["open"] is False nothing more is
 
         def keep(line: str):
@@ -270,21 +279,49 @@ class Runner:
                     sink["out"] = None
             with run.lock:
                 run.lines.append(line)
-                if len(run.lines) > MAX_LINES:
-                    extra = len(run.lines) - MAX_LINES
+                run.chars += len(line)
+                if len(run.lines) > MAX_LINES or run.chars > MAX_TAIL:
+                    extra = max(0, len(run.lines) - MAX_LINES)
+                    run.chars -= sum(len(x) for x in run.lines[:extra])
+                    while run.chars > MAX_TAIL and extra < len(run.lines) - 1:
+                        run.chars -= len(run.lines[extra])
+                        extra += 1
                     del run.lines[:extra]
                     run.dropped += extra
 
-        def take(raw: bytes):   # one line of output (called holding gate)
+        def take(raw, cut: str | None = None):   # a line of output, or a piece of one (called holding gate)
             line = raw.decode("utf-8", errors="replace").rstrip("\r")
-            decoded = decode_clixml(line)
+            decoded = None if cut == "text" else decode_clixml(line, piece=cut == "clixml")
             for line in [line] if decoded is None else decoded:
                 keep(line)
+
+        def split_long(buf: bytearray):
+            """Takes pieces of at most MAX_LINE bytes off the front of a line in buf that is longer, each as a
+            line (called holding gate). PowerShell's error output (one CLIXML line, which can be many MB) is
+            cut after a whole message, so every piece can still be read; other text not inside a character."""
+            while len(buf) > MAX_LINE:
+                if sink["cut"] is None:
+                    clixml = buf.startswith(b"<Objs ") and buf.find(CLIXML_NS.encode(), 0, MAX_LINE) >= 0
+                    sink["cut"] = "clixml" if clixml else "text"
+                end = buf.rfind(b"</S>", 0, MAX_LINE) + 4 if sink["cut"] == "clixml" else 0
+                if end < 4:
+                    end = MAX_LINE
+                    while end > MAX_LINE - 3 and (buf[end] & 0xC0) == 0x80:   # inside a UTF-8 character
+                        end -= 1
+                take(buf[:end], sink["cut"])
+                del buf[:end]
+
+        def line_ended(buf: bytearray):   # buf holds the rest of a line (called holding gate)
+            split_long(buf)
+            if sink["cut"] is None or buf.rstrip(b"\r"):   # (a line taken in pieces may have nothing left)
+                take(buf, sink["cut"])
+            sink["cut"] = None
 
         def read():
             # until every holder of the pipe has closed it: the run's process, and programs it started that
             # got its output (they may run for days). Read in pieces of at most READ_SIZE: once the run has
-            # ended they are dropped as they come, also from a program that never writes a line end.
+            # ended they are dropped as they come, also from a program that never writes a line end; before,
+            # a line longer than MAX_LINE is taken in pieces as it comes.
             pipe = run.proc.stdout
             try:
                 while chunk := pipe.read1(READ_SIZE):
@@ -293,13 +330,13 @@ class Runner:
                             continue
                         sink["part"] += chunk
                         if b"\n" in chunk:
-                            *lines, rest = sink["part"].split(b"\n")
-                            sink["part"] = bytearray(rest)
+                            *lines, sink["part"] = sink["part"].split(b"\n")
                             for raw in lines:
-                                take(raw)
+                                line_ended(raw)
+                        split_long(sink["part"])
                 with gate:
-                    if sink["open"] and sink["part"]:   # the last line had no line end
-                        take(bytes(sink["part"]))
+                    if sink["open"] and (sink["part"] or sink["cut"]):   # the last line had no line end
+                        line_ended(sink["part"])
                         sink["part"] = bytearray()
             except (OSError, ValueError):
                 pass
@@ -320,8 +357,8 @@ class Runner:
             holds_output = reader.is_alive()
             started = still_running(run)
             with gate:
-                if sink["part"]:   # written before the end without a line end
-                    take(bytes(sink["part"]))
+                if sink["part"] or sink["cut"]:   # written before the end without a line end
+                    line_ended(sink["part"])
                     sink["part"] = bytearray()
                 sink["open"] = False
                 if holds_output or started:
@@ -350,6 +387,9 @@ class Runner:
         if timer is not None:
             timer.cancel()
         tail = "\n".join(run.lines[-200:])
+        if len(tail) > ACTIVITY_OUTPUT:   # its end, from the start of a line when there is one
+            tail = tail[-ACTIVITY_OUTPUT:]
+            tail = tail.partition("\n")[2] or tail
         self.activity.add("action", ts=run.started, client=run.client, title=run.title, script=run.script[:20000],
                           output=tail, exit_code=code, status=run.status, duration_s=round(run.t1 - run.t0, 1),
                           **({"agent": run.agent} if run.agent else {}))

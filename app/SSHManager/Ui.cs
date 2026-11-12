@@ -457,7 +457,8 @@ internal static class Ui
               "key-removed": `Removed SSH key ${a.label || a.fingerprint}`, "pair-requested": `Asked ${a.target} for access`,
               "pair-allowed": `${a.target} allowed access`, "pair-denied": `${a.target} denied access`, "screen-viewed": "Viewed the screen",
               "approval-requested": `Asked for approval to run "${a.title}"`, "approval-allowed": `Allowed ${a.requested_by || "an AI agent"} to run "${a.title}"`,
-              "approval-denied": `Denied ${a.requested_by || "an AI agent"} running "${a.title}"`, "approval-unanswered": `"${a.title}" not run: nobody approved it` }[a.action] || a.action;
+              "approval-denied": `Denied ${a.requested_by || "an AI agent"} running "${a.title}"`, "approval-unanswered": `"${a.title}" not run: nobody approved it`,
+              "approval-withdrawn": `"${a.title}" not run: the request was withdrawn` }[a.action] || a.action;
             return { kind: "setup", text: t };
           }
           const p = a.path || arr(a.paths).join(", ");

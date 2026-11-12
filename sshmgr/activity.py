@@ -136,7 +136,8 @@ class ActivityLog:
         with self.lock:
             return self.next_id - 1
 
-    def list(self, after: int = 0, limit: int = 500, kind: str | None = None) -> list[dict]:
+    def list(self, after: int = 0, limit: int = 500, kind: str | None = None, keep=None) -> list[dict]:
+        """The last `limit` entries after id `after` (of that kind; `keep`: only entries it says yes to)."""
         with self.lock:
-            items = [i for i in self.items if i["id"] > after and (not kind or i["kind"] == kind)]
+            items = [i for i in self.items if i["id"] > after and (not kind or i["kind"] == kind) and (keep is None or keep(i))]
         return items[-limit:]

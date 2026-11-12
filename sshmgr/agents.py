@@ -9,12 +9,16 @@ Its requests are labelled "<agent> (<computer>)" in the activity log and live se
     read    looking only: status, activity, logs, files and downloads, screenshots, run output (GET requests)
     full    everything a person can do from the dashboard (default)
 
-Whatever the level, agents can never: see or change this PC's settings (/api/settings, the list of
-computers in /api/status) or the SSH keys allowed to log in; pair computers; see or answer approvals;
-restart the server or install an update; use the clipboard; read or write the server's own files (token,
-app secret, config.json, plugins, data folder) or SSH keys (see protect.py). What their tools need from
-the settings comes from their own calls: quick actions (/api/actions), configured logs (/api/logs) and
-folder shortcuts (/api/fs/roots). A quick action with
+Whatever the level, agents can never: see or change this PC's settings (/api/settings) or the SSH keys
+allowed to log in; pair computers; see or answer approvals; restart the server or install an update; use
+the clipboard; read or write the server's own files (token, app secret, config.json, plugins, data
+folder) or SSH keys (see protect.py). What their tools need from the settings comes from their own calls:
+quick actions (/api/actions), configured logs (/api/logs) and folder shortcuts (/api/fs/roots). In status
+they see this PC's load, the SSH server, the computers connected right now and what they run, the agents
+active here and how many logins there were (status_for_agent), not the computer list, the login history,
+addresses, MAC addresses, key labels or fingerprints; activity leaves out the settings, key, pairing,
+approval and update entries ("setup") and addresses (entry_for_agent). A computer known here only by its
+address is "unknown computer" to them. A quick action with
 "confirm": true - or a script identical to one - started by an agent waits until someone clicks Allow
 in an SSH Manager app (on this PC, or on the computer the agent works from), and is refused after
 APPROVAL_TTL seconds or on Deny. Only the app can answer: it proves itself with the app secret
@@ -26,6 +30,7 @@ import asyncio
 import contextlib
 import contextvars
 import hmac
+import ipaddress
 import re
 import secrets
 import threading
@@ -96,6 +101,81 @@ def agent_of(request: Request) -> str:
         pass
     raw = urllib.parse.unquote(raw)   # sshmgr sends non-ASCII names percent-encoded (UTF-8)
     return clean_name(raw) or DEFAULT_NAME
+
+
+UNKNOWN_COMPUTER = "unknown computer"
+HIDDEN_FIELDS = {"ip", "address", "mac", "fingerprint", "fp"}   # left out of activity entries agents get
+
+
+def _is_address(text: str) -> bool:
+    try:
+        ipaddress.ip_address(text.strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def without_address(label):
+    """A computer label as agents get it: a computer known here only by its address (not in the computer
+    list, no SSH Manager app reporting its name) is "unknown computer", also in "<agent> (<address>)"."""
+    if not isinstance(label, str):
+        return label
+    if _is_address(label):
+        return UNKNOWN_COMPUTER
+    if label.endswith(")") and " (" in label:
+        head, _, inner = label[:-1].rpartition(" (")
+        if _is_address(inner):
+            return f"{head} ({UNKNOWN_COMPUTER})"
+    return label
+
+
+def recent_for_agent(items: list[dict]) -> list[dict]:
+    """The agents active here (Agents.recent) as agents get them: without addresses or process ids."""
+    out = []
+    for a in items:
+        client = without_address(a.get("client"))
+        out.append({"agent": a.get("agent"), "client": client, "label": f"{a.get('agent')} ({client})", "last": a.get("last")})
+    return out
+
+
+def status_for_agent(s: dict) -> dict:
+    """/api/status as agents get it: what their tools show (this PC's name and load, the SSH server, the
+    computers connected right now and what they run, the agents active here, how many logins and failed
+    logins there were in 24 hours) and nothing else, so no computer list, login history, addresses, MAC
+    addresses, key labels or fingerprints."""
+    host, sshd = s.get("host") or {}, s.get("sshd") or {}
+    return {
+        "now": s.get("now"),
+        "host": {k: host.get(k) for k in ("name", "computer_name", "uptime_s", "cpu", "ram", "disks")},
+        "sshd": {k: sshd.get(k) for k in ("installed", "status", "listening", "ports")},
+        "sessions": [{"client": without_address(x.get("client")), "user": x.get("user"), "start": x.get("start"),
+                      "tunnel": x.get("tunnel"), "agents": x.get("agents", []),
+                      "commands": [{k: c.get(k) for k in ("name", "kind", "summary", "start")} for c in x.get("commands", [])]}
+                     for x in s.get("sessions", [])],
+        "agents": recent_for_agent(s.get("agents", [])),
+        "logins_24h": s.get("logins_24h"),
+        "failures_24h": [{"ts": f.get("ts")} for f in s.get("failures_24h", [])],
+        "version": s.get("version"),
+        "ai_access": s.get("ai_access"),
+    }
+
+
+def agent_may_see(item: dict) -> bool:
+    """Activity entries agents get: not the "setup" ones (settings, SSH keys, pairing, approvals, updates)."""
+    return item.get("kind") != "setup"
+
+
+def entry_for_agent(item: dict) -> dict:
+    """An activity entry as agents get it: without addresses or key fingerprints."""
+    out = {k: v for k, v in item.items() if k not in HIDDEN_FIELDS}
+    if "client" in out:
+        out["client"] = without_address(out["client"])
+    return out
+
+
+def run_for_agent(view: dict) -> dict:
+    """A run as agents get it: who started it without an address."""
+    return {**view, "client": without_address(view.get("client"))} if "client" in view else view
 
 
 def is_app(request: Request) -> bool:
@@ -278,7 +358,9 @@ def make_router(config: dict, agents: Agents, activity, who) -> APIRouter:
     @r.get("/ai")
     def ai(request: Request):
         """This PC's AI access level and the agents active here (also answers agents when access is off)."""
-        return {"access": level(config), "agents": agents.recent(), "you": agent_of(request) or None}
+        active = agents.recent()
+        return {"access": level(config), "agents": recent_for_agent(active) if is_agent(request) else active,
+                "you": agent_of(request) or None}
 
     @r.get("/approvals/pending")
     def pending(machine: str):

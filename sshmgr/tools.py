@@ -49,10 +49,17 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             raise HTTPException(404, "No such action.")
         return a
 
+    def shown(request: Request, view: dict) -> dict:
+        """A run as the caller gets it (agents: without addresses, see agents.py)."""
+        return agents_mod.run_for_agent(view) if agents_mod.is_agent(request) else view
+
+    def recent(request: Request) -> list[dict]:
+        return [shown(request, v) for v in runner.recent()]
+
     # ---- quick actions and the command panel ----
     @r.get("/actions")
-    def get_actions():
-        return {"actions": config.get("actions", []), "runs": runner.recent()}
+    def get_actions(request: Request):
+        return {"actions": config.get("actions", []), "runs": recent(request)}
 
     @r.post("/actions/{action_id}/run")
     async def run_action(request: Request, action_id: str):
@@ -63,7 +70,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
             await approve(request, client, a)
         run = runner.start(a.get("name", action_id), a.get("script", ""), client, action_id, float(a.get("timeout", 0) or 0),
                            agent=agent)
-        return run.view()
+        return shown(request, run.view())
 
     async def approve(request: Request, client: str, a: dict):
         """An action that asks first, started by an AI agent: waits for Allow in an SSH Manager app on this PC
@@ -129,19 +136,19 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
         client = await asyncio.to_thread(who, request)
         if agent and (a := asks_first(body.script)):
             await approve(request, client, a)
-        return runner.start(title, body.script, client, cwd=cwd, env=body.env or None, agent=agent,
-                            timeout=body.timeout).view()
+        return shown(request, runner.start(title, body.script, client, cwd=cwd, env=body.env or None, agent=agent,
+                                           timeout=body.timeout).view())
 
     @r.get("/runs")
-    def get_runs():
-        return {"runs": runner.recent()}
+    def get_runs(request: Request):
+        return {"runs": recent(request)}
 
     @r.get("/runs/{run_id}")
-    def get_run(run_id: str, after: int = 0):
+    def get_run(request: Request, run_id: str, after: int = 0):
         run = runner.get(run_id)
         if not run:
             raise HTTPException(404, "That run is no longer kept.")
-        return run.view(after)
+        return shown(request, run.view(after))
 
     @r.get("/runs/{run_id}/output")
     def get_run_output(run_id: str):

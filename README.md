@@ -257,12 +257,15 @@ example `Claude (LAPTOP)` instead of only the computer.
 | **Read-only** | only look: status, activity, logs, files and downloads, screenshots |
 | **Off** | do nothing |
 
-Whatever the setting, agents can never: see or change the PC's settings (its computer list included) or
-which SSH keys may log in; pair computers; answer approval or pairing requests; use the clipboard; restart
-the server or install updates; or read or change SSH Manager's own files (access token, settings, plugins)
-or SSH keys on the PC. Of the settings, agents only get what their tools show: the quick actions with
-their scripts, the configured logs and the folder shortcuts. The screen settings (whole screens, the list
-of apps that can be viewed) apply to them too. A quick action marked **ask first** that an agent starts, or a script
+Whatever the setting, agents can never: see or change the PC's settings or which SSH keys may log in; pair
+computers; answer approval or pairing requests; use the clipboard; restart the server or install updates;
+or read or change SSH Manager's own files (access token, settings, plugins) or SSH keys on the PC. Of the
+settings, agents only get what their tools show: the quick actions with their scripts, the configured logs
+and the folder shortcuts. The PC's status shows them its load, the SSH server, the computers connected
+right now and what they run, and how many logins there were, but not the computer list, the login
+history, addresses, key labels or fingerprints (a computer known only by its address is "unknown
+computer" to them). The activity they see leaves out settings, key, pairing, approval and update entries
+and addresses. The screen settings (whole screens, the list of apps that can be viewed) apply to them too. A quick action marked **ask first** that an agent starts, or a script
 identical to one, waits until someone clicks **Allow** in an SSH Manager app, on that PC or on the computer
 the agent works from. Only the app can answer; if nobody answers within two minutes, or someone clicks
 **Deny**, it doesn't run.
@@ -344,9 +347,10 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
   dashboard, reach only apps connected to this PC, expire after two minutes and change nothing until
   someone clicks **Allow**. The prompt shows the computer that asked, its address and its key fingerprint;
   after **Deny** it has to wait before asking again. Every request and answer is logged on both PCs.
-- AI agents are limited by each PC's AI access setting and can't change settings, keys or pairing, answer
-  approvals or read the access token, keys or clipboard; quick actions marked "ask first" need a person's
-  Allow in the app when an agent starts them. See
+- AI agents are limited by each PC's AI access setting and can't see or change settings, keys or pairing
+  (the status and activity they get leave out the computer list, the login history, addresses, key labels
+  and fingerprints), answer approvals or read the access token, keys or clipboard; quick actions marked
+  "ask first" need a person's Allow in the app when an agent starts them. See
   [Use with AI agents](#use-with-ai-agents) for what this does and doesn't protect against.
 - Passwords typed when adding a PC are handed to `ssh` once and never stored.
 - Updates are downloaded from this repository's GitHub releases and installed only when both their SHA-256

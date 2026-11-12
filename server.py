@@ -295,13 +295,13 @@ def login(request: Request, token: str = ""):
 
 @app.get("/api/status")
 def status(request: Request):
-    s = monitor.status(agents.tunnel_agents())
-    if agents_mod.is_agent(request):
-        s.pop("peers", None)   # the computer list is part of the settings, which agents can't see
-    return {**s, "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot(),
-            "activity_24h": activity.counts_24h(), "agents": agents.recent(), "ai_access": agents_mod.level(config),
-            "security": {"home_private": home_mod.security["private"], "warnings": home_mod.security["warnings"]},
-            "config_problem": CONFIG_PROBLEM}
+    s = {**monitor.status(agents.tunnel_agents()), "plugins": loaded_plugins, "version": __version__,
+         "update": updater.snapshot(), "activity_24h": activity.counts_24h(), "agents": agents.recent(),
+         "ai_access": agents_mod.level(config),
+         "security": {"home_private": home_mod.security["private"], "warnings": home_mod.security["warnings"]},
+         "config_problem": CONFIG_PROBLEM}
+    # agents get only what their tools show: no computer list, login history, addresses or keys
+    return agents_mod.status_for_agent(s) if agents_mod.is_agent(request) else s
 
 
 def who(request: Request) -> str:
@@ -343,10 +343,15 @@ def whoami(request: Request):
 
 
 @app.get("/api/activity")
-def get_activity(after: int = 0, limit: int = 500, kind: str | None = None):
+def get_activity(request: Request, after: int = 0, limit: int = 500, kind: str | None = None):
     """Entries after id `after`. `log_id` changes when ids start over (the log was deleted): a page that
-    sees a different log_id, or a last_id below its `after`, should start again from after=0."""
-    return {"items": activity.list(after, limit, kind), "log_id": activity.log_id, "last_id": activity.last_id()}
+    sees a different log_id, or a last_id below its `after`, should start again from after=0. Agents get
+    no "setup" entries and no addresses or key fingerprints (see agents.py)."""
+    if agents_mod.is_agent(request):
+        items = [agents_mod.entry_for_agent(i) for i in activity.list(after, limit, kind, keep=agents_mod.agent_may_see)]
+    else:
+        items = activity.list(after, limit, kind)
+    return {"items": items, "log_id": activity.log_id, "last_id": activity.last_id()}
 
 
 class DiskStats(BaseModel):

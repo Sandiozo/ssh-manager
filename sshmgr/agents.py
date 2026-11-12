@@ -54,15 +54,16 @@ current = contextvars.ContextVar("sshmgr_agent", default="")
 _app_secret = {"value": ""}
 
 OWNER = "Ask the owner to do it in SSH Manager."
-# requests an agent may never make, whatever the access level: (methods or None for all, path, why)
+# requests an agent may never make, whatever the access level: (methods or None for all, path, why: the
+# reason, or a function of the access level that gives it)
 NEVER = [
     (None, re.compile(r"^/api/approvals(/|$)"),
      "AI agents can't see or answer approvals; a person answers them in the SSH Manager app."),
     (None, re.compile(r"^/api/pair(/|$)"), f"AI agents can't pair computers. {OWNER}"),
     ({"PUT", "POST", "PATCH", "DELETE"}, re.compile(r"^/api/settings(/|$)"), f"AI agents can't change this PC's settings. {OWNER}"),
-    (None, re.compile(r"^/api/settings(/|$)"),
-     "AI agents can't see this PC's settings. Its quick actions, logs and folder shortcuts are listed by "
-     "/api/actions, /api/logs and /api/fs/roots."),
+    (None, re.compile(r"^/api/settings(/|$)"),   # the other calls only help when agents may use them
+     lambda lv: "AI agents can't see this PC's settings." + ("" if lv == "off" else
+                " Its quick actions, logs and folder shortcuts are listed by /api/actions, /api/logs and /api/fs/roots.")),
     ({"PUT", "POST", "PATCH", "DELETE"}, re.compile(r"^/api/keys(/|$)"), f"AI agents can't add or remove SSH keys. {OWNER}"),
     (None, re.compile(r"^/api/keys(/|$)"), "AI agents can't see which SSH keys may log in to this PC."),
     (None, re.compile(r"^/api/server(/|$)"), f"AI agents can't restart or stop the SSH Manager server. {OWNER}"),
@@ -202,10 +203,10 @@ def refusal(request: Request, config: dict) -> str | None:
     path, method = request.url.path, request.method
     if path in ALWAYS_OPEN:
         return None
+    lv = level(config)
     for methods, pattern, why in NEVER:
         if (methods is None or method in methods) and pattern.search(path):
-            return why
-    lv = level(config)
+            return why(lv) if callable(why) else why
     if lv == "off":
         return "AI agents are turned off on this PC (Settings → AI agents in SSH Manager)."
     if lv == "read" and method not in ("GET", "HEAD"):

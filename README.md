@@ -124,7 +124,10 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
   download, folders come as zip; rename, delete (to the Recycle Bin) and folder shortcuts. A transfer panel
   shows progress, speed and time left.
 - **Run:** one-click quick actions (PowerShell scripts you save, grouped, optionally asking before they run)
-  and a command panel for anything else. Output streams live and runs can be stopped.
+  and a command panel for anything else. Output streams live and runs can be stopped. A run ends when its
+  script ends. A program the script leaves running (a server, an app) may stop, or lose its output, when
+  SSH Manager restarts or updates; if it has to keep running, start it on its own, for example as a
+  scheduled task, with its output going to a file.
 - **Logs:** follow any log file live, like `tail -f`: a file, the newest file in a folder, or the newest
   match of a pattern such as `C:\Logs\app-*.log`. Filter lines as you type.
 - **Screen:** a view-only live preview of a monitor or of a single app window (even when other windows
@@ -289,9 +292,9 @@ AI access setting (`GET /api/ai` tells the level).
 |---|---|
 | `POST /api/run` `{script, title?, cwd?, env?, timeout?}` | Runs a PowerShell script (admin, in the signed-in user's session). `cwd` may use environment variables; `env` adds variables for this run; `timeout` (seconds) stops it after that long; titles over 200 characters are shortened. |
 | `GET /api/runs` | Recent and running runs. |
-| `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines are kept here; `skipped` tells how many were left out. |
+| `GET /api/runs/{id}?after=N` | Status, exit code and the output lines after line `N` (count from the start of the run; `next` is the value for the following call). Only the last 5,000 lines are kept here; `skipped` tells how many were left out. `left_running` is true when the script ended while a program it started was still running. |
 | `GET /api/runs/{id}/output` | The complete output as a text file (for the last 50 runs); `output_file` in the run's status is where it is kept on the PC. |
-| `POST /api/runs/{id}/stop` | Stops a run. |
+| `POST /api/runs/{id}/stop` | Stops a run and the programs it started, and answers once the run has ended. `stopped` is false when there was nothing to stop: a script that has ended isn't stopped, and programs it left running stay. |
 | `GET /api/actions`, `POST /api/actions/{id}/run` | Lists and runs quick actions. |
 | `GET /api/screen/windows` | Open app windows (`id`, `app`, `title`), limited to the allowed apps. |
 | `GET /api/screen?window=ID` or `?monitor=N` | A screenshot. `format=png` is lossless; `width=0` keeps the full size; `quality` (JPEG) goes up to 100. |

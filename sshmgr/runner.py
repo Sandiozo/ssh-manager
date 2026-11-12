@@ -8,7 +8,9 @@ written to <data>/runs/<id>.log, which can be downloaded while the run is among 
 A run ends when its own PowerShell process ends, also when a program it started (a server, an app) keeps
 running: such a program may hold on to the run's output pipe for as long as it runs. What it writes in the
 first LINGER seconds after that is kept; later output is read and dropped (so the program never stalls on
-a full pipe), and the run says that a program it started is still running."""
+a full pipe), and the run says that a program it started is still running. Such a program loses that pipe
+when the server restarts or updates (some programs stop then), and on an installed PC stopping the server's
+task may end it too, so the note says it may stop then."""
 import base64
 import ctypes
 import html
@@ -290,12 +292,16 @@ class Runner:
                     sink["part"] = bytearray()
                 sink["open"] = False
                 if holds_output or started:
-                    if len(started) > 1:
+                    many = len(started) > 1
+                    if many:
                         what = "programs it started are still running: " + ", ".join(started)
                     else:
                         what = "a program it started is still running" + (f": {started[0]}" if started else "")
-                    later = " What it writes from now on isn't shown here." if holds_output else ""
-                    keep(f"[The script has ended, but {what}.{later}]")
+                    it, writes = ("they", "write") if many else ("it", "writes")
+                    # SSH Manager restarting or updating ends its pipe, and on an installed PC its task
+                    later = (f"What {it} {writes} from now on isn't shown here, and {it} may stop" if holds_output
+                             else f"{it.capitalize()} may stop") + " when SSH Manager restarts or updates."
+                    keep(f"[The script {'was stopped' if run.stopping else 'has ended'}, but {what}. {later}]")
                 if sink["out"] is not None:
                     try:
                         sink["out"].close()

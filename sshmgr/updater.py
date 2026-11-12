@@ -543,6 +543,16 @@ class Updater:
 
 if __name__ == "__main__":
     # Checks a downloaded installer by hand and shows its version: python -m sshmgr.updater <installer> <installer.sig>
+    # build.ps1 checks a built one: python -m sshmgr.updater --built <installer> <version> prints the version it finds
+    # and fails unless the updaters would take the installer as that version.
+    if len(sys.argv) == 4 and sys.argv[1] == "--built":
+        found = exe_version(Path(sys.argv[2]))
+        print(".".join(str(n) for n in found) if found else "unknown (no version resource found)")
+        try:
+            check_installer_version(found, sys.argv[3], current="0")   # any version is newer than 0
+        except UpdateError:
+            sys.exit(1)
+        sys.exit(0)
     if len(sys.argv) != 3:
         sys.exit("usage: python -m sshmgr.updater <SSHManager-Setup.exe> <SSHManager-Setup.exe.sig>")
     exe, sigfile = Path(sys.argv[1]), Path(sys.argv[2])

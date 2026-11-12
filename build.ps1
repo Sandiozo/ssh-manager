@@ -35,6 +35,13 @@ $iscc = @("$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe", "${env:ProgramFile
 if (-not $iscc) { $iscc = (Get-Command iscc -ErrorAction Stop).Source }
 & $iscc "/DVersion=$version" /Q "$root\installer\sshmanager.iss"
 if ($LASTEXITCODE) { throw "Inno Setup failed" }
+# PCs install an update only when the installer's version resource, read as their updaters read it, is the release's
+Push-Location $root
+try { $found = & $Python -m sshmgr.updater --built "$build\SSHManager-Setup.exe" $version } finally { Pop-Location }
+if ($LASTEXITCODE) {
+    if (-not $found) { $found = 'unknown (reading it failed, see above)' }
+    throw "The built installer is version $found, not $version, so no PC would install it as this update"
+}
 $hash = (Get-FileHash "$build\SSHManager-Setup.exe" -Algorithm SHA256).Hash.ToLower()
 Set-Content "$build\SSHManager-Setup.exe.sha256" "$hash  SSHManager-Setup.exe" -Encoding ascii
 "Built $build\SSHManager-Setup.exe ($([math]::Round((Get-Item "$build\SSHManager-Setup.exe").Length / 1MB, 1)) MB)"

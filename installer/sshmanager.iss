@@ -11,8 +11,9 @@
 ;    SSH Manager's own processes, reopens the app for everyone who had it open, and starts the server
 ;    again even when the update fails or is cancelled.
 ; Command line: /ROLES=app or /ROLES=app,server picks the roles for a new install; /SERVERUSER=<account>
-; picks the administrator account the server runs as. Uninstall: /REMOVEACCESS also removes the SSH
-; keys SSH Manager added and turns off OpenSSH Server (asked about when not silent).
+; picks the administrator account the server runs as; /ALLOWDOWNGRADE lets a silent install put this
+; version over a newer one (it stops otherwise). Uninstall: /REMOVEACCESS also removes the SSH keys SSH
+; Manager added and turns off OpenSSH Server (asked about when not silent).
 
 #ifndef Version
   #define Version "0.0.0"
@@ -33,6 +34,8 @@ AppPublisher=Sandiozo
 AppPublisherURL=https://github.com/Sandiozo/ssh-manager
 AppSupportURL=https://github.com/Sandiozo/ssh-manager/issues
 AppUpdatesURL=https://github.com/Sandiozo/ssh-manager/releases
+; the updaters (sshmgr/updater.py, AppUpdater.cs) read this from the signed installer and run it only
+; when it is the release's version and newer than the one installed
 VersionInfoVersion={#Version}
 DefaultDirName={autopf}\SSH Manager
 DisableProgramGroupPage=yes
@@ -278,19 +281,31 @@ end;
 
 { ---- downgrades ---- }
 
-function InitializeSetup: Boolean;
+{ Whether to go ahead with Installed (the version on this PC) there: anything but an older version over
+  a newer one. The wizard asks; a silent install (an update) refuses unless /ALLOWDOWNGRADE is given, so
+  an older installer can't be passed off as an update. The same version again is fine (a repair). }
+function DowngradeAllowed(const Installed: String): Boolean;
 begin
   Result := True;
+  if (Installed = '') or (CompareVersions('{#Version}', Installed) >= 0) then Exit;
+  Log('Downgrade: ' + Installed + ' is installed, this is {#Version}');
+  if WizardSilent then
+  begin
+    Result := HasParam('/ALLOWDOWNGRADE');
+    if not Result then
+      Log('Not installing: SSH Manager ' + Installed + ' is newer. To install this older version silently, add /ALLOWDOWNGRADE.');
+  end
+  else
+    Result := MsgBox('SSH Manager ' + Installed + ' is installed, and this installer has an older version ({#Version}).' + #13#10#13#10 +
+      'Settings saved by the newer version may not work with the older one. Install the older version anyway?',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+end;
+
+function InitializeSetup: Boolean;
+begin
   PrevDir := FindPreviousDir;
   if not RegQueryStringValue(HKLM, '{#UninstallKey}', 'DisplayVersion', PrevVersion) then PrevVersion := '';
-  if (PrevVersion <> '') and (CompareVersions('{#Version}', PrevVersion) < 0) then
-  begin
-    Log('Downgrade: ' + PrevVersion + ' is installed, this is {#Version}');
-    if not WizardSilent then
-      Result := MsgBox('SSH Manager ' + PrevVersion + ' is installed, and this installer has an older version ({#Version}).' + #13#10#13#10 +
-        'Settings saved by the newer version may not work with the older one. Install the older version anyway?',
-        mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
-  end;
+  Result := DowngradeAllowed(PrevVersion);
 end;
 
 { ---- "What should this PC do?": Client, or Client and server ---- }

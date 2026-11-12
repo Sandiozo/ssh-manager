@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -13,9 +14,11 @@ namespace SSHManager;
 /// updates everything itself (silently, it has admin rights), so this only runs where the app is
 /// installed alone. The installer needs admin rights, so Windows asks (UAC); for a user who isn't an
 /// administrator, or who said no once, updates are only announced, not started automatically.
-/// An installer is started only when it matches its published SHA-256 and carries a valid release
-/// signature (checked with Windows' ssh-keygen against the key pinned below); it stays open, so it
-/// can't be changed, from the checks until it has started.
+/// An installer is started only when it matches its published SHA-256, carries a valid release
+/// signature (checked with Windows' ssh-keygen against the key pinned below), and its own version (in
+/// its version resource, so covered by the signature) is the release's and newer than this app's: an
+/// older signed installer put up as a new release isn't run. It stays open, so it can't be changed,
+/// from the checks until it has started.
 /// </summary>
 internal sealed class AppUpdater(AppSettings settings, Action<string, string> notify)
 {
@@ -198,6 +201,7 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
             if (actual != expected) throw new InvalidOperationException("The download didn't match its checksum.");
             locked.Position = 0;
             if (await VerifySignatureAsync(locked, signature, Folder) is { } bad) throw new InvalidOperationException(bad);
+            if (CheckInstallerVersion(ExeVersion(locked), version, Current) is { } wrong) throw new InvalidOperationException(wrong);
 
             Status = "installing";
             Changed?.Invoke();
@@ -350,6 +354,80 @@ internal sealed class AppUpdater(AppSettings settings, Action<string, string> no
             try { File.Delete(signers); } catch (Exception) { }
             try { File.Delete(sig); } catch (Exception) { }
         }
+    }
+
+    /// <summary>Null when the installer's own version (from <see cref="ExeVersion"/>) is the release's version and
+    /// newer than <paramref name="current"/>, else why not. (The version resource has only numbers, so a
+    /// pre-release counts as the release with the same numbers; the release workflow doesn't build pre-releases.)</summary>
+    internal static string? CheckInstallerVersion(Version? found, string release, string current)
+    {
+        if (found is null) return "The installer doesn't say which version it is.";
+        var have = $"{found.Major}.{found.Minor}.{found.Build}";
+        var (major, minor, patch, _) = ParseVersion(release);
+        if ((found.Major, found.Minor, found.Build) != (major, minor, patch)) return $"The installer is version {have}, not {release}.";
+        if (!Newer(release, current)) return $"The installer is version {have}, which isn't newer than this PC's {current}.";
+        return null;
+    }
+
+    /// <summary>The file version in an exe's version resource, or null when it has none. Read from the open
+    /// file itself, the bytes whose signature was checked: Windows' lookup could take it from another file.</summary>
+    internal static Version? ExeVersion(Stream file)
+    {
+        static uint U32(byte[] b, int at) => BinaryPrimitives.ReadUInt32LittleEndian(b.AsSpan(at));
+        static ushort U16(byte[] b, int at) => BinaryPrimitives.ReadUInt16LittleEndian(b.AsSpan(at));
+        byte[] At(long offset, int size)
+        {
+            var data = new byte[size];
+            file.Position = offset;
+            file.ReadExactly(data);
+            return data;
+        }
+        try
+        {
+            var dos = At(0, 64);
+            if (dos[0] != 'M' || dos[1] != 'Z') return null;
+            long pe = U32(dos, 0x3C);
+            var head = At(pe, 24);
+            if (U32(head, 0) != 0x00004550) return null;   // "PE\0\0"
+            int sections = U16(head, 6), optSize = U16(head, 20);
+            var opt = At(pe + 24, optSize);
+            var dirs = U16(opt, 0) switch { 0x10B => 96, 0x20B => 112, _ => -1 };   // PE32, PE32+
+            if (dirs < 0 || optSize < dirs + 24 || U32(opt, dirs - 4) < 3) return null;
+            var table = At(pe + 24 + optSize, 40 * sections);
+            long OffsetOf(uint rva)
+            {
+                for (var i = 0; i < sections; i++)
+                {
+                    uint va = U32(table, 40 * i + 12), raw = U32(table, 40 * i + 16), ptr = U32(table, 40 * i + 20);
+                    if (rva >= va && rva - va < raw) return ptr + (long)(rva - va);
+                }
+                throw new InvalidDataException("not in the file");
+            }
+            var root = OffsetOf(U32(opt, dirs + 16));   // the resource directory
+            uint node = 0x80000000;
+            foreach (var wanted in new uint?[] { 16, null, null })   // RT_VERSION, then its first name and first language
+            {
+                if ((node & 0x80000000) == 0) return null;
+                var directory = root + (node & 0x7FFFFFFF);
+                var counts = At(directory + 12, 4);   // named entries, then numbered ones
+                var count = U16(counts, 0) + U16(counts, 2);
+                var entries = At(directory + 16, 8 * count);
+                uint? next = null;
+                for (var i = 0; i < count && next is null; i++)
+                    if (wanted is null || U32(entries, 8 * i) == wanted) next = U32(entries, 8 * i + 4);
+                if (next is null) return null;
+                node = next.Value;
+            }
+            if ((node & 0x80000000) != 0) return null;
+            var leaf = At(root + node, 8);
+            var info = At(OffsetOf(U32(leaf, 0)), (int)Math.Min(U32(leaf, 4), 64u << 10));
+            // VS_VERSIONINFO: lengths and type, "VS_VERSION_INFO" in UTF-16, padding, VS_FIXEDFILEINFO
+            if (info.Length < 56 || Encoding.Unicode.GetString(info, 6, 32) != "VS_VERSION_INFO\0" || U16(info, 2) < 52) return null;
+            if (U32(info, 40) != 0xFEEF04BD) return null;
+            uint ms = U32(info, 48), ls = U32(info, 52);
+            return new Version((int)(ms >> 16), (int)(ms & 0xFFFF), (int)(ls >> 16), (int)(ls & 0xFFFF));
+        }
+        catch (Exception e) when (e is IOException or InvalidDataException or ArgumentException) { return null; }
     }
 
     static IEnumerable<string> KeygenCandidates()

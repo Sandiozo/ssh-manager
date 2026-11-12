@@ -95,8 +95,8 @@ internal sealed class PairRequests(Form owner, AppSettings settings, Func<Link?>
                                       $"Nothing was changed.\n\nIf you still want this, send the request again on {from}.",
             PairOutcome.KeyLeft => $"{from} could not be told that you allowed it, and its key could not be taken off this PC again:\n\n{result.Detail}\n\n" +
                                    $"The key is still on this PC: {from} can sign in with it. If you don't want that, remove it in this PC's Settings → SSH keys. {keyLine}",
-            _ => $"Adding the key of {from} failed, and this PC's SSH keys could not be read to see whether it was added all the same:\n\n{result.Detail}\n\n" +
-                 $"{from} was told that it failed. Look in this PC's Settings → SSH keys: if the key is there, {from} can sign in with it; remove it if you don't want that. {keyLine}",
+            _ => $"Adding the key of {from} failed, and SSH Manager couldn't make sure that it wasn't added all the same (this PC's server may also still be adding it):\n\n{result.Detail}\n\n" +
+                 $"{from} was told that it failed. In a minute, look in this PC's Settings → SSH keys: if the key is there, {from} can sign in with it; remove it if you don't want that. {keyLine}",
         };
         if (problem is null) balloon("SSH Manager", $"{from} can now manage this PC.");
         else

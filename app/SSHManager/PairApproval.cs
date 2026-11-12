@@ -23,7 +23,8 @@ internal enum PairOutcome
     Unreachable,
     /// <summary>This PC's own server isn't running, so the key could not be added; the requester was told.</summary>
     NoServer,
-    /// <summary>This PC's server refused the key; the requester was told why.</summary>
+    /// <summary>The key is not on this PC and won't be added any more (this PC's server refused it or couldn't
+    /// add it, or it was taken out again after an add that didn't answer); the requester was told why.</summary>
     KeyNotAdded,
     /// <summary>The request ended between the check and the answer: the key was taken out again.</summary>
     Late,
@@ -32,8 +33,9 @@ internal enum PairOutcome
     Unanswered,
     /// <summary>As Late or Unanswered, but the key could not be taken out again: it is still on this PC.</summary>
     KeyLeft,
-    /// <summary>Adding the key failed in a way that doesn't say whether it was added, and this PC's keys
-    /// could not be read afterwards: the key may be on this PC. The requester was told it failed.</summary>
+    /// <summary>Adding the key failed in a way that doesn't say whether it was added, and it couldn't be made
+    /// sure that the key isn't on this PC and won't be added any more: it may be there now or later. The
+    /// requester was told it failed.</summary>
     KeyUnsure,
 }
 
@@ -47,7 +49,9 @@ internal sealed record PairResult(PairOutcome Outcome, string Detail = "");
 ///
 /// A call that fails doesn't say nothing happened: the server may have done its part before the answer
 /// got lost (the app stops waiting after a few seconds). So after a failed call the app looks at what is
-/// really there, this PC's key list or the request's state, and what the user is told follows that.
+/// really there, this PC's key list or the request's state, and what the user is told follows that. An add
+/// that got no answer at all may even still be under way: the key list can't rule out that it is written
+/// later, only a removal that worked can (see <see cref="AllowAsync"/>).
 /// </summary>
 internal static class PairApproval
 {
@@ -131,32 +135,59 @@ internal static class PairApproval
             await AnswerAsync(pc, id, me, false, why);
             return new(PairOutcome.KeyNotAdded, why);
         }
+        // true only for a key this request's add put here (or may have): that one is taken out again if the
+        // answer doesn't arrive. A key someone else added meanwhile stays, like one that was here before
         var added = false;
         if (before == false)
         {
             string? error = null;
+            var answered = false;   // the server finished the add, whatever its answer
+            var refused = false;    // it said no before writing anything (a 4xx answer)
             try
             {
                 using var r = await own(HttpMethod.Post, "/api/keys/add", new { public_key = publicKey, label });
-                if (!r.IsSuccessStatusCode) error = Pairing.Detail(await r.Content.ReadAsStringAsync()) ?? "The key could not be added.";
+                answered = true;
+                if (!r.IsSuccessStatusCode)
+                {
+                    error = Pairing.Detail(await r.Content.ReadAsStringAsync()) ?? "The key could not be added.";
+                    refused = (int)r.StatusCode is >= 400 and < 500;
+                }
             }
             catch (Exception e)
             {
                 AppLog.Write("Adding a paired PC's key", e);
                 error = NoAnswer;
             }
-            if (error is not null)
+            if (error is null) added = true;
+            else if (refused)
+            {
+                // nothing was written for this request. The key may be here all the same, added meanwhile by
+                // another prompt for the same key or by hand: then it can be used, but isn't this request's
+                if (await HasKeyAsync(own, fingerprint) != true)
+                {
+                    await AnswerAsync(pc, id, me, false, error);   // the requester sees why instead of waiting for nothing
+                    return new(PairOutcome.KeyNotAdded, error);
+                }
+            }
+            else
             {
                 // the server writes the key before it finishes its answer: the key may be there all the same
                 var now = await HasKeyAsync(own, fingerprint, tries: 3);
-                if (now is null && await TakeOutAsync(own, fingerprint) is null) now = false;
                 if (now != true)
                 {
-                    await AnswerAsync(pc, id, me, false, error);   // the requester sees why instead of waiting for nothing
-                    return new(now == false ? PairOutcome.KeyNotAdded : PairOutcome.KeyUnsure, error);
+                    // An add that got no answer may still be under way and write the key later, whatever the list
+                    // says now. Taking the key out before the requester hears no settles it: this PC's server adds
+                    // and removes keys one at a time, so the removal waits for an add in progress, and only one
+                    // that worked shows the key is gone for good. An add that did answer is over: there the list
+                    // (or a removal) says what is there
+                    var gone = answered
+                        ? now == false || await TakeOutAsync(own, fingerprint) is null
+                        : await RemoveAsync(own, fingerprint) is null;
+                    await AnswerAsync(pc, id, me, false, error);
+                    return new(gone ? PairOutcome.KeyNotAdded : PairOutcome.KeyUnsure, error);
                 }
+                added = true;
             }
-            added = true;
         }
         // the key is on this PC: tell the requester. An answer that seems lost may have arrived, so the
         // request's own state decides
@@ -210,21 +241,28 @@ internal static class PairApproval
 
     const string NoAnswer = "SSH Manager's server on this PC didn't answer.";
 
-    /// <summary>Takes the key off this PC again. Null when it is gone; otherwise why it may still be there.</summary>
-    static async Task<string?> TakeOutAsync(PairSend own, string fingerprint)
+    /// <summary>Asks this PC's server to take the key off. Null when it did; otherwise why not (also when
+    /// the key wasn't there to take off).</summary>
+    static async Task<string?> RemoveAsync(PairSend own, string fingerprint)
     {
-        string why;
         try
         {
             using var r = await own(HttpMethod.Post, "/api/keys/remove", new { fingerprint });
             if (r.IsSuccessStatusCode) return null;
-            why = Pairing.Detail(await r.Content.ReadAsStringAsync()) ?? $"This PC's server answered {(int)r.StatusCode}.";
+            return Pairing.Detail(await r.Content.ReadAsStringAsync()) ?? $"This PC's server answered {(int)r.StatusCode}.";
         }
         catch (Exception e)
         {
             AppLog.Write("Taking a paired PC's key out again", e);
-            why = NoAnswer;
+            return NoAnswer;
         }
+    }
+
+    /// <summary>Takes the key off this PC again, once no add of it is under way any more. Null when it is
+    /// gone; otherwise why it may still be there.</summary>
+    static async Task<string?> TakeOutAsync(PairSend own, string fingerprint)
+    {
+        if (await RemoveAsync(own, fingerprint) is not { } why) return null;
         // the same here: what counts is whether the key is still listed
         return await HasKeyAsync(own, fingerprint, tries: 3) == false ? null : why;
     }

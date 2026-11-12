@@ -6,8 +6,10 @@ the app. Copies running from source are only told about updates (use git pull).
 
 An update is installed only when the installer matches its published SHA-256 *and* carries a valid
 release signature (ed25519, made by the release workflow with the key whose public half is pinned
-below; checked with Windows' ssh-keygen). It is downloaded into an admin-only folder and kept open
-(no writing, renaming or deleting by others) from the checks until the installer has started.
+below; checked with Windows' ssh-keygen) *and* its own version (in its version resource, so covered by
+the signature) is the release's and newer than this one: an older signed installer put up as a new
+release isn't installed. It is downloaded into an admin-only folder and kept open (no writing,
+renaming or deleting by others) from the checks until the installer has started.
 
 Automatic installs wait while runs or file transfers are in progress (`busy`), and back off after a
 failed attempt instead of retrying it every time. A manual "Install now" goes ahead regardless (the
@@ -20,6 +22,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import threading
@@ -136,6 +139,82 @@ def verify_signature(installer: Path, signature: bytes, workdir: Path) -> None:
                 p.unlink()
             except OSError:
                 pass
+
+
+# ---- the installer's own version ----
+
+def exe_version(path: Path) -> Optional[tuple]:
+    """The file version (a, b, c, d) in an exe's version resource, or None when it has none. Read from
+    the file's own bytes: Windows' lookup could take it from another file next to it."""
+    try:
+        with open(path, "rb") as f:
+            def at(offset: int, size: int) -> bytes:
+                f.seek(offset)
+                data = f.read(size)
+                if len(data) != size:
+                    raise ValueError("cut short")
+                return data
+
+            dos = at(0, 64)
+            if dos[:2] != b"MZ":
+                return None
+            pe = struct.unpack_from("<I", dos, 0x3C)[0]
+            head = at(pe, 24)
+            if head[:4] != b"PE\0\0":
+                return None
+            sections, opt_size = struct.unpack_from("<H", head, 6)[0], struct.unpack_from("<H", head, 20)[0]
+            opt = at(pe + 24, opt_size)
+            dirs = {0x10B: 96, 0x20B: 112}.get(struct.unpack_from("<H", opt, 0)[0])   # PE32, PE32+
+            if dirs is None or opt_size < dirs + 24 or struct.unpack_from("<I", opt, dirs - 4)[0] < 3:
+                return None
+            table = at(pe + 24 + opt_size, 40 * sections)
+
+            def offset_of(rva: int) -> int:
+                for i in range(sections):
+                    va, raw, ptr = struct.unpack_from("<III", table, 40 * i + 12)
+                    if va <= rva < va + raw:
+                        return ptr + rva - va
+                raise ValueError("not in the file")
+
+            root = offset_of(struct.unpack_from("<I", opt, dirs + 16)[0])   # the resource directory
+            node = 0x80000000
+            for wanted in (16, None, None):   # RT_VERSION, then its first name and first language
+                if not node & 0x80000000:
+                    return None
+                directory = root + (node & 0x7FFFFFFF)
+                count = sum(struct.unpack_from("<HH", at(directory + 12, 4)))
+                entries = at(directory + 16, 8 * count)
+                node = next((struct.unpack_from("<I", entries, 8 * i + 4)[0] for i in range(count)
+                             if wanted is None or struct.unpack_from("<I", entries, 8 * i)[0] == wanted), None)
+                if node is None:
+                    return None
+            if node & 0x80000000:
+                return None
+            rva, size = struct.unpack_from("<II", at(root + node, 8))
+            info = at(offset_of(rva), min(size, 64 << 10))
+            # VS_VERSIONINFO: lengths and type, "VS_VERSION_INFO" in UTF-16, padding, VS_FIXEDFILEINFO
+            if info[6:38] != "VS_VERSION_INFO\0".encode("utf-16-le") or struct.unpack_from("<H", info, 2)[0] < 52:
+                return None
+            signature, _, ms, ls = struct.unpack_from("<IIII", info, 40)
+            if signature != 0xFEEF04BD:
+                return None
+            return ms >> 16, ms & 0xFFFF, ls >> 16, ls & 0xFFFF
+    except (OSError, ValueError, struct.error):
+        return None
+
+
+def check_installer_version(found: Optional[tuple], release: str, current: str = __version__) -> None:
+    """Raises UpdateError unless the installer's own version (from exe_version) is the release's version
+    and newer than `current`. (The version resource has only numbers, so a pre-release counts as the
+    release with the same numbers; the release workflow doesn't build pre-releases.)"""
+    if found is None:
+        raise UpdateError("The downloaded update doesn't say which version it is; not installing it.")
+    have = ".".join(str(n) for n in found[:3])
+    if tuple(found[:3]) != parse_version(release)[:3]:
+        raise UpdateError(f"The downloaded update is version {have}, not {release}; not installing it.")
+    if parse_version(release) <= parse_version(current):
+        raise UpdateError(f"The downloaded update is version {have}, which isn't newer than this PC's {current}; "
+                          "not installing it.")
 
 
 # ---- the admin-only download folder ----
@@ -423,6 +502,7 @@ class Updater:
                 if _sha256(target) != expected:
                     raise UpdateError("The downloaded update didn't match its checksum; not installing it.")
                 verify_signature(target, signature, folder)
+                check_installer_version(exe_version(target), version)
                 saved = self._load()
                 saved["pending"] = {"version": version, "started": time.time()}
                 self._save(saved)
@@ -462,7 +542,7 @@ class Updater:
 
 
 if __name__ == "__main__":
-    # Checks a downloaded installer by hand: python -m sshmgr.updater <installer> <installer.sig>
+    # Checks a downloaded installer by hand and shows its version: python -m sshmgr.updater <installer> <installer.sig>
     if len(sys.argv) != 3:
         sys.exit("usage: python -m sshmgr.updater <SSHManager-Setup.exe> <SSHManager-Setup.exe.sig>")
     exe, sigfile = Path(sys.argv[1]), Path(sys.argv[2])
@@ -472,4 +552,6 @@ if __name__ == "__main__":
             verify_signature(exe, sigfile.read_bytes(), Path(tmp))
         except UpdateError as e:
             sys.exit(str(e))
-    print(f"{exe.name}: good release signature")
+    found = exe_version(exe)
+    print(f"{exe.name}: good release signature, " +
+          (f"version {'.'.join(str(n) for n in found[:3])}" if found else "but it doesn't say which version it is"))

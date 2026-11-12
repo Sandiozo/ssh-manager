@@ -62,9 +62,20 @@ class RemoveShortcutBody(BaseModel):
     path: str = Field(min_length=1, max_length=500)
 
 
+def folder_key(path: str) -> str:
+    """Where a folder path leads, for comparing: environment variables expanded, / and \\ alike, "." and ".."
+    worked out, no trailing separator, any case (C:\\Windows\\, C:/Windows and %WINDIR% are one folder)."""
+    p = os.path.expandvars(path.strip())
+    return os.path.normcase(os.path.normpath(p)) if p else ""
+
+
 def same_folder(a: str, b: str) -> bool:
-    """The comparison the dashboard's star uses."""
-    return a.strip().lower() == b.strip().lower()
+    return bool(folder_key(a)) and folder_key(a) == folder_key(b)
+
+
+def has_shortcut(config: dict, path: str) -> bool:
+    """A folder shortcut leads to this folder (the star in Files)."""
+    return any(same_folder(b.get("path", ""), path) for b in config.get("bookmarks", []))
 
 
 ACTION_ID_MAX = 40
@@ -191,34 +202,34 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
 
     @r.post("/settings/bookmarks/add")
     def add_shortcut(request: Request, body: AddShortcutBody):
-        """Adds a folder shortcut (nothing changes when that folder has one already)."""
+        """Adds a folder shortcut (nothing changes when one leads to that folder already). `shortcut`: the one
+        added (None when nothing changed); `starred`: a shortcut leads to the folder now."""
         path = body.path.strip()
         if not path:
             raise HTTPException(400, "Choose a folder.")
         name = (body.name.strip() or path.rstrip("\\/").replace("/", "\\").split("\\")[-1] or path)[:60].strip()
         with cfgfile.lock:
-            shortcuts = config.get("bookmarks", [])
-            added = not any(same_folder(b.get("path", ""), path) for b in shortcuts)
-            if added:
-                store({"bookmarks": [*shortcuts, {"name": name, "path": path}]})
+            shortcut = None if has_shortcut(config, path) else {"name": name, "path": path}
+            if shortcut:
+                store({"bookmarks": [*config.get("bookmarks", []), shortcut]})
             after = current()
-        if added:
+        if shortcut:
             noted(request, "bookmarks")
-        return {"settings": after, "changed": added}
+        return {"settings": after, "changed": bool(shortcut), "shortcut": shortcut, "starred": True}
 
     @r.post("/settings/bookmarks/remove")
     def remove_shortcut(request: Request, body: RemoveShortcutBody):
-        """Removes the shortcuts to a folder (nothing changes when it has none)."""
+        """Removes every shortcut that leads to a folder (nothing changes when none does). `removed`: those
+        shortcuts, as they were saved."""
         with cfgfile.lock:
             shortcuts = config.get("bookmarks", [])
-            kept = [b for b in shortcuts if not same_folder(b.get("path", ""), body.path)]
-            removed = len(kept) != len(shortcuts)
+            removed = [b for b in shortcuts if same_folder(b.get("path", ""), body.path)]
             if removed:
-                store({"bookmarks": kept})
+                store({"bookmarks": [b for b in shortcuts if not same_folder(b.get("path", ""), body.path)]})
             after = current()
         if removed:
             noted(request, "bookmarks")
-        return {"settings": after, "changed": removed}
+        return {"settings": after, "changed": bool(removed), "removed": removed, "starred": False}
 
     @r.post("/settings/actions/add")
     def add_action(request: Request, body: Action):

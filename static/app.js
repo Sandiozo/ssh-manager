@@ -387,8 +387,11 @@ $("#detail").onclick = e => { if (e.target === $("#detail")) $("#detail").close(
 // ---------- files ----------
 const files = {
   path: null, items: [], sel: new Set(), loaded: false, anchor: null,
+  starred: false,   // a folder shortcut leads to the open folder (the server compares where paths lead)
   async loadRoots() {
-    const r = await api("/api/fs/roots");
+    const asked = this.path;
+    const r = await api("/api/fs/roots" + (asked ? "?path=" + encodeURIComponent(asked) : ""));
+    if (asked && asked === this.path && "starred" in r) this.starred = r.starred;
     $("#bookmarks").innerHTML = r.bookmarks.map(b => `<a data-path="${esc(b.path)}" class="${b.exists ? "" : "missing"}" title="${esc(b.path)}">${esc(b.name)}</a>`).join("")
       || `<div class="muted small side-none">None yet. Use ☆ to add one.</div>`;
     $("#drives").innerHTML = r.drives.map(d => `<a data-path="${esc(d.path)}">${esc(d.name)} <small>${fmtBytes(d.free)} free</small></a>`).join("");
@@ -400,7 +403,7 @@ const files = {
     if (!path) return this.loadRoots();
     try {
       const r = await api("/api/fs/list?path=" + encodeURIComponent(path));
-      this.path = r.path; this.parent = r.parent; this.items = r.items; this.sel.clear();
+      this.path = r.path; this.parent = r.parent; this.items = r.items; this.starred = !!r.starred; this.sel.clear();
       store.set("path", r.path);
       this.render();
     } catch (e) { toast(e.message, true); if (!this.path) this.loadRoots(); }
@@ -409,8 +412,7 @@ const files = {
   visible() { return this.items.filter(i => $("#fs-hidden").checked || !i.hidden); },
   markActive() {
     $$(".fs-side a").forEach(a => a.classList.toggle("active", !!this.path && a.dataset.path.toLowerCase() === this.path.toLowerCase()));
-    const starred = settingsUi.saved?.bookmarks.some(b => b.path.toLowerCase() === (this.path || "").toLowerCase());
-    $("#fs-star").textContent = starred ? "★" : "☆";
+    $("#fs-star").textContent = this.starred ? "★" : "☆";
   },
   render() {
     $("#fs-path").value = this.path;
@@ -448,14 +450,17 @@ $("#fs-path").onkeydown = e => { if (e.key === "Enter") files.open(e.target.valu
 $("#fs-hidden").onchange = () => files.render();
 $("#fs-star").onclick = async () => {
   if (!files.path) return;
-  const path = files.path, same = b => b.path.trim().toLowerCase() === path.trim().toLowerCase();
-  const starred = !!settingsUi.saved?.bookmarks.some(same);
+  const path = files.path, starred = files.starred;
   try {
-    if (starred) await settingsUi.change("/api/settings/bookmarks/remove", { path }, d => { d.bookmarks = d.bookmarks.filter(b => !same(b)); });
-    else await settingsUi.change("/api/settings/bookmarks/add", { name: baseName(path), path }, (d, r) => {
-      const b = r.settings.bookmarks.find(same);
-      if (b && !d.bookmarks.some(same)) d.bookmarks.push(structuredClone(b));
-    });
+    // the server says which shortcuts lead to this folder; the open draft gets the same change
+    const r = starred
+      ? await settingsUi.change("/api/settings/bookmarks/remove", { path }, (d, r) => {
+        d.bookmarks = d.bookmarks.filter(b => !r.removed.some(x => x.path === b.path && x.name === b.name));
+      })
+      : await settingsUi.change("/api/settings/bookmarks/add", { name: baseName(path), path }, (d, r) => {
+        if (r.shortcut) d.bookmarks.push(structuredClone(r.shortcut));
+      });
+    if (files.path === path) { files.starred = r.starred; files.markActive(); }
     toast(starred ? "Removed from shortcuts" : "Added to shortcuts");
   } catch (e) { toast(e.message, true); }
 };

@@ -25,6 +25,7 @@ from send2trash import send2trash
 
 from . import agents as agents_mod
 from .activity import ActivityLog
+from .settings import has_shortcut
 
 CHUNK = 1 << 20
 UPLOAD_SUFFIX = ".sshmgr-upload"     # an upload in progress; never listed, never synced
@@ -374,7 +375,8 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
         return skip_for
 
     @r.get("/roots")
-    def roots():
+    def roots(path: str = ""):
+        """Drives and folder shortcuts; with `path`, also whether a shortcut leads to that folder (`starred`)."""
         drives = []
         for part in psutil.disk_partitions():
             try:
@@ -386,7 +388,7 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
         for b in config.get("bookmarks", []):
             p = os.path.expandvars(b["path"])
             bookmarks.append({"name": b["name"], "path": p, "exists": os.path.isdir(p)})
-        return {"drives": drives, "bookmarks": bookmarks}
+        return {"drives": drives, "bookmarks": bookmarks, **({"starred": has_shortcut(config, path)} if path else {})}
 
     @r.get("/list")
     def list_dir(request: Request, path: str):
@@ -402,7 +404,7 @@ def make_router(config: dict, activity: ActivityLog, who, protect) -> APIRouter:
             raise HTTPException(409, f"Can't list {p}: {e.strerror or e}")
         items.sort(key=lambda e: (not e["dir"], e["name"].lower()))
         parent = str(p.parent) if p.parent != p else None
-        return {"path": str(p), "parent": parent, "items": items}
+        return {"path": str(p), "parent": parent, "items": items, "starred": has_shortcut(config, str(p))}
 
     @r.get("/tree")
     def tree(request: Request, path: str, max_files: int = 100_000):

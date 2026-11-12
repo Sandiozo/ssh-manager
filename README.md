@@ -138,8 +138,11 @@ Each PC decides for itself who may manage it: adding PC B on PC A never lets B m
   default. Sync remembers the last state it synced, so it knows which side changed: if a file changed on
   both sides, both copies are kept (the incoming one as `name (conflict <PC> <date>).ext`). A file deleted
   on the PC goes to the Recycle Bin here; a file you delete here isn't fetched again; nothing is ever deleted
-  on the PC. New folder pairs are confirmed in a Windows dialog, and system and private folders (Windows,
-  Program Files, AppData, `.ssh`, Startup) can't be synced.
+  on the PC. When the PC's folder is missing or can't be read completely, nothing is removed here, and
+  when one pass would move many files to the Recycle Bin (more than 200, or more than 20 that are over
+  half of the synced files), it waits until you click **Sync now** and answer **Yes**. New folder pairs
+  are confirmed in a Windows dialog, and system and private folders (Windows, Program Files, AppData,
+  `.ssh`, Startup) can't be synced.
 - **Shared clipboard:** text copied on one computer can be pasted on the others (off until you switch it
   on in the app settings). Text that password managers mark as private is never shared.
 - **Wake-on-LAN:** wake a PC that is asleep or off from its card. The app learns each PC's network card
@@ -330,8 +333,11 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
   each PC can turn the preview off, allow single app windows only, or limit it to a list of apps (other
   windows are then neither listed nor captured, also through the API). The clipboard is off until you
   switch it on.
-- New host keys are accepted the first time the app connects (trust on first use) and checked after that.
-  Before you sign in with a password, the app shows the PC's host key so you can compare it.
+- The app keeps each PC's host key itself and checks it on every connection, at whatever address the PC
+  is reached (also one found by its name or through a VPN). A new PC's key is accepted the first time the
+  app connects (trust on first use); before you sign in with a password, the app shows the key so you can
+  compare it. If a PC later answers with another key, the app doesn't connect until you confirm the new
+  key's fingerprint in **Change connection**.
 - Pairing requests only carry a public key, can only be filed by someone who can already use this PC's
   dashboard, reach only apps connected to this PC, expire after two minutes and change nothing until
   someone clicks **Allow**. The prompt shows the computer that asked, its address and its key fingerprint;

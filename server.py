@@ -178,8 +178,9 @@ def split_host(request: Request) -> tuple[str, str]:
 
 def authorized(request: Request) -> bool:
     """The token, from the X-SSHMgr-Token header or the cookie for this port. Several PCs' dashboards are
-    all on "localhost" (one forwarded port each) and browsers send every localhost cookie to every port,
-    so only the cookie named for the port in the Host header counts: another PC's token never does."""
+    all on "localhost" (one forwarded port each) and a browser sends every localhost cookie to every port
+    (the app keeps a browser profile per PC, but an older app or an ordinary browser doesn't), so only
+    the cookie named for the port in the Host header counts: another PC's token never does."""
     supplied = [request.headers.get("x-sshmgr-token") or "", request.cookies.get(f"{COOKIE}_{split_host(request)[1]}") or ""]
     return any(hmac.compare_digest(s.encode(), TOKEN.encode()) for s in supplied if s)
 

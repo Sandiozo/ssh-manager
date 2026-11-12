@@ -40,7 +40,8 @@ if ($installed) {
 $portText = (@($info) | Where-Object { $_ -like 'SSHMGR-PORT:*' } | Select-Object -First 1) -replace '^SSHMGR-PORT:', ''
 $port = 0
 if (-not [int]::TryParse("$portText".Trim(), [ref]$port) -or $port -lt 1 -or $port -gt 65535) {
-    $why = @($info | Where-Object { $_ -and $_ -notlike 'SSHMGR-*' }) | Select-Object -Last 1
+    # never a line with an SSHMGR- value in it (the token), wherever in the line it stands
+    $why = @($info | Where-Object { $_ -and $_ -notmatch 'SSHMGR-' }) | Select-Object -Last 1
     if ($portText) { Fail "SSH Manager's settings on this PC have an invalid port ('$portText'). Fix ""port"" in its config.json." }
     Fail "SSH Manager's server on this PC couldn't read its settings (config.json): $(if ($why) { $why } else { 'no port' })"
 }

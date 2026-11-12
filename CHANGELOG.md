@@ -5,11 +5,110 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
 
 ## [Unreleased]
 
+### Security
+- AI agents could download SSH Manager's access token, app secret and settings by naming its folder
+  another way (through a junction such as "Documents and Settings", a short name or a subst drive), and
+  read SSH keys through a `.ssh` folder that is a link. Folder downloads and folder listings now check
+  every folder by its real location.
+- AI agents can no longer read a PC's settings, the list of SSH keys allowed to log in or its computer
+  list, at any access level, as the README already said. From a PC's status, activity and runs they get
+  only what their tools show: the computers connected right now and what they run, without the login
+  history, addresses (this PC's own included), key labels or fingerprints; settings, key, pairing,
+  approval and update entries are left out of the activity they see. Their tools keep working: quick
+  actions, configured logs and folder shortcuts come from their own calls.
+- A computer could report stats (such as disk sizes) that ran as script in a PC's dashboard and in the
+  app's All PCs page. Reported stats are now refused unless they are numbers and short names, both pages
+  escape everything they show, and the dashboard has a strict page security policy: only its own script
+  and style files, and no framing by other pages.
+- The app keeps and checks each PC's identity (its SSH host key) itself, at whatever address the PC is
+  reached. Before, a PC found by its computer name was trusted at any address that name led to, so on an
+  untrusted network another computer could stand in for it. A changed key is only accepted in **Add PC**
+  or **Change connection**, after you confirm its fingerprint.
+- Adding a PC that is already in the list holds it to the identity saved for it, and accepting a new
+  identity in place of the saved one also clears that PC's browser data. Removing a PC deletes its saved
+  identity; identities of PCs no longer in the list are cleaned up at the next start.
+- Every PC's dashboard in the app has its own browser profile, and a PC's access token is tied to that
+  PC's own local port. Before, all dashboards shared one profile, so every PC's token was sent to every
+  other PC's server, and a picture, redirect, WebSocket or prefetch a page asked for on another PC's port
+  carried the token along. A PC's browser data is cleared when the PC is removed, when its identity is
+  replaced and when the name or address it is found by changes.
+- A request that is no longer open can't be allowed: an "ask first" request that an AI agent withdrew
+  disappears and a later Allow is refused, and the "allow access?" pairing prompt closes when its request
+  expires and never adds a key for a closed one.
+- A server starting in the desktop session hands its access token to the program on the server's port
+  only when that program really is SSH Manager's server.
+- The access token can no longer appear in the "Couldn't read SSH Manager's settings on this PC" error,
+  in the app, the `sshmgr` tool or the start script.
+- Updates check which version an installer really is before running it: a PC installs an update only
+  when the installer is the version the release names and newer than the one installed. Before,
+  someone able to change the releases page could attach an older, correctly signed installer to a new
+  version number, and every PC would have gone back to that older version.
+- A silent install (as updates run it) no longer puts an older version over a newer one; add
+  `/ALLOWDOWNGRADE` to do that on purpose. Installing the same version again still works.
+
 ### Changed
 - Setting up the server role also sets Windows' OpenSSH Server to start again by itself if it crashes
   (unless its recovery was set up already); before, no PC could connect until someone started it at the PC.
+- Folder sync asks before it moves many files to the Recycle Bin (more than 200, or more than 20 that are
+  over half of the synced ones): nothing happens until you click **Sync now** and answer **Yes** in the
+  app's window.
+- Folder sync with a PC whose SSH Manager is older keeps files here that were deleted on that PC, until
+  that PC is updated: an older server can't say whether its file list is complete. The sync says so.
+- What a PC's dashboard remembers in the app (such as the last folder, the open tab and the command
+  history) starts fresh once after this update, because every PC now has its own browser profile.
 
 ### Fixed
+- Folder sync could move every synced file here to the Recycle Bin when the PC's folder was missing (an
+  unplugged drive, a renamed folder) or part of it couldn't be read. The sync now stops with a message and
+  changes nothing; places the PC couldn't read are left as they are, and the sync says how many.
+- Setting up the server role while a standard user (not an administrator) was signed in failed to
+  register the server's task.
+- A script that started a program that keeps running (a server, an app) showed as running until its time
+  limit, and automatic updates waited for it. A run now ends when its script ends; output in the first
+  moments after that is kept, and the run says that a program it started is still running. Stop and time
+  limits still end the script and what it started while it runs. A program left running may stop, or lose
+  its output, when SSH Manager restarts or updates; if it has to keep running, start it on its own (for
+  example as a scheduled task) with its output going to a file.
+- After Stop or a time limit, the dashboard and `sshmgr` show the end of the run (its last lines and exit
+  code); before, they stopped reading the moment the run was marked stopped. A Stop that can't end the
+  process no longer says it did, and the dashboard says when a run keeps going after Stop. `sshmgr`'s
+  agent tools say when a run was stopped at its time limit, instead of "Exit code 1".
+- A very long line of run output, also one that hasn't ended yet (a progress bar, a program left
+  running), comes as lines of at most 1 MB, so the server's memory, the output file and the activity log
+  stay small.
+- Starring a folder in Files and "Save as quick action" saved the page's whole copy of the settings, which
+  undid changes made meanwhile in another window, by the app or from another computer, and threw away
+  unsaved changes on the Settings tab. Each now adds or removes only its own item.
+- The star in Files knows a folder however its path is written (`C:\Windows\`, `C:/Windows`, `%WINDIR%`),
+  so the shortcuts SSH Manager comes with show as starred and no second shortcut to the same folder is
+  added.
+- Saving a quick action under the same long name more than once gave it an id longer than allowed, and
+  after that nothing in Settings could be saved. Ids now stay within the limit, and one that is already
+  too long is shortened at the next save.
+- A settings change that can't be written (for example while `config.json` is open in another program)
+  changes nothing and says why; trying again saves it. Adding or removing an SSH key at such a moment
+  says that the key was added or removed and only its label wasn't saved, and the activity log has it.
+- A quick action's time limit can't be negative, not-a-number or longer than 7 days, and such a value
+  already in `config.json` no longer breaks the settings page or the quick action list. A folder shortcut
+  there whose path isn't text no longer makes Files fail.
+- When the app can't install an update, it says why next to the update on offer (All PCs and the tray's
+  "Check for updates") until it tries again, and writes it to `app.log`. Before, it only said that the
+  update was available.
+- Allowing another PC to manage this one no longer reports a failure when the key was in fact added, and no
+  longer leaves a key behind for a request nobody could be told about; a key that was there before stays.
+  When this PC's server doesn't answer while the key is added, the app takes the key off again, tells the
+  other computer no and asks you to check Settings → SSH keys, because the add may still finish later.
+- The "allow access?" prompt no longer takes the keyboard while you type elsewhere, stays visible when the
+  main window is minimised, and its Allow button can't be clicked by accident in its first moment.
+  Invisible filler characters and piles of accents are taken out of the names it shows.
+- Reconnect also takes effect while a connection attempt is still under way, and **Reconnect all** and a
+  refused sign-in now really reconnect this PC's own server; before, it could be ignored.
+- A PC whose page couldn't be opened now shows its status page with Retry, instead of leaving the previous
+  page (or an empty one) in the window.
+- The question before removing an SSH key named a folder from one particular PC; it now says the backup is
+  in SSH Manager's data folder on that PC.
+- Folder downloads and folder listings leave out links to folders, as they do junctions, instead of
+  showing them as empty files.
 - A PC busy with builds or games could show as disconnected for half a minute at a time: Windows started
   SSH Manager's server below normal priority, so other programs could take all of the CPU. The server now
   runs above normal priority (it uses very little CPU); the programs it starts still run at normal priority.

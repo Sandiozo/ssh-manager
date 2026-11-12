@@ -73,7 +73,8 @@ The installer asks what the PC should do:
 
 The page shows what is installed already and what will be downloaded. Run the installer again at any time
 to switch roles. For unattended installs: `SSHManager-Setup.exe /VERYSILENT /ROLES=app,server` (or
-`/ROLES=app`); `/SERVERUSER=<account>` picks the administrator account the server runs as. On PCs that
+`/ROLES=app`); `/SERVERUSER=<account>` picks the administrator account the server runs as. A silent
+install doesn't put an older version over a newer one; add `/ALLOWDOWNGRADE` to do that on purpose. On PCs that
 can't reach Windows Update (WSUS, offline), install OpenSSH from its
 [MSI release](https://github.com/PowerShell/Win32-OpenSSH/releases) first; the installer then uses it.
 
@@ -322,7 +323,9 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
 
 - The server listens on `127.0.0.1` only; reaching it from another computer requires SSH access.
 - Every request needs an access token, which the app reads over SSH when it connects. Each PC's dashboard
-  only accepts its own token cookie, which pages can't read.
+  only accepts its own token cookie, which pages can't read. In the app every PC's dashboard has its own
+  browser profile, and its token cookie is tied to that PC's local port, so the browser doesn't send it
+  to another PC's server.
 - The server's home folder (access token, settings, plugins) is made private to you, administrators and
   the system when the server runs with administrator rights, and plugins aren't loaded from a folder other
   accounts can change.
@@ -358,8 +361,8 @@ reports its own computer's CPU, memory and battery to the PCs it is connected to
 - Passwords typed when adding a PC are handed to `ssh` once and never stored.
 - Updates are downloaded from this repository's GitHub releases and installed only when both their SHA-256
   and their release signature (an SSH signature made with this project's release key, or with a backup key
-  kept offline) check out. The
-  server keeps downloaded installers in a folder only administrators can change.
+  kept offline) check out, and the installer itself is the version the release names and newer than the
+  one installed. The server keeps downloaded installers in a folder only administrators can change.
 
 Found a security problem? Please report it privately, see [SECURITY.md](SECURITY.md).
 

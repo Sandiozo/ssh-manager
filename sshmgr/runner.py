@@ -12,6 +12,7 @@ a full pipe), and the run says that a program it started is still running."""
 import base64
 import ctypes
 import html
+import math
 import os
 import re
 import subprocess
@@ -29,6 +30,7 @@ MAX_LINES = 5000
 KEEP_RUNS = 50                    # finished runs kept (runs still going are always kept)
 MAX_OUTPUT = 50 * 1024 * 1024     # bytes of output written to a run's file; the rest is only streamed
 LINGER = 2.0                      # seconds output is still kept after the run's own process has ended
+MAX_RUN_SECONDS = 7 * 24 * 3600   # the longest time limit a run can have
 PREAMBLE = "$ProgressPreference = 'SilentlyContinue'\n[Console]::OutputEncoding = [Text.Encoding]::UTF8\n"
 
 
@@ -54,6 +56,14 @@ def signed(code: int) -> int:
     (-1073741819), as PowerShell and most tools do."""
     code &= 0xFFFFFFFF
     return code - 0x100000000 if code >= 0x80000000 else code
+
+
+def time_limit(value) -> float:
+    """Seconds a run may take (0: no limit) from a value that may come from a hand-edited config.json: a
+    number up to MAX_RUN_SECONDS (a larger one is cut to it); anything else (negative, NaN, text) is no limit."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return 0.0
+    return float(min(value, MAX_RUN_SECONDS))
 
 
 def _iso() -> str:
@@ -169,7 +179,7 @@ class Runner:
             self.runs[run.id] = run
             self.order.append(run.id)
         self._prune()
-        threading.Thread(target=self._pump, args=(run, timeout), daemon=True).start()
+        threading.Thread(target=self._pump, args=(run, time_limit(timeout)), daemon=True).start()
         return run
 
     def _prune(self):

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from . import cfgfile, keys, wol
 from .activity import ActivityLog
+from .runner import MAX_RUN_SECONDS, time_limit
 
 
 class Computer(BaseModel):
@@ -25,7 +26,7 @@ class Action(BaseModel):
     script: str = Field(min_length=1, max_length=100_000)
     group: str = Field("", max_length=40)
     confirm: bool = False
-    timeout: float = 0
+    timeout: float = Field(0, ge=0, le=MAX_RUN_SECONDS, allow_inf_nan=False)   # seconds, 0: no limit
 
 
 class LogEntry(BaseModel):
@@ -60,6 +61,18 @@ class AddShortcutBody(BaseModel):
 
 class RemoveShortcutBody(BaseModel):
     path: str = Field(min_length=1, max_length=500)
+
+
+def actions_shown(actions: list) -> list[dict]:
+    """The quick actions as answers show them: a time limit in config.json that can't be used (negative, NaN,
+    not a number) is left out and one over the maximum is cut to it, so a hand-edited file can't break the
+    answers (NaN can't be sent as JSON) or stop an action the moment it starts."""
+    out = []
+    for a in actions:
+        if isinstance(a, dict) and "timeout" in a and (t := time_limit(a["timeout"])) != a["timeout"]:
+            a = {k: v for k, v in a.items() if k != "timeout"} | ({"timeout": t} if t else {})
+        out.append(a)
+    return out
 
 
 def folder_key(path: str) -> str:
@@ -126,7 +139,7 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
                 "peers": config.get("peers", []), "keys": config.get("keys", {}),
                 "bookmarks": config.get("bookmarks", []), "default_upload": config.get("default_upload", ""),
                 "auto_update": config.get("auto_update", True), "port": config.get("port", 8765),
-                "actions": config.get("actions", []), "logs": config.get("logs", []),
+                "actions": actions_shown(config.get("actions", [])), "logs": config.get("logs", []),
                 "screen_preview": config.get("screen_preview", True), "screen_apps": config.get("screen_apps", []),
                 "screen_monitors": config.get("screen_monitors", True), "ai_access": config.get("ai_access", "full")}
 

@@ -121,10 +121,13 @@ except Exception:
     log.exception("checking the home folder's permissions failed")
 
 import asyncio  # noqa: E402
+import math  # noqa: E402
 import mimetypes  # noqa: E402
 
 import uvicorn  # noqa: E402
 from fastapi import FastAPI, HTTPException, Request  # noqa: E402
+from fastapi.encoders import jsonable_encoder  # noqa: E402
+from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse  # noqa: E402
 from fastapi.staticfiles import StaticFiles  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
@@ -159,6 +162,23 @@ agents = agents_mod.Agents()
 agents.machine_id_of = lambda name: (monitor.clients.get(name.strip().lower()) or {}).get("machine_id") or None
 protect = Protect(HOME, ROOT)
 app = FastAPI(title="SSH Manager", docs_url=None, redoc_url=None)
+
+
+def _finite(v):
+    """NaN and infinity as text: JSON can't carry them back."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return str(v)
+    if isinstance(v, dict):
+        return {k: _finite(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_finite(x) for x in v]
+    return v
+
+
+@app.exception_handler(RequestValidationError)
+async def invalid_request(request: Request, exc: RequestValidationError):
+    """422 as FastAPI answers it, also when the request held NaN or infinity (the error repeats the value)."""
+    return JSONResponse(status_code=422, content={"detail": _finite(jsonable_encoder(exc.errors()))})
 
 NOT_LOGGED_IN = """<!doctype html><meta charset="utf-8"><title>SSH Manager</title>
 <body style="font:15px system-ui;background:#0d1117;color:#e6edf3;display:grid;place-items:center;height:100vh;margin:0">

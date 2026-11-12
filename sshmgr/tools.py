@@ -13,7 +13,8 @@ from pydantic import BaseModel, Field
 
 from . import agents as agents_mod, desktop, logs, protect as protect_mod, wol
 from .activity import ActivityLog
-from .runner import Runner
+from .runner import MAX_RUN_SECONDS, Runner, time_limit
+from .settings import actions_shown
 
 
 def normalize_script(script: str) -> str:
@@ -25,7 +26,7 @@ class RunBody(BaseModel):
     title: str = Field("", max_length=10_000)     # longer titles are shortened, not rejected
     cwd: str = Field("", max_length=1000)         # working directory (environment variables allowed)
     env: dict[str, str] = {}                      # extra environment variables for this run
-    timeout: float = Field(0, ge=0, le=7 * 24 * 3600)   # seconds; the run is stopped (status "timeout") after it
+    timeout: float = Field(0, ge=0, le=MAX_RUN_SECONDS, allow_inf_nan=False)   # seconds; the run is stopped (status "timeout") after it
 
 
 class ClipBody(BaseModel):
@@ -59,7 +60,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
     # ---- quick actions and the command panel ----
     @r.get("/actions")
     def get_actions(request: Request):
-        return {"actions": config.get("actions", []), "runs": recent(request)}
+        return {"actions": actions_shown(config.get("actions", [])), "runs": recent(request)}
 
     @r.post("/actions/{action_id}/run")
     async def run_action(request: Request, action_id: str):
@@ -68,7 +69,7 @@ def make_router(config: dict, activity: ActivityLog, runner: Runner, who, agents
         agent = agents_mod.agent_of(request)
         if agent and a.get("confirm"):
             await approve(request, client, a)
-        run = runner.start(a.get("name", action_id), a.get("script", ""), client, action_id, float(a.get("timeout", 0) or 0),
+        run = runner.start(a.get("name", action_id), a.get("script", ""), client, action_id, time_limit(a.get("timeout")),
                            agent=agent)
         return shown(request, run.view())
 

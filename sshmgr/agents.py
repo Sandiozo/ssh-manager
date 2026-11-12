@@ -11,9 +11,10 @@ Its requests are labelled "<agent> (<computer>)" in the activity log and live se
 
 Whatever the level, agents can never: see or change this PC's settings (/api/settings) or the SSH keys
 allowed to log in; pair computers; see or answer approvals; restart the server or install an update; use
-the clipboard; read or write the server's own files (token, app secret, config.json, plugins, data
-folder) or SSH keys (see protect.py). What their tools need from the settings comes from their own calls:
-quick actions (/api/actions), configured logs (/api/logs) and folder shortcuts (/api/fs/roots). In status
+the clipboard; get this PC's own MAC and IP addresses (/api/whoami, /api/wol/self); read or write the
+server's own files (token, app secret, config.json, plugins, data folder) or SSH keys (see protect.py).
+What their tools need from the settings comes from their own calls: quick actions (/api/actions),
+configured logs (/api/logs) and folder shortcuts (/api/fs/roots). In status
 they see this PC's load, the SSH server, the computers connected right now and what they run, the agents
 active here and how many logins there were (status_for_agent), not the computer list, the login history,
 addresses, MAC addresses, key labels or fingerprints; activity leaves out the settings, key, pairing,
@@ -69,6 +70,7 @@ NEVER = [
     (None, re.compile(r"^/api/server(/|$)"), f"AI agents can't restart or stop the SSH Manager server. {OWNER}"),
     ({"POST"}, re.compile(r"^/api/update/install$"), f"AI agents can't install SSH Manager updates. {OWNER}"),
     (None, re.compile(r"^/api/clipboard(/|$)"), "AI agents can't read or change the clipboard on this PC."),
+    (None, re.compile(r"^/api/(whoami|wol/self)(/|$)"), "AI agents don't get this PC's network addresses (MAC and IP addresses)."),
 ]
 ALWAYS_OPEN = {"/api/ping", "/api/ai"}
 

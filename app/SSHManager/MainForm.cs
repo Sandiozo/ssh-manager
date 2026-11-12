@@ -123,7 +123,11 @@ internal sealed class MainForm : Form
         Controls.Add(web);
 
         pairing = new Pairing(() => links.FirstOrDefault(l => l.Pc.IsLocal));
-        wizard = new SetupWizard(html => { if (webReady) { mainShown = "wizard"; NavigateMain(html); } }, OnWizardDone, FindPeer, pairing);
+        wizard = new SetupWizard(html => { if (webReady) { mainShown = "wizard"; NavigateMain(html); } }, OnWizardDone, FindPeer, pairing)
+        {
+            // adding a PC that is already in the list changes that one, held to the identity saved for it
+            FindSaved = (host, user) => settings.Pcs.FirstOrDefault(p => !p.IsLocal && SameName(p.Host, host) && SameName(p.User, user)),
+        };
         updater = new AppUpdater(settings, (title, text) => Balloon(title, text, ToolTipIcon.Info));
         updater.Changed += () => OnUi(PushOverview);
         sync = new SyncManager(settings, id => linkSnapshot.FirstOrDefault(l => l.Pc.Id == id), () => OnUi(PostSyncState));
@@ -219,6 +223,9 @@ internal sealed class MainForm : Form
     async Task StartAsync()
     {
         ApplyTitleBar();
+        // identities (host keys) kept for PCs that are no longer in the list go, before any connection reads
+        // them; not when the list itself couldn't be read
+        if (!settings.ReadFailed) HostKeys.Sweep(settings.Pcs.Select(p => p.Id));
         links.ForEach(l => l.Start());
         updater.Start();
         poll.Start();
@@ -1407,29 +1414,30 @@ internal sealed class MainForm : Form
         PushPcs();
     }
 
+    static bool SameName(string a, string b) => a.Trim().Equals(b.Trim(), StringComparison.OrdinalIgnoreCase);
+
     void OnWizardDone(PcEntry? pc)
     {
         wizardOpen = false;
         mainShown = "";
         if (pc is not null)
         {
-            // adding a PC that is already in the list updates that entry instead of adding it twice
-            var existing = settings.Pcs.FirstOrDefault(p => p.Id == pc.Id)
-                ?? settings.Pcs.FirstOrDefault(p => p.Host.Equals(pc.Host, StringComparison.OrdinalIgnoreCase)
-                                                    && p.User.Equals(pc.User, StringComparison.OrdinalIgnoreCase));
-            if (existing is not null) pc.Id = existing.Id;
+            // adding a PC that is already in the list updates that entry instead of adding it twice: the wizard
+            // found it (FindSaved), held it to the identity saved for it, and gives back its id
+            var existing = settings.Pcs.FirstOrDefault(p => p.Id == pc.Id);
             if (existing is not null)
             {
-                // the entry may now lead to another computer (another address, or another name to look up):
-                // nothing the old one's pages stored is kept for it
-                static bool Same(string a, string b) => a.Trim().Equals(b.Trim(), StringComparison.OrdinalIgnoreCase);
-                if (!Same(existing.Host, pc.Host) || !Same(existing.LookupName, pc.LookupName)) ForgetBrowserData(existing.Id, pcRemoved: false);
+                // the entry may now lead to another computer (another address, another name to look up, or an
+                // identity the user accepted in place of the saved one): nothing the old one's pages stored is kept for it
+                if (!SameName(existing.Host, pc.Host) || !SameName(existing.LookupName, pc.LookupName) || wizard.LastKeyReplaced)
+                    ForgetBrowserData(existing.Id, pcRemoved: false);
                 lock (settings.Gate)
                 {
                     existing.Host = pc.Host;
                     existing.User = pc.User;
                     existing.KeyFile = pc.KeyFile;
                     existing.LookupName = pc.LookupName;
+                    existing.KeySaved = pc.KeySaved;   // the wizard saved its identity under this id
                     existing.PcName = "";
                 }
                 if (links.FirstOrDefault(l => l.Pc == existing) is { } link)
@@ -1463,6 +1471,7 @@ internal sealed class MainForm : Form
         ForgetBrowserData(link.Pc.Id, pcRemoved: true);
         reconnecting.Remove(link.Pc.Id);
         link.Dispose();
+        HostKeys.Forget(link.Pc.Id);   // its saved identity (host key)
         if (viewFailed == link.Pc.Id) viewFailed = null;
         links.Remove(link);
         linkSnapshot = links.ToArray();

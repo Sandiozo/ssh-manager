@@ -104,6 +104,7 @@ internal sealed class AppSettings
             try { File.Move(FilePath, $"{FilePath}.bad-{DateTime.Now:yyyyMMdd-HHmmss}"); } catch (Exception) { }
             try { s = File.Exists(bak) ? Read(bak) : new(); }
             catch (Exception e2) { AppLog.Write("settings.json.bak could not be read either", e2); s = new(); }
+            s.ReadFailed = true;
         }
         if (s.MachineId == "") s.MachineId = Guid.NewGuid().ToString("N");
         if (s.Pcs.Count == 0 && s.legacy.Host != "")
@@ -114,6 +115,10 @@ internal sealed class AppSettings
         s.Save();
         return s;
     }
+
+    /// <summary>settings.json couldn't be read at start-up (what is here came from its backup, or is empty): what
+    /// is kept for each PC elsewhere is not cleaned up against this list.</summary>
+    [JsonIgnore] public bool ReadFailed { get; private set; }
 
     /// <summary>Lock for the lists (PCs, sync pairs) when they are read or changed off the window thread.</summary>
     [JsonIgnore] public object Gate { get; } = new();

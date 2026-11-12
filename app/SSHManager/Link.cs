@@ -250,7 +250,7 @@ internal sealed partial class Link : IDisposable
         {
             // nobody may be listening on the port before the server: check again once it's up
             if (PortOwner.CheckServer(Port, folder, nothingIsOk: true) is { } squatted) return squatted;
-            StartLocalServer(folder);
+            await LocalServer.StartAsync(folder, ct);
             var deadline = DateTime.UtcNow.AddSeconds(30);
             while (!await AliveAsync(Port, ct))
             {
@@ -291,27 +291,6 @@ internal sealed partial class Link : IDisposable
             if (m.Groups[2].Value.Trim() is { Length: >= 8 } secret) text = text.Replace(secret, "[hidden]");
         if (text.Length > 1000) text = "…" + text[^1000..];
         return text == "" ? "Couldn't read SSH Manager's settings on this PC." : "Couldn't read SSH Manager's settings on this PC:\n\n" + text;
-    }
-
-    static void StartLocalServer(string folder)
-    {
-        // The logon task the installer creates runs it with admin rights; fall back to a plain start.
-        try
-        {
-            using var schtasks = Process.Start(new ProcessStartInfo("schtasks.exe", "/run /tn \"SSH Manager\"")
-            { CreateNoWindow = true, UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true })!;
-            schtasks.WaitForExit(5000);
-            if (schtasks.ExitCode == 0) return;
-        }
-        catch (Exception) { }
-        var exe = Path.Combine(folder, "SSHManagerServer.exe");
-        var psi = File.Exists(exe)
-            ? new ProcessStartInfo(exe, "--log-console")
-            : new ProcessStartInfo(Path.Combine(folder, @".venv\Scripts\pythonw.exe"), "server.py");
-        psi.WorkingDirectory = folder;
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-        Process.Start(psi);
     }
 
     /// <param name="lookup">Look the computer name up (Windows name resolution) instead of using the saved

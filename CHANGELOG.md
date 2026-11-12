@@ -119,6 +119,10 @@ version is available on the [releases page](https://github.com/Sandiozo/ssh-mana
   another account, whose session was left disconnected at the console: the server then ran without a
   screen, and the app on the PC started a second copy without admin rights. The server now runs for the
   account the installer was started from.
+- Right after an update, or when the PC was busy, the app could start a second copy of this PC's server
+  while the first was still starting up. The copy has no admin rights; it normally found the port taken and
+  stopped, but had it been first, the server would have run without admin rights. The app now waits for a
+  server that is starting up, and for a running update, instead of starting a copy.
 
 ## [1.7.2] - 2026-10-28
 

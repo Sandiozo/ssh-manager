@@ -294,8 +294,10 @@ def login(request: Request, token: str = ""):
 
 
 @app.get("/api/status")
-def status():
+def status(request: Request):
     s = monitor.status(agents.tunnel_agents())
+    if agents_mod.is_agent(request):
+        s.pop("peers", None)   # the computer list is part of the settings, which agents can't see
     return {**s, "plugins": loaded_plugins, "version": __version__, "update": updater.snapshot(),
             "activity_24h": activity.counts_24h(), "agents": agents.recent(), "ai_access": agents_mod.level(config),
             "security": {"home_private": home_mod.security["private"], "warnings": home_mod.security["warnings"]},

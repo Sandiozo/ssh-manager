@@ -9,9 +9,12 @@ Its requests are labelled "<agent> (<computer>)" in the activity log and live se
     read    looking only: status, activity, logs, files and downloads, screenshots, run output (GET requests)
     full    everything a person can do from the dashboard (default)
 
-Whatever the level, agents can never: change settings, SSH keys or pairing; see or answer approvals;
+Whatever the level, agents can never: see or change this PC's settings (/api/settings, the list of
+computers in /api/status) or the SSH keys allowed to log in; pair computers; see or answer approvals;
 restart the server or install an update; use the clipboard; read or write the server's own files (token,
-app secret, config.json, plugins, data folder) or SSH keys (see protect.py). A quick action with
+app secret, config.json, plugins, data folder) or SSH keys (see protect.py). What their tools need from
+the settings comes from their own calls: quick actions (/api/actions), configured logs (/api/logs) and
+folder shortcuts (/api/fs/roots). A quick action with
 "confirm": true - or a script identical to one - started by an agent waits until someone clicks Allow
 in an SSH Manager app (on this PC, or on the computer the agent works from), and is refused after
 APPROVAL_TTL seconds or on Deny. Only the app can answer: it proves itself with the app secret
@@ -52,7 +55,11 @@ NEVER = [
      "AI agents can't see or answer approvals; a person answers them in the SSH Manager app."),
     (None, re.compile(r"^/api/pair(/|$)"), f"AI agents can't pair computers. {OWNER}"),
     ({"PUT", "POST", "PATCH", "DELETE"}, re.compile(r"^/api/settings(/|$)"), f"AI agents can't change this PC's settings. {OWNER}"),
+    (None, re.compile(r"^/api/settings(/|$)"),
+     "AI agents can't see this PC's settings. Its quick actions, logs and folder shortcuts are listed by "
+     "/api/actions, /api/logs and /api/fs/roots."),
     ({"PUT", "POST", "PATCH", "DELETE"}, re.compile(r"^/api/keys(/|$)"), f"AI agents can't add or remove SSH keys. {OWNER}"),
+    (None, re.compile(r"^/api/keys(/|$)"), "AI agents can't see which SSH keys may log in to this PC."),
     (None, re.compile(r"^/api/server(/|$)"), f"AI agents can't restart or stop the SSH Manager server. {OWNER}"),
     ({"POST"}, re.compile(r"^/api/update/install$"), f"AI agents can't install SSH Manager updates. {OWNER}"),
     (None, re.compile(r"^/api/clipboard(/|$)"), "AI agents can't read or change the clipboard on this PC."),

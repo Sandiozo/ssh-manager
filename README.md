@@ -257,10 +257,12 @@ example `Claude (LAPTOP)` instead of only the computer.
 | **Read-only** | only look: status, activity, logs, files and downloads, screenshots |
 | **Off** | do nothing |
 
-Whatever the setting, agents can never: change settings, SSH keys or pairing; answer approval or pairing
-requests; use the clipboard; restart the server or install updates; or read or change SSH Manager's access
-token, settings and plugins or SSH keys on the PC. The screen settings (whole screens, the list of apps that
-can be viewed) apply to them too. A quick action marked **ask first** that an agent starts, or a script
+Whatever the setting, agents can never: see or change the PC's settings (its computer list included) or
+which SSH keys may log in; pair computers; answer approval or pairing requests; use the clipboard; restart
+the server or install updates; or read or change SSH Manager's own files (access token, settings, plugins)
+or SSH keys on the PC. Of the settings, agents only get what their tools show: the quick actions with
+their scripts, the configured logs and the folder shortcuts. The screen settings (whole screens, the list
+of apps that can be viewed) apply to them too. A quick action marked **ask first** that an agent starts, or a script
 identical to one, waits until someone clicks **Allow** in an SSH Manager app, on that PC or on the computer
 the agent works from. Only the app can answer; if nobody answers within two minutes, or someone clicks
 **Deny**, it doesn't run.

@@ -20,7 +20,7 @@ class Computer(BaseModel):
 
 
 class Action(BaseModel):
-    id: str = Field("", max_length=40)
+    id: str = Field("", max_length=200)   # saved cut to 40 (new_action_id): an older too-long id doesn't block saving
     name: str = Field(min_length=1, max_length=60)
     script: str = Field(min_length=1, max_length=100_000)
     group: str = Field("", max_length=40)
@@ -67,10 +67,19 @@ def same_folder(a: str, b: str) -> bool:
     return a.strip().lower() == b.strip().lower()
 
 
+ACTION_ID_MAX = 40
+
+
 def new_action_id(wanted: str, name: str, used: set) -> str:
-    aid = (wanted or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "action")[:40]
+    """A quick action's id: `wanted` (the id the page sent back) or one made from the name, cut to
+    ACTION_ID_MAX characters, with -2, -3, ... when it is taken. Never longer than ACTION_ID_MAX, so an id
+    that is too long in config.json (older versions could make one) is shortened when the settings are saved."""
+    base = wanted or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "action"
+    aid, n = base[:ACTION_ID_MAX], 2
     while aid in used:
-        aid += "-2"
+        suffix = f"-{n}"
+        aid = base[:ACTION_ID_MAX - len(suffix)].rstrip("-") + suffix
+        n += 1
     return aid
 
 
@@ -141,10 +150,15 @@ def make_router(config: dict, config_path: Path, data_dir: Path, activity: Activ
         config["bookmarks"] = [{"name": b.name.strip(), "path": b.path.strip()} for b in body.bookmarks]
         config["default_upload"] = body.default_upload.strip()
         config["auto_update"] = body.auto_update
-        used = set()
+        # ids that can stay are kept first, so an id that has to change (new, taken or too long) can't take one
+        kept, used = {}, set()
+        for i, a in enumerate(body.actions):
+            if a.id and len(a.id) <= ACTION_ID_MAX and a.id not in used:
+                kept[i] = a.id
+                used.add(a.id)
         actions = []
-        for a in body.actions:
-            aid = new_action_id(a.id, a.name, used)
+        for i, a in enumerate(body.actions):
+            aid = kept.get(i) or new_action_id(a.id, a.name, used)
             used.add(aid)
             actions.append({"id": aid, "name": a.name.strip(), "script": a.script, "group": a.group.strip(),
                             "confirm": a.confirm, **({"timeout": a.timeout} if a.timeout else {})})
